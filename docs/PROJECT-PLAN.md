@@ -44,7 +44,7 @@ flowchart TB
         S3["S3 Media Bucket<br/>(private, zero public access)"]
         DDB["DynamoDB<br/>(on-demand, single-table)"]
         SQS["SQS<br/>(delivery queue + DLQ)"]
-        SM["Secrets Manager<br/>RSA Keypairs"]
+        SM["SSM Parameter Store<br/>RSA Keypairs"]
     end
 
     subgraph "activity-app-{stage}"
@@ -121,10 +121,10 @@ Long-lived per-environment data stores and queues. Prod and stage each get their
 | S3 Media Bucket | **Private, zero public access.** `BlockPublicAccess: true` on all four settings. No bucket policy by default — OAC policy added by app stack. |
 | DynamoDB Table | Single-table design (actors, statuses, followers, activities, media metadata). On-demand billing. |
 | SQS Queue + DLQ | Outbound delivery fan-out. Visibility timeout 120s. |
-| Secrets Manager (naming convention) | RSA keypairs per actor, created by a provisioning CLI — not pre-created in CloudFormation. The environment stack just exports the prefix `activity/{stage}/` so Lambdas know where to look. Actor provisioning (key generation + DynamoDB seed) is a CLI operation, not a stack resource. |
+| SSM Parameter Store (naming convention) | RSA keypairs per actor stored as SecureString parameters under `/activity/{stage}/keys/{username}`. Created by a provisioning CLI — not pre-created in CloudFormation. The environment stack just exports the prefix so Lambdas know where to look. Actor provisioning (key generation + DynamoDB seed) is a CLI operation, not a stack resource. Zero cost (Standard tier SecureString, KMS-encrypted). |
 
 **Imports:** bootstrap exports.
-**Exports:** `MediaBucketName`, `MediaBucketArn`, `TableName`, `TableArn`, `QueueUrl`, `QueueArn`, `SecretsPrefix`
+**Exports:** `MediaBucketName`, `MediaBucketArn`, `TableName`, `TableArn`, `QueueUrl`, `QueueArn`, `SSMKeyPrefix`
 
 #### `activity-app-{stage}` (all compute + CDN)
 
@@ -153,7 +153,7 @@ Everything that runs code or serves traffic. Two API Gateways (federation + clie
 | λ media-upload | `POST /api/v2/media` — receive upload, PutObject to S3, write metadata to DynamoDB |
 
 **IAM principles:**
-- Federation Lambdas: `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:PutItem` (inbox only), `dynamodb:DeleteItem` (inbox only), `dynamodb:UpdateItem` (inbox — like/boost count increment), `sqs:SendMessage`, `secretsmanager:GetSecretValue`. **Zero S3 permissions** — CloudFront OAC handles media serving.
+- Federation Lambdas: `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:PutItem` (inbox only), `dynamodb:DeleteItem` (inbox only), `dynamodb:UpdateItem` (inbox — like/boost count increment), `sqs:SendMessage`, `ssm:GetParameter` (with decryption). **Zero S3 permissions** — CloudFront OAC handles media serving.
 - Client Lambdas: `dynamodb:PutItem`, `dynamodb:GetItem`, `dynamodb:Query`, `s3:PutObject` (media bucket), `sqs:SendMessage`, `cloudfront:CreateInvalidation`. **No S3 read/delete.**
 
 Media uploads flow **through the Lambda** — the client never gets a presigned URL or direct S3 access. The bucket stays dark.
@@ -609,7 +609,7 @@ components:
       scheme: bearer
       description: |
         Bearer token. MVP uses per-actor shared secret stored in
-        Secrets Manager. OAuth2 planned for Mastodon client compat (Phase 6).
+        SSM Parameter Store. OAuth2 planned for Mastodon client compat (Phase 6).
 
   parameters:
     username:
@@ -877,12 +877,12 @@ Resources:
   ActorsTable (DynamoDB, on-demand, single-table)
   DeliveryQueue (SQS, visibility timeout 120s)
   DeliveryDLQ (SQS)
-  ActorKeys (Secrets Manager, prefix: activity/{stage}/)
+  ActorKeys (SSM Parameter Store SecureString, prefix: /activity/{stage}/keys/)
 Outputs:
   MediaBucketName, MediaBucketArn,
   TableName, TableArn,
   QueueUrl, QueueArn,
-  SecretsPrefix
+  SSMKeyPrefix
 ```
 
 ### `activity-app/template.yaml`
@@ -946,7 +946,7 @@ Resources:
       - DynamoDB: PutItem, GetItem, Query (environment table)
       - SQS: SendMessage (environment queue)
       - CloudFront: CreateInvalidation (own distribution)
-      - SecretsManager: GetSecretValue (environment keys)
+      - SSM: GetParameter with decryption (environment keys)
   MediaUploadFunction:
     Timeout: 60
     Policies:
@@ -972,7 +972,7 @@ Package.swift (swift-tools-version: 6.0)
 │   │   │   └── WebFingerResponse.swift
 │   │   ├── Crypto/
 │   │   │   ├── HTTPSignature.swift      # Sign + verify (RSA-SHA256)
-│   │   │   └── KeyManager.swift         # Secrets Manager integration
+│   │   │   └── KeyManager.swift         # SSM Parameter Store integration
 │   │   ├── Storage/
 │   │   │   ├── DynamoDBStore.swift
 │   │   │   └── S3MediaStore.swift
@@ -1012,7 +1012,7 @@ Package.swift (swift-tools-version: 6.0)
 |---------|-----|
 | `swift-aws-lambda-runtime` | Lambda handler framework |
 | `swift-aws-lambda-events` | API Gateway REST API (`APIGatewayRequest`/`APIGatewayResponse`) + SQS event types |
-| `soto` (or `aws-sdk-swift`) | DynamoDB, S3, SQS, Secrets Manager, CloudFront |
+| `soto` (or `aws-sdk-swift`) | DynamoDB, S3, SQS, SSM, CloudFront |
 | `swift-crypto` | RSA-SHA256 signing/verification |
 | `swift-docc-plugin` | Documentation |
 
@@ -1039,7 +1039,7 @@ The `Makefile` should produce a flat binary + `bootstrap` symlink per handler, z
 - **Milestone:** `@randomforms@happitec.com` resolves in Mastodon search (even if the profile is static/empty)
 
 ### Phase 1 — Full read-only presence
-- Deploy `activity-environment-stage` (S3 bucket, DynamoDB, SQS, Secrets Manager)
+- Deploy `activity-environment-stage` (S3 bucket, DynamoDB, SQS)
 - Deploy `activity-app-stage` with real webfinger, actor, empty outbox, CloudFront, API Gateway custom domains
 - Seed a test actor in DynamoDB with RSA keypair (CLI tool or script)
 - **Milestone:** `@randomforms@happitec.com` shows live profile data from DynamoDB
@@ -1077,7 +1077,7 @@ The `Makefile` should produce a flat binary + `bootstrap` symlink per handler, z
 
 1. **Handle domain:** Handles as `@name@happitec.com` requires WebFinger on `happitec.com/.well-known/webfinger`, which means either deploying to `happitec.com` or setting up a redirect/proxy from `happitec.com` to `activity.happitec.com`. The server lives at `activity.happitec.com` either way. Once federated, handles are permanent — this decision is irreversible.
 
-2. **Auth model for posting:** Simple bearer token per actor (fast to build, stored in Secrets Manager) vs. OAuth2 from day one (needed for Mastodon client apps). Bearer token MVP means Phase 6 requires migration.
+2. **Auth model for posting:** Simple bearer token per actor (fast to build, stored in SSM Parameter Store) vs. OAuth2 from day one (needed for Mastodon client apps). Bearer token MVP means Phase 6 requires migration.
 
 3. **`everyplace.social`:** Separate deployment or multi-domain support in the same infra? Same code, different bootstrap stack + config. ActivityPub ties actors to domains permanently, so this is also irreversible.
 
@@ -1085,7 +1085,7 @@ The `Makefile` should produce a flat binary + `bootstrap` symlink per handler, z
 
 5. **HTTP Signatures vs. RFC 9421:** Mastodon 4.5+ validates both. The draft standard has wider compatibility with older servers. Build draft first, add RFC 9421 later.
 
-6. **Actor provisioning:** How are new actors created? Options: (a) CLI tool that generates RSA keypair, writes to Secrets Manager, seeds DynamoDB actor record. (b) Small admin Lambda behind an authed endpoint. (c) Manual DynamoDB + Secrets Manager writes. Recommendation: CLI tool — keeps it simple, scriptable, no extra infrastructure.
+6. **Actor provisioning:** How are new actors created? Options: (a) CLI tool that generates RSA keypair, writes to SSM Parameter Store as SecureString, seeds DynamoDB actor record. (b) Small admin Lambda behind an authed endpoint. (c) Manual DynamoDB + SSM writes. Recommendation: CLI tool — keeps it simple, scriptable, no extra infrastructure.
 
 7. **Rate limiting / WAF:** The inbox endpoint is publicly writable by any federated server. API Gateway throttling should be configured (e.g. 100 req/s default, 200 burst). WAF on CloudFront is advisable for production but overkill for MVP. Flag for Phase 5+.
 
