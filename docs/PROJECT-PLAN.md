@@ -50,6 +50,7 @@ flowchart TB
     subgraph "activity-app-{stage}"
         CF["CloudFront<br/>(OAC → S3, cache-until-invalidated)"]
         APIGW_S["API Gateway<br/>(federation)"]
+        NI["λ nodeinfo"]
         WF["λ webfinger"]
         ACTOR["λ actor"]
         OBJECT["λ object"]
@@ -63,6 +64,7 @@ flowchart TB
         MEDIA["λ media-upload"]
     end
 
+    FED -->|"GET /.well-known/nodeinfo"| CF
     FED -->|"GET /.well-known/webfinger"| CF
     FED -->|"GET /users/:name"| CF
     FED -->|"POST /users/:name/inbox"| APIGW_S
@@ -73,6 +75,7 @@ flowchart TB
 
     CF -->|"OAC (read-only)"| S3
     CF --> APIGW_S
+    APIGW_S --> NI
     APIGW_S --> WF
     APIGW_S --> ACTOR
     APIGW_S --> OBJECT
@@ -81,6 +84,7 @@ flowchart TB
     APIGW_S --> FOLLOWERS
     APIGW_S --> FOLLOWING
 
+    NI --> DDB
     WF --> DDB
     ACTOR --> DDB
     ACTOR --> SM
@@ -143,10 +147,14 @@ Everything that runs code or serves traffic. Two API Gateways (federation + clie
 | CloudFront OAC | Origin Access Control for the environment's S3 media bucket. |
 | S3 Bucket Policy | Grants OAC read-only access to the environment's media bucket. |
 | API Gateway (REST API) | Federation endpoints (`{stage}.activity.happitec.com`) |
+| λ nodeinfo | `GET /.well-known/nodeinfo` + `GET /nodeinfo/2.1` |
 | λ webfinger | `GET /.well-known/webfinger` |
 | λ actor | `GET /users/{username}` |
 | λ inbox | `POST /users/{username}/inbox` (signature verification) |
 | λ outbox | `GET /users/{username}/outbox` |
+| λ object | `GET /users/{username}/statuses/{id}` |
+| λ followers | `GET /users/{username}/followers` |
+| λ following | `GET /users/{username}/following` (empty collection) |
 | λ deliver | SQS consumer → signed HTTP POST to remote inboxes |
 
 **Client surface (write path):**
@@ -174,9 +182,11 @@ Cache-until-invalidated. The `λ post` function fires a CloudFront invalidation 
 
 | Path Pattern | TTL | Invalidation Trigger | Origin |
 |---|---|---|---|
+| `/.well-known/nodeinfo`, `/nodeinfo/*` | 24h | Actor create/delete (rare) | API Gateway |
 | `/.well-known/webfinger*` | 24h, **cache key includes `resource` query param** | Actor create/delete | API Gateway |
-| `/users/*/outbox*` | 365d (effectively indefinite) | New post (`λ post` invalidates) | API Gateway |
-| `/users/*` (GET, no /inbox) | 24h | Profile update | API Gateway |
+| `/users/*/outbox*` | 365d (effectively indefinite), **cache key includes `page`, `min_id`, `max_id` query params** | New post (`λ post` invalidates) | API Gateway |
+| `/users/*/statuses/*` | 365d (effectively indefinite) | Post edit/delete (`λ post` or `λ inbox` invalidates) | API Gateway |
+| `/users/*` (GET, no /inbox, /statuses, /outbox, /followers, /following) | 24h | Profile update | API Gateway |
 | `/users/*/followers*` | 1h | Follow/unfollow | API Gateway |
 | `/media/*` | Immutable (365d, `Cache-Control: immutable`) | Never | S3 via OAC |
 | `POST /users/*/inbox` | No cache (POST passthrough) | — | API Gateway |
@@ -352,6 +362,8 @@ Response (Content-Type: `application/activity+json`):
 
 Note: `type: "Service"` signals to other servers that this is a bot/service account, not a human. This is correct for app brand accounts.
 
+Note: `manuallyApprovesFollowers: false` means all Follow requests are auto-accepted. If set to `true`, inbox would need to store pending follows and expose an approval API — out of scope for MVP. Hardcode `false` in Phase 2; revisit if we need approval flows later.
+
 #### `inbox` — `POST /users/{username}/inbox`
 
 Receives activities from remote servers. Must verify HTTP Signatures.
@@ -407,7 +419,7 @@ Returns an empty `OrderedCollection` with `totalItems: 0`. Brand/service account
 
 #### `post` — `POST /api/v1/statuses`
 
-Create a new status. Writes to DynamoDB (environment table), fans out delivery jobs to SQS (environment queue), fires CloudFront invalidation for outbox.
+Create a new status. Writes to DynamoDB (environment table), atomically increments `statusCount` on the actor profile via `UpdateItem`, fans out delivery jobs to SQS (environment queue), fires CloudFront invalidation for outbox.
 
 **Critical: `to`/`cc` addressing on Create activities.** Every outbound `Create` activity and its embedded `Note` must include:
 ```json
@@ -456,6 +468,83 @@ servers:
 
 paths:
   # ── App Stack — Federation ──────────────────────────
+
+  /.well-known/nodeinfo:
+    get:
+      operationId: nodeInfoDiscovery
+      summary: NodeInfo discovery document
+      tags: [federation]
+      description: |
+        Returns a JRD with a link to `/nodeinfo/2.1`. Mastodon 4.x and GoToSocial
+        query this for federation health checks. Served from CloudFront cache (24h).
+      responses:
+        "200":
+          description: NodeInfo discovery links
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  links:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        rel:
+                          type: string
+                          example: "http://nodeinfo.diaspora.software/ns/schema/2.1"
+                        href:
+                          type: string
+                          format: uri
+                          example: "https://activity.happitec.com/nodeinfo/2.1"
+
+  /nodeinfo/2.1:
+    get:
+      operationId: nodeInfo
+      summary: NodeInfo 2.1 server metadata
+      tags: [federation]
+      description: |
+        Server metadata: software name/version, protocols, user/status counts,
+        open registrations (false). Mostly static. Served from CloudFront cache (24h).
+      responses:
+        "200":
+          description: NodeInfo 2.1 document
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                    example: "2.1"
+                  software:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                        example: "activity-happitec"
+                      version:
+                        type: string
+                  protocols:
+                    type: array
+                    items:
+                      type: string
+                    example: ["activitypub"]
+                  usage:
+                    type: object
+                    properties:
+                      users:
+                        type: object
+                        properties:
+                          total:
+                            type: integer
+                          activeMonth:
+                            type: integer
+                      localPosts:
+                        type: integer
+                  openRegistrations:
+                    type: boolean
+                    example: false
 
   /.well-known/webfinger:
     get:
@@ -868,6 +957,13 @@ components:
         in_reply_to_id:
           type: string
           description: ID of status being replied to
+        quote_id:
+          type: string
+          description: |
+            ID of status being quoted. On the ActivityPub side, the Note includes
+            `quoteUrl` pointing to the quoted Note's URI. Mastodon 4.3+ renders this
+            as an inline quote. FEP-e232 is the emerging standard; we also emit a
+            `tag` entry with `type: Link` for broader compatibility.
 
     Status:
       type: object
@@ -967,7 +1063,8 @@ Resources:
   ActorsTable (DynamoDB, on-demand, single-table)
   DeliveryQueue (SQS, visibility timeout 120s)
   DeliveryDLQ (SQS)
-  ActorKeys (SSM Parameter Store SecureString, prefix: /activity/{stage}/keys/)
+  # SSM Parameter Store keys are NOT CloudFormation resources — they're created by the provisioning CLI.
+  # The template just exports the naming prefix so Lambdas know where to look.
 Outputs:
   MediaBucketName, MediaBucketArn,
   TableName, TableArn,
@@ -1001,16 +1098,21 @@ Resources:
       - ServerDomainName (custom domain, avoids stage-prefix stripping issues)
       - S3 (media, via OAC — read-only, references environment bucket)
     CacheBehaviors:
-      - /.well-known/*: TTL 24h, cache key includes `resource` query string parameter (CloudFront CachePolicy with QueryStringsConfig whitelist)
-      - /users/*/outbox*: TTL 365d (invalidated on post)
+      - /.well-known/nodeinfo: TTL 24h
+      - /nodeinfo/*: TTL 24h
+      - /.well-known/webfinger: TTL 24h, cache key includes `resource` query string parameter (CloudFront CachePolicy with QueryStringsConfig whitelist)
+      - /users/*/outbox*: TTL 365d (invalidated on post), cache key includes `page`, `min_id`, `max_id` query params
+      - /users/*/statuses/*: TTL 365d (invalidated on edit/delete)
       - /users/*/followers*: TTL 1h
-      - /users/*: TTL 24h (actor profiles)
+      - /users/*: TTL 24h (actor profiles, catch-all for GET)
       - /media/*: TTL 365d, Cache-Control immutable
     DefaultCacheBehavior: no cache (POST passthrough)
   CloudFrontOAC (Origin Access Control for S3)
   MediaBucketPolicy (allow OAC read-only — references environment bucket)
   ServerApi (API Gateway REST API):
     Routes:
+      - GET /.well-known/nodeinfo → NodeInfoFunction
+      - GET /nodeinfo/2.1 → NodeInfoFunction
       - GET /.well-known/webfinger → WebFingerFunction
       - GET /users/{username} → ActorFunction
       - POST /users/{username}/inbox → InboxFunction
@@ -1018,14 +1120,20 @@ Resources:
       - GET /users/{username}/statuses/{id} → ObjectFunction
       - GET /users/{username}/followers → FollowersFunction
       - GET /users/{username}/following → FollowingFunction
-  WebFingerFunction, ActorFunction, ObjectFunction, InboxFunction, OutboxFunction, FollowersFunction, FollowingFunction
+  NodeInfoFunction, WebFingerFunction, ActorFunction, ObjectFunction, InboxFunction, OutboxFunction, FollowersFunction, FollowingFunction
   DeliverFunction:
     Timeout: 60 (outbound HTTP to remote servers can be slow)
     ReservedConcurrentExecutions: 5 (prevent runaway fan-out)
+    Policies:
+      - DynamoDB: GetItem, Query (environment table — read status + actor + follower data)
+      - SSM: GetParameter with decryption (environment keys — actor private key for HTTP Signatures)
+      - SQS: ReceiveMessage, DeleteMessage, GetQueueAttributes (environment queue — implicit via SAM Events, but explicit for clarity)
   InboxFunction:
     Policies:
       - DynamoDB: GetItem, PutItem, DeleteItem, UpdateItem, Query (environment table)
       - SQS: SendMessage (environment queue)
+      - SSM: GetParameter with decryption (environment keys — for signature verification key cache refresh)
+      - CloudFront: CreateInvalidation (own distribution — for Delete activity cache busting)
 
   # ── Client (write path) ────────────────
   ClientApi (API Gateway REST API, separate domain):
@@ -1071,6 +1179,7 @@ Package.swift (swift-tools-version: 6.0)
 │   │   └── Delivery/
 │   │       └── ActivityDelivery.swift    # Build + sign + POST
 │   │
+│   ├── NodeInfoHandler/              # App stack — federation (/.well-known/nodeinfo + /nodeinfo/2.1)
 │   ├── WebFingerHandler/             # App stack — federation
 │   ├── ActorHandler/                 # App stack — federation
 │   ├── ObjectHandler/                # App stack — federation (single status fetch)
