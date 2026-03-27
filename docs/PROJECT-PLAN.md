@@ -295,7 +295,7 @@ Single-table design. Partition key `PK`, sort key `SK`. GSI1 for reverse lookups
 | Entity | PK | SK | Attributes |
 |--------|----|----|------------|
 | Actor | `ACTOR#{username}` | `PROFILE` | displayName, summary, avatarUrl, headerUrl, publicKeyPem, privateKeyArn, createdAt, discoverable, manuallyApprovesFollowers, followerCount, followingCount, statusCount |
-| Status | `ACTOR#{username}` | `STATUS#{ulid}` | content, contentWarning, visibility, attachments[] (denormalized: includes CloudFront URL, contentType, description, blurhash per attachment — avoids N+1 media fetches on outbox reads), inReplyTo, published, sensitive, language, to[], cc[], likesCount, boostsCount, repliesCount |
+| Status | `ACTOR#{username}` | `STATUS#{ulid}` | content, contentWarning, visibility, attachments[] (denormalized: includes CloudFront URL, contentType, description, blurhash per attachment — avoids N+1 media fetches on outbox reads), inReplyTo, quotedStatusUri, quoteApprovalPolicy (public/followers/nobody), published, sensitive, language, to[], cc[], likesCount, boostsCount, repliesCount, quotesCount |
 | Follower | `ACTOR#{username}` | `FOLLOWER#{actorUri}` | inboxUrl, sharedInboxUrl, followActivityId, acceptedAt |
 | Received Activity | `ACTOR#{username}` | `ACTIVITY#{type}#{ulid}` | actorUri, type, objectUri, raw, receivedAt |
 | Media | `MEDIA#{id}` | `META` | s3Key, contentType, blurhash, description, width, height, size |
@@ -334,7 +334,18 @@ Response (Content-Type: `application/activity+json`):
 {
   "@context": [
     "https://www.w3.org/ns/activitystreams",
-    "https://w3id.org/security/v1"
+    "https://w3id.org/security/v1",
+    {
+      "toot": "http://joinmastodon.org/ns#",
+      "discoverable": "toot:discoverable",
+      "indexable": "toot:indexable",
+      "featured": {"@id": "toot:featured", "@type": "@id"},
+      "featuredTags": {"@id": "toot:featuredTags", "@type": "@id"},
+      "attributionDomains": {"@id": "toot:attributionDomains", "@type": "@id"},
+      "schema": "http://schema.org#",
+      "PropertyValue": "schema:PropertyValue",
+      "value": "schema:value"
+    }
   ],
   "id": "https://activity.happitec.com/users/randomforms",
   "type": "Service",
@@ -356,7 +367,12 @@ Response (Content-Type: `application/activity+json`):
     "publicKeyPem": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
   },
   "discoverable": true,
-  "manuallyApprovesFollowers": false
+  "indexable": false,
+  "manuallyApprovesFollowers": false,
+  "published": "2026-03-27T00:00:00Z",
+  "featured": "https://activity.happitec.com/users/randomforms/collections/featured",
+  "featuredTags": "https://activity.happitec.com/users/randomforms/collections/tags",
+  "attributionDomains": ["happitec.com", "randomforms.app"]
 }
 ```
 
@@ -368,11 +384,17 @@ Note: `manuallyApprovesFollowers: false` means all Follow requests are auto-acce
 
 Receives activities from remote servers. Must verify HTTP Signatures.
 
-**HTTP Signature verification (Cavage draft-12):** Requires fetching the remote actor's public key via their `publicKey.id` URL. To avoid a round-trip on every request, cache fetched actor documents in DynamoDB with a 24h TTL (entity: `REMOTE_ACTOR#{actorUri}`, SK: `PROFILE`). Refresh on signature verification failure (key rotation).
+**HTTP Signature verification (dual-stack):** Two standards are in play:
 
-**`Digest` header:** Inbound POST requests must include `Digest: SHA-256=<base64(sha256(body))>`. The inbox handler must validate the Digest matches the body *and* confirm that `digest` is listed in the signature's `headers` parameter. Outbound deliveries from `λ deliver` must likewise include a valid Digest header in their signed requests — Mastodon rejects deliveries without it.
+1. **Legacy HTTP Signatures (Cavage draft):** Uses a single `Signature:` header with `keyId`, `headers`, `signature` params. Signed headers typically include `(request-target) host date digest`. RSA-SHA256 (RSASSA-PKCS1-v1_5 with SHA-256). POST requests must include `Digest: SHA-256=<base64(sha256(body))>` and `digest` must be in the signature's `headers` parameter. Mastodon still accepts this.
 
-**`Date` header staleness:** Reject inbound requests where the `Date` header is more than 60 seconds old (Mastodon enforces this). Protects against replay attacks.
+2. **RFC 9421 HTTP Message Signatures (Mastodon 4.5+):** Uses separate `Signature:` and `Signature-Input:` headers. Signs derived components `@method` and `@target-uri` (both REQUIRED by Mastodon). Uses `Content-Digest` header (RFC 9530) instead of legacy `Digest`. `created` parameter MUST be present. Only supports single signature. Algorithm is still RSASSA-PKCS1-v1_5 with SHA-256.
+
+**Implementation strategy:** For **outbound** delivery (`λ deliver`), sign with the legacy Cavage format for maximum compatibility with older servers. Consider adding RFC 9421 as a secondary signature later. For **inbound** verification (`λ inbox`), accept both formats — check for `Signature-Input` header presence to determine which to verify. Mastodon 4.5 validates both.
+
+Requires fetching the remote actor's public key via their `publicKey.id` URL. To avoid a round-trip on every request, cache fetched actor documents in DynamoDB with a 24h TTL (entity: `REMOTE_ACTOR#{actorUri}`, SK: `PROFILE`). Refresh on signature verification failure (key rotation).
+
+**`Date` header staleness:** Mastodon rejects inbound requests where the signed `Date` header is more than **12 hours** old. We should enforce a similar window. For RFC 9421, the `created` parameter serves the same role.
 
 **Activity idempotency:** Remote servers retry failed deliveries. The same `Follow` or `Like` with the same `id` can arrive multiple times. Deduplicate by activity `id` using a DynamoDB conditional write (`attribute_not_exists(PK)`) before processing. Without this, retry storms create duplicate followers or double-counted likes.
 
@@ -386,7 +408,9 @@ Supported activities:
 - `Announce` (boost) → store, increment count via `UpdateItem`
 - `Create` (Note, in reply) → store as reply
 - `Delete` → remove stored reply/activity, return 410 Gone for the deleted object's URI on subsequent fetches (tombstone record in DynamoDB with TTL)
-- `Update` → update cached remote actor document
+- `Update` → update cached remote actor document; also handle `Update` on Note (federated post edits, Mastodon 3.5+) when `updated` timestamp is present
+- `Flag` → store report for moderation review (from remote instance actors)
+- `QuoteRequest` → Mastodon 4.5+ (FEP-044f). Remote server asks permission to quote one of our posts. Check our `quote_approval_policy`: if auto-approved, send `Accept`; otherwise `Reject`. The `instrument` field contains the quoting status URI/object.
 - **Unrecognized types** → log and return 202 (forward compatibility — never reject unknown activity types)
 
 #### `object` — `GET /users/{username}/statuses/{id}`
@@ -889,7 +913,7 @@ components:
           format: uri
         type:
           type: string
-          description: "Activity type: Follow, Undo, Like, Announce, Create, Delete, Update"
+          description: "Activity type: Follow, Undo, Like, Announce, Create, Delete, Update, Flag, QuoteRequest"
         actor:
           type: string
           format: uri
@@ -948,8 +972,14 @@ components:
           description: Content warning text
         visibility:
           type: string
-          enum: [public, unlisted]
+          enum: [public, unlisted, private, direct]
           default: public
+          description: |
+            `public` = visible to everyone, shown in public timelines (ActivityPub: `as:Public` in `to`).
+            `unlisted` = visible to public, but not in timelines (`as:Public` in `cc`).
+            `private` = visible to followers only (followers collection in `to`/`cc`, no `as:Public`).
+            `direct` = visible only to explicitly mentioned users (all `to`/`cc` targets are Mentioned in `tag`).
+            Note: Mastodon also has a `limited` visibility (actors in `to`/`cc` where at least one is NOT Mentioned) — we don't need to author this, but should understand it when receiving.
         language:
           type: string
           description: ISO 639-1 language code
@@ -957,13 +987,26 @@ components:
         in_reply_to_id:
           type: string
           description: ID of status being replied to
-        quote_id:
+        quoted_status_id:
           type: string
           description: |
-            ID of status being quoted. On the ActivityPub side, the Note includes
-            `quoteUrl` pointing to the quoted Note's URI. Mastodon 4.3+ renders this
-            as an inline quote. FEP-e232 is the emerging standard; we also emit a
-            `tag` entry with `type: Link` for broader compatibility.
+            ID of status being quoted (Mastodon 4.5+ API, added in API version 7).
+            On the ActivityPub side, quotes follow FEP-044f: the quoting Note includes
+            the quoted post's URI. Mastodon sends a `QuoteRequest` activity to the
+            quoted post's author for approval. Quote approval is granted or denied
+            based on the quoted post's `quote_approval_policy`. If the status text
+            doesn't include a link to the quoted post, Mastodon prepends a
+            `<p class="quote-inline">RE: <a href="...">...</a></p>` paragraph for
+            backward compatibility.
+        quote_approval_policy:
+          type: string
+          enum: [public, followers, nobody]
+          description: |
+            Who is allowed to quote this status. When omitted, defaults to the user's
+            account-level setting. Ignored for private/direct visibility (always
+            `nobody`). `public` = anyone (auto-accepted unless blocked).
+            `followers` = only followers + author (auto-accepted).
+            `nobody` = only the author.
 
     Status:
       type: object
@@ -996,6 +1039,21 @@ components:
           type: integer
         favourites_count:
           type: integer
+        quotes_count:
+          type: integer
+          description: How many accepted quotes this status has (Mastodon 4.5+)
+        quote:
+          nullable: true
+          description: The quoted status, if any (Mastodon 4.5+, FEP-044f)
+          allOf:
+            - $ref: "#/components/schemas/Status"
+        quote_approval:
+          type: object
+          nullable: true
+          description: |
+            Quote approval policy info. `automatic`: list of auto-approve targets.
+            `manual`: list of manual-approve targets. `current_user`: approval status
+            for the authed user (automatic/pending/accepted/rejected).
         account:
           type: object
           description: Actor who posted
@@ -1297,7 +1355,7 @@ The `Makefile` should produce a flat binary + `bootstrap` symlink per handler, z
 
 4. **Video handling:** Lambda payload limit is 6MB (API Gateway) / 10MB (direct invoke). Options: (a) stream through Lambda with chunked transfer, (b) two-step upload (get upload URL from Lambda, PUT directly to S3 — but this exposes S3), (c) accept the 6MB limit for MVP and add larger upload path later. Recommendation: accept the limit for MVP — most short-form video and all images fit in 6MB.
 
-5. **HTTP Signatures vs. RFC 9421:** Mastodon 4.5+ validates both. The draft standard has wider compatibility with older servers. Build draft first, add RFC 9421 later.
+5. **HTTP Signatures vs. RFC 9421:** Mastodon 4.5+ validates both (RFC 9421 enabled by default since 4.5.0). Legacy Cavage draft has wider compat with older servers (GoToSocial, Pleroma, etc.). **Decision: sign outbound with Cavage for broad compat; verify inbound for both.** Add RFC 9421 outbound support later (requires `Content-Digest` per RFC 9530, `Signature-Input` header, `@method`/`@target-uri` derived components, `created` param). Note: Mastodon's Date header staleness check is 12 hours (not the 60s we previously had).
 
 6. **Actor provisioning:** How are new actors created? Options: (a) CLI tool that generates RSA keypair, writes to SSM Parameter Store as SecureString, seeds DynamoDB actor record. (b) Small admin Lambda behind an authed endpoint. (c) Manual DynamoDB + SSM writes. Recommendation: CLI tool — keeps it simple, scriptable, no extra infrastructure.
 
