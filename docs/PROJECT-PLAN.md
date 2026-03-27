@@ -963,6 +963,8 @@ Package.swift (swift-tools-version: 6.0)
 
 No Vapor, no Hummingbird, no HTTP framework. Each Lambda is a standalone handler.
 
+**Reference implementation:** The [APIGatewayV1 example](https://github.com/awslabs/swift-aws-lambda-runtime/tree/main/Examples/APIGatewayV1) in `swift-aws-lambda-runtime` demonstrates the exact pattern — REST API Gateway + SAM + `APIGatewayRequest`/`APIGatewayResponse`.
+
 ---
 
 ## Implementation Phases
