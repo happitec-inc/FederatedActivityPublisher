@@ -52,9 +52,11 @@ flowchart TB
         APIGW_S["API Gateway<br/>(federation)"]
         WF["λ webfinger"]
         ACTOR["λ actor"]
+        OBJECT["λ object"]
         INBOX["λ inbox"]
         OUTBOX["λ outbox"]
         FOLLOWERS["λ followers"]
+        FOLLOWING["λ following"]
         DELIVER["λ deliver<br/>(SQS consumer)"]
         APIGW_C["API Gateway<br/>(client, authed)"]
         POST["λ post"]
@@ -73,13 +75,16 @@ flowchart TB
     CF --> APIGW_S
     APIGW_S --> WF
     APIGW_S --> ACTOR
+    APIGW_S --> OBJECT
     APIGW_S --> INBOX
     APIGW_S --> OUTBOX
     APIGW_S --> FOLLOWERS
+    APIGW_S --> FOLLOWING
 
     WF --> DDB
     ACTOR --> DDB
     ACTOR --> SM
+    OBJECT --> DDB
     INBOX --> DDB
     INBOX --> SQS
     OUTBOX --> DDB
@@ -118,9 +123,9 @@ Long-lived per-environment data stores and queues. Prod and stage each get their
 
 | Resource | Purpose |
 |----------|---------|
-| S3 Media Bucket | **Private, zero public access.** `BlockPublicAccess: true` on all four settings. No bucket policy by default — OAC policy added by app stack. |
-| DynamoDB Table | Single-table design (actors, statuses, followers, activities, media metadata). On-demand billing. |
-| SQS Queue + DLQ | Outbound delivery fan-out. Visibility timeout 120s. |
+| S3 Media Bucket | **Private, zero public access.** `BlockPublicAccess: true` on all four settings. No bucket policy by default — OAC policy added by app stack. Lifecycle rules: abort incomplete multipart uploads after 7 days. |
+| DynamoDB Table | Single-table design (actors, statuses, followers, activities, media metadata). On-demand billing. **PITR enabled for prod** (point-in-time recovery). |
+| SQS Queue + DLQ | Outbound delivery fan-out. Visibility timeout 120s. CloudWatch alarm on DLQ `ApproximateNumberOfMessagesVisible > 0` (SNS notification). |
 | SSM Parameter Store (naming convention) | RSA keypairs per actor stored as SecureString parameters under `/activity/{stage}/keys/{username}`. Created by a provisioning CLI — not pre-created in CloudFormation. The environment stack just exports the prefix so Lambdas know where to look. Actor provisioning (key generation + DynamoDB seed) is a CLI operation, not a stack resource. Zero cost (Standard tier SecureString, KMS-encrypted). |
 
 **Imports:** bootstrap exports.
@@ -169,7 +174,7 @@ Cache-until-invalidated. The `λ post` function fires a CloudFront invalidation 
 
 | Path Pattern | TTL | Invalidation Trigger | Origin |
 |---|---|---|---|
-| `/.well-known/webfinger*` | 24h | Actor create/delete | API Gateway |
+| `/.well-known/webfinger*` | 24h, **cache key includes `resource` query param** | Actor create/delete | API Gateway |
 | `/users/*/outbox*` | 365d (effectively indefinite) | New post (`λ post` invalidates) | API Gateway |
 | `/users/*` (GET, no /inbox) | 24h | Profile update | API Gateway |
 | `/users/*/followers*` | 1h | Follow/unfollow | API Gateway |
@@ -279,17 +284,24 @@ Single-table design. Partition key `PK`, sort key `SK`. GSI1 for reverse lookups
 
 | Entity | PK | SK | Attributes |
 |--------|----|----|------------|
-| Actor | `ACTOR#{username}` | `PROFILE` | displayName, summary, avatarUrl, headerUrl, publicKeyPem, privateKeyArn, createdAt, discoverable, manuallyApprovesFollowers |
-| Status | `ACTOR#{username}` | `STATUS#{ulid}` | content, contentWarning, visibility, attachments[], inReplyTo, published, sensitive, language |
+| Actor | `ACTOR#{username}` | `PROFILE` | displayName, summary, avatarUrl, headerUrl, publicKeyPem, privateKeyArn, createdAt, discoverable, manuallyApprovesFollowers, followerCount, followingCount, statusCount |
+| Status | `ACTOR#{username}` | `STATUS#{ulid}` | content, contentWarning, visibility, attachments[] (denormalized: includes CloudFront URL, contentType, description, blurhash per attachment — avoids N+1 media fetches on outbox reads), inReplyTo, published, sensitive, language, to[], cc[], likesCount, boostsCount, repliesCount |
 | Follower | `ACTOR#{username}` | `FOLLOWER#{actorUri}` | inboxUrl, sharedInboxUrl, followActivityId, acceptedAt |
 | Received Activity | `ACTOR#{username}` | `ACTIVITY#{type}#{ulid}` | actorUri, type, objectUri, raw, receivedAt |
 | Media | `MEDIA#{id}` | `META` | s3Key, contentType, blurhash, description, width, height, size |
 | Remote Actor (cache) | `REMOTE_ACTOR#{actorUri}` | `PROFILE` | publicKeyPem, preferredUsername, inbox, sharedInbox, fetchedAt, ttl (DynamoDB TTL, 24h) |
+| Following | `ACTOR#{username}` | `FOLLOWING#{actorUri}` | followActivityId, acceptedAt (reserved — brand accounts don't follow anyone initially, but schema supports it for future use) |
 | Tombstone | `TOMBSTONE#{objectUri}` | `META` | deletedAt, ttl (DynamoDB TTL, 30d) |
 
 **GSI1** (for outbox pagination, follower listing):
 - GSI1PK: `ACTOR#{username}`, GSI1SK: `PUBLISHED#{iso8601}` (statuses)
 - GSI1PK: `FOLLOWERS#{username}`, GSI1SK: `{acceptedAt}` (followers)
+
+**Important:** GSI1PK/GSI1SK are not automatically derived — they must be explicitly written as attributes on each record at insert time. Follower records need `GSI1PK: FOLLOWERS#{username}` and `GSI1SK: {acceptedAt}`. Status records need `GSI1PK: ACTOR#{username}` and `GSI1SK: PUBLISHED#{iso8601}`.
+
+**Note on outbox query:** Since `STATUS#{ulid}` sort keys are already time-ordered, outbox pagination *could* use a base-table query (`SK begins_with STATUS#`, `ScanIndexForward=false`) instead of GSI1. GSI1 adds write cost but provides a cleaner separation. Keep GSI1 for now — revisit if write costs matter.
+
+**Reply threading:** Currently no GSI for "all replies to status X." For reply count, denormalize `repliesCount` on the parent status (atomic `UpdateItem` on Create-Note replies). For full thread retrieval (Phase 5+), consider GSI2 on `inReplyTo` or a batch query pattern.
 
 ---
 
@@ -322,6 +334,7 @@ Response (Content-Type: `application/activity+json`):
   "inbox": "https://activity.happitec.com/users/randomforms/inbox",
   "outbox": "https://activity.happitec.com/users/randomforms/outbox",
   "followers": "https://activity.happitec.com/users/randomforms/followers",
+  "following": "https://activity.happitec.com/users/randomforms/following",
   "url": "https://activity.happitec.com/@randomforms",
   "icon": {
     "type": "Image",
@@ -343,7 +356,15 @@ Note: `type: "Service"` signals to other servers that this is a bot/service acco
 
 Receives activities from remote servers. Must verify HTTP Signatures.
 
-**HTTP Signature verification:** Requires fetching the remote actor's public key via their `publicKey.id` URL. To avoid a round-trip on every request, cache fetched actor documents in DynamoDB with a 24h TTL (entity: `REMOTE_ACTOR#{actorUri}`, SK: `PROFILE`). Refresh on signature verification failure (key rotation).
+**HTTP Signature verification (Cavage draft-12):** Requires fetching the remote actor's public key via their `publicKey.id` URL. To avoid a round-trip on every request, cache fetched actor documents in DynamoDB with a 24h TTL (entity: `REMOTE_ACTOR#{actorUri}`, SK: `PROFILE`). Refresh on signature verification failure (key rotation).
+
+**`Digest` header:** Inbound POST requests must include `Digest: SHA-256=<base64(sha256(body))>`. The inbox handler must validate the Digest matches the body *and* confirm that `digest` is listed in the signature's `headers` parameter. Outbound deliveries from `λ deliver` must likewise include a valid Digest header in their signed requests — Mastodon rejects deliveries without it.
+
+**`Date` header staleness:** Reject inbound requests where the `Date` header is more than 60 seconds old (Mastodon enforces this). Protects against replay attacks.
+
+**Activity idempotency:** Remote servers retry failed deliveries. The same `Follow` or `Like` with the same `id` can arrive multiple times. Deduplicate by activity `id` using a DynamoDB conditional write (`attribute_not_exists(PK)`) before processing. Without this, retry storms create duplicate followers or double-counted likes.
+
+**`object` field type variance:** For `Undo`, `Like`, and `Announce`, the `object` field may be a URI string *or* an inline object depending on the sending server. The inbox handler must handle both forms.
 
 Supported activities:
 - `Follow` → store follower, enqueue `Accept` delivery
@@ -355,6 +376,10 @@ Supported activities:
 - `Delete` → remove stored reply/activity, return 410 Gone for the deleted object's URI on subsequent fetches (tombstone record in DynamoDB with TTL)
 - `Update` → update cached remote actor document
 - **Unrecognized types** → log and return 202 (forward compatibility — never reject unknown activity types)
+
+#### `object` — `GET /users/{username}/statuses/{id}`
+
+Object resolution endpoint. Remote servers fetch Note objects directly by URI (e.g. for reply threading, link previews, quoting). Returns the `Note` JSON-LD document. Returns 410 Gone if a tombstone exists for the object. Served through CloudFront (cache-until-invalidated on post edit/delete).
 
 #### `outbox` — `GET /users/{username}/outbox`
 
@@ -370,11 +395,33 @@ Reads delivery jobs, constructs signed ActivityPub activities, POSTs to remote i
 
 Returns an OrderedCollection of follower actor URIs, paginated. Uses GSI1 with `FOLLOWERS#{username}` partition key, ordered by `acceptedAt`. Serves follower count in the collection's `totalItems` (cached in the actor profile record, updated atomically on follow/unfollow via `UpdateItem`).
 
+#### `nodeinfo` — `GET /.well-known/nodeinfo` + `GET /nodeinfo/2.1`
+
+Two-step discovery: `/.well-known/nodeinfo` returns a link to `/nodeinfo/2.1`, which returns server metadata (software name/version, protocols, user/post counts, open registrations: false). Mastodon 4.x and GoToSocial query this for federation health. Can be a single Lambda or folded into the WebFinger handler. Mostly static — heavy CloudFront caching (24h+).
+
+#### `following` — `GET /users/{username}/following`
+
+Returns an empty `OrderedCollection` with `totalItems: 0`. Brand/service accounts don't follow other accounts. Required by the ActivityPub spec — Mastodon flags profiles as incomplete without it.
+
 ### App Stack — Client/Posting Endpoints
 
 #### `post` — `POST /api/v1/statuses`
 
 Create a new status. Writes to DynamoDB (environment table), fans out delivery jobs to SQS (environment queue), fires CloudFront invalidation for outbox.
+
+**Critical: `to`/`cc` addressing on Create activities.** Every outbound `Create` activity and its embedded `Note` must include:
+```json
+"to": ["https://www.w3.org/ns/activitystreams#Public"],
+"cc": ["https://activity.happitec.com/users/randomforms/followers"]
+```
+Without these, Mastodon and most servers will **not display the post in followers' timelines** — it's a silent failure where delivery succeeds (202) but the post is invisible.
+
+The `Note` must also include `"attributedTo": "https://activity.happitec.com/users/{username}"`.
+
+Outbox items must be `Create` wrapper activities (not bare `Note` objects):
+```json
+{"type": "Create", "actor": "...", "object": {...Note...}, "to": [...], "cc": [...]}
+```
 
 Auth: Bearer token (simple shared secret per actor for MVP).
 
@@ -453,6 +500,33 @@ paths:
         "404":
           description: Unknown actor
 
+  /users/{username}/statuses/{id}:
+    get:
+      operationId: getObject
+      summary: Fetch a single status/Note by ID
+      tags: [federation]
+      description: |
+        Object resolution endpoint. Remote servers fetch Note objects by URI
+        for reply threading, link previews, and quoting. Returns 410 if deleted (tombstone).
+      parameters:
+        - $ref: "#/components/parameters/username"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Note object (JSON-LD)
+          content:
+            application/activity+json:
+              schema:
+                $ref: "#/components/schemas/Activity"
+        "404":
+          description: Unknown status
+        "410":
+          description: Status was deleted (tombstone)
+
   /users/{username}/inbox:
     post:
       operationId: receiveActivity
@@ -521,6 +595,22 @@ paths:
       responses:
         "200":
           description: Ordered collection of follower URIs
+          content:
+            application/activity+json:
+              schema:
+                $ref: "#/components/schemas/OrderedCollection"
+
+  /users/{username}/following:
+    get:
+      operationId: getFollowing
+      summary: Fetch following collection
+      tags: [federation]
+      description: Returns an empty OrderedCollection. Brand accounts don't follow others.
+      parameters:
+        - $ref: "#/components/parameters/username"
+      responses:
+        "200":
+          description: Ordered collection (always empty for service accounts)
           content:
             application/activity+json:
               schema:
@@ -911,7 +1001,7 @@ Resources:
       - ServerDomainName (custom domain, avoids stage-prefix stripping issues)
       - S3 (media, via OAC — read-only, references environment bucket)
     CacheBehaviors:
-      - /.well-known/*: TTL 24h
+      - /.well-known/*: TTL 24h, cache key includes `resource` query string parameter (CloudFront CachePolicy with QueryStringsConfig whitelist)
       - /users/*/outbox*: TTL 365d (invalidated on post)
       - /users/*/followers*: TTL 1h
       - /users/*: TTL 24h (actor profiles)
@@ -925,8 +1015,10 @@ Resources:
       - GET /users/{username} → ActorFunction
       - POST /users/{username}/inbox → InboxFunction
       - GET /users/{username}/outbox → OutboxFunction
+      - GET /users/{username}/statuses/{id} → ObjectFunction
       - GET /users/{username}/followers → FollowersFunction
-  WebFingerFunction, ActorFunction, InboxFunction, OutboxFunction, FollowersFunction
+      - GET /users/{username}/following → FollowingFunction
+  WebFingerFunction, ActorFunction, ObjectFunction, InboxFunction, OutboxFunction, FollowersFunction, FollowingFunction
   DeliverFunction:
     Timeout: 60 (outbound HTTP to remote servers can be slow)
     ReservedConcurrentExecutions: 5 (prevent runaway fan-out)
@@ -981,9 +1073,11 @@ Package.swift (swift-tools-version: 6.0)
 │   │
 │   ├── WebFingerHandler/             # App stack — federation
 │   ├── ActorHandler/                 # App stack — federation
+│   ├── ObjectHandler/                # App stack — federation (single status fetch)
 │   ├── InboxHandler/                 # App stack — federation
 │   ├── OutboxHandler/                # App stack — federation
 │   ├── FollowersHandler/            # App stack — federation
+│   ├── FollowingHandler/            # App stack — federation (returns empty collection)
 │   ├── DeliverHandler/              # App stack — federation (SQS consumer)
 │   ├── PostHandler/                  # App stack — client
 │   └── MediaUploadHandler/           # App stack — client
@@ -1031,6 +1125,7 @@ The `Makefile` should produce a flat binary + `bootstrap` symlink per handler, z
 ## Implementation Phases
 
 ### Phase 0 — Hardcoded federation smoke test
+- **BLOCKER: Resolve Open Question #1 (handle domain) before starting.** If handles are `@name@happitec.com`, WebFinger must be served at `happitec.com/.well-known/webfinger` — this changes what gets deployed in Phase 0. Once federated, handles are permanent.
 - Set up the Swift cross-compilation toolchain for Lambda ARM64 (Docker-based build using the official Swift Amazon Linux 2023 image, or Swift SDK for cross-compilation). This is non-trivial setup — budget time for it.
 - Deploy `activity-bootstrap` (Route 53 hosted zone, ACM wildcard cert)
 - Add NS delegation record in parent `happitec.com` zone
@@ -1038,11 +1133,17 @@ The `Makefile` should produce a flat binary + `bootstrap` symlink per handler, z
 - Verify Mastodon can discover and display the profile
 - **Milestone:** `@randomforms@happitec.com` resolves in Mastodon search (even if the profile is static/empty)
 
-### Phase 1 — Full read-only presence
+### Phase 1a — Data layer + dynamic actor
 - Deploy `activity-environment-stage` (S3 bucket, DynamoDB, SQS)
-- Deploy `activity-app-stage` with real webfinger, actor, empty outbox, CloudFront, API Gateway custom domains
-- Seed a test actor in DynamoDB with RSA keypair (CLI tool or script)
-- **Milestone:** `@randomforms@happitec.com` shows live profile data from DynamoDB
+- Build and run **actor provisioning CLI** (generate RSA keypair → SSM Parameter Store SecureString, seed DynamoDB actor record)
+- Deploy `activity-app-stage` with dynamic webfinger, actor, NodeInfo, empty outbox/followers/following — direct API Gateway URLs (no CloudFront yet)
+- Seed a test actor via the provisioning CLI
+- **Milestone:** `@randomforms@happitec.com` serves live profile data from DynamoDB
+
+### Phase 1b — CloudFront + custom domains
+- Add CloudFront distribution with OAC, WebFinger cache policy (whitelist `resource` query param), all cache behaviors
+- Add API Gateway custom domains + Route 53 alias records
+- **Milestone:** `activity.happitec.com` resolves with full caching, public domain works
 
 ### Phase 2 — Accept followers
 - Inbox handler: verify HTTP Signatures, handle Follow
@@ -1052,6 +1153,8 @@ The `Makefile` should produce a flat binary + `bootstrap` symlink per handler, z
 ### Phase 3 — Posting + delivery
 - Add client API Gateway + post/media Lambdas to app stack
 - Create Note → write to DynamoDB → fan out to SQS → signed delivery
+- **Critical:** `to`/`cc` addressing on Create activities, `attributedTo` on Notes, `Digest` header on signed POST requests. All three are required — without them, delivery succeeds (202) but posts are invisible in timelines.
+- Outbox items must be `Create` wrapper activities (not bare Notes)
 - CloudFront invalidation on post
 - **Milestone:** Post appears in followers' timelines
 
@@ -1063,7 +1166,9 @@ The `Makefile` should produce a flat binary + `bootstrap` symlink per handler, z
 
 ### Phase 5 — Interactions
 - Inbox: receive and store likes, boosts, replies
+- Inbox: handle `Update` for Note objects (federated post edits — separate code path from actor `Update`)
 - Expose counts in outbox
+- Activity idempotency (deduplicate by activity `id` on retry storms)
 - **Milestone:** Full two-way federation for supported activity types
 
 ### Phase 6 (stretch) — Mastodon client API
@@ -1090,3 +1195,11 @@ The `Makefile` should produce a flat binary + `bootstrap` symlink per handler, z
 7. **Rate limiting / WAF:** The inbox endpoint is publicly writable by any federated server. API Gateway throttling should be configured (e.g. 100 req/s default, 200 burst). WAF on CloudFront is advisable for production but overkill for MVP. Flag for Phase 5+.
 
 8. **Cold start latency on inbox:** Remote servers timeout deliveries at 10-30s. Swift Lambda cold starts on 512MB should be ~2-3s, but signature verification + remote key fetch + DynamoDB write could push total time close to limits on cold starts. Monitor in Phase 2; consider provisioned concurrency for the inbox function in production if p99 exceeds 8s.
+
+9. **NodeInfo and `/api/v1/instance`:** NodeInfo is added (Phase 1a). For Mastodon client compat (Phase 6), `/api/v1/instance` is the first thing any client fetches. Needs a routing decision — same API Gateway or separate?
+
+10. **Inbox idempotency strategy:** Deduplicate by activity `id` using conditional DynamoDB writes (`attribute_not_exists`). Simple and effective but means storing activity IDs permanently. Alternative: TTL-based dedup window (e.g. 7 days). Decide before Phase 2.
+
+11. **RSA key rotation:** Remote servers cache our public key. Rotating requires delivering an `Update` activity to all followers with the new key. For MVP: don't rotate. But document the process so it's not an emergency when the time comes.
+
+12. **Defederation / blocklisting:** When a bad-actor server spams the inbox, what's the mitigation? Options: (a) domain blocklist checked in inbox handler (DynamoDB lookup), (b) WAF rules on CloudFront/API Gateway, (c) both. Start with (a) — cheap conditional check at the top of inbox processing.
