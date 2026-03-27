@@ -54,6 +54,7 @@ flowchart TB
         ACTOR["λ actor"]
         INBOX["λ inbox"]
         OUTBOX["λ outbox"]
+        FOLLOWERS["λ followers"]
         DELIVER["λ deliver<br/>(SQS consumer)"]
         APIGW_C["API Gateway<br/>(client, authed)"]
         POST["λ post"]
@@ -74,6 +75,7 @@ flowchart TB
     APIGW_S --> ACTOR
     APIGW_S --> INBOX
     APIGW_S --> OUTBOX
+    APIGW_S --> FOLLOWERS
 
     WF --> DDB
     ACTOR --> DDB
@@ -81,6 +83,7 @@ flowchart TB
     INBOX --> DDB
     INBOX --> SQS
     OUTBOX --> DDB
+    FOLLOWERS --> DDB
 
     SQS --> DELIVER
     DELIVER --> DDB
@@ -118,7 +121,7 @@ Long-lived per-environment data stores and queues. Prod and stage each get their
 | S3 Media Bucket | **Private, zero public access.** `BlockPublicAccess: true` on all four settings. No bucket policy by default — OAC policy added by app stack. |
 | DynamoDB Table | Single-table design (actors, statuses, followers, activities, media metadata). On-demand billing. |
 | SQS Queue + DLQ | Outbound delivery fan-out. Visibility timeout 120s. |
-| Secrets Manager | RSA keypairs per actor (prefix: `activity/{stage}/`). |
+| Secrets Manager (naming convention) | RSA keypairs per actor, created by a provisioning CLI — not pre-created in CloudFormation. The environment stack just exports the prefix `activity/{stage}/` so Lambdas know where to look. Actor provisioning (key generation + DynamoDB seed) is a CLI operation, not a stack resource. |
 
 **Imports:** bootstrap exports.
 **Exports:** `MediaBucketName`, `MediaBucketArn`, `TableName`, `TableArn`, `QueueUrl`, `QueueArn`, `SecretsPrefix`
@@ -150,7 +153,7 @@ Everything that runs code or serves traffic. Two API Gateways (federation + clie
 | λ media-upload | `POST /api/v2/media` — receive upload, PutObject to S3, write metadata to DynamoDB |
 
 **IAM principles:**
-- Federation Lambdas: `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:PutItem` (inbox only), `dynamodb:DeleteItem` (inbox only), `sqs:SendMessage`, `secretsmanager:GetSecretValue`. **Zero S3 permissions** — CloudFront OAC handles media serving.
+- Federation Lambdas: `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:PutItem` (inbox only), `dynamodb:DeleteItem` (inbox only), `dynamodb:UpdateItem` (inbox — like/boost count increment), `sqs:SendMessage`, `secretsmanager:GetSecretValue`. **Zero S3 permissions** — CloudFront OAC handles media serving.
 - Client Lambdas: `dynamodb:PutItem`, `dynamodb:GetItem`, `dynamodb:Query`, `s3:PutObject` (media bucket), `sqs:SendMessage`, `cloudfront:CreateInvalidation`. **No S3 read/delete.**
 
 Media uploads flow **through the Lambda** — the client never gets a presigned URL or direct S3 access. The bucket stays dark.
@@ -281,6 +284,8 @@ Single-table design. Partition key `PK`, sort key `SK`. GSI1 for reverse lookups
 | Follower | `ACTOR#{username}` | `FOLLOWER#{actorUri}` | inboxUrl, sharedInboxUrl, followActivityId, acceptedAt |
 | Received Activity | `ACTOR#{username}` | `ACTIVITY#{type}#{ulid}` | actorUri, type, objectUri, raw, receivedAt |
 | Media | `MEDIA#{id}` | `META` | s3Key, contentType, blurhash, description, width, height, size |
+| Remote Actor (cache) | `REMOTE_ACTOR#{actorUri}` | `PROFILE` | publicKeyPem, preferredUsername, inbox, sharedInbox, fetchedAt, ttl (DynamoDB TTL, 24h) |
+| Tombstone | `TOMBSTONE#{objectUri}` | `META` | deletedAt, ttl (DynamoDB TTL, 30d) |
 
 **GSI1** (for outbox pagination, follower listing):
 - GSI1PK: `ACTOR#{username}`, GSI1SK: `PUBLISHED#{iso8601}` (statuses)
@@ -296,11 +301,11 @@ All Swift, using `swift-aws-lambda-runtime` with API Gateway REST API event type
 
 #### `webfinger` — `GET /.well-known/webfinger`
 
-Resolves `?resource=acct:username@happitec.com` to the actor URI.
+Resolves `?resource=acct:username@happitec.com` to the actor URI. The response's `links` array must include `rel: "self"` with `type: "application/activity+json"` and `href` pointing to the actor URL — this is the critical link Mastodon uses for discovery.
 
 #### `actor` — `GET /users/{username}`
 
-Returns the ActivityPub Actor document (JSON-LD) including public key.
+Returns the ActivityPub Actor document (JSON-LD) including public key. Content-negotiates: responds with `application/activity+json` by default, but also accepts `application/ld+json; profile="https://www.w3.org/ns/activitystreams"` (some servers use this form).
 
 Response (Content-Type: `application/activity+json`):
 ```json
@@ -338,14 +343,18 @@ Note: `type: "Service"` signals to other servers that this is a bot/service acco
 
 Receives activities from remote servers. Must verify HTTP Signatures.
 
+**HTTP Signature verification:** Requires fetching the remote actor's public key via their `publicKey.id` URL. To avoid a round-trip on every request, cache fetched actor documents in DynamoDB with a 24h TTL (entity: `REMOTE_ACTOR#{actorUri}`, SK: `PROFILE`). Refresh on signature verification failure (key rotation).
+
 Supported activities:
 - `Follow` → store follower, enqueue `Accept` delivery
-- `Undo` → if undoing `Follow`, remove follower. If undoing `Like`/`Announce`, update counts.
-- `Like` → store, increment count
-- `Announce` (boost) → store, increment count
+- `Accept` → record that a follow request was accepted (forward compat for when we follow others)
+- `Undo` → if undoing `Follow`, remove follower. If undoing `Like`/`Announce`, decrement counts via `UpdateItem`.
+- `Like` → store, increment count via `UpdateItem` (atomic, handles concurrent likes)
+- `Announce` (boost) → store, increment count via `UpdateItem`
 - `Create` (Note, in reply) → store as reply
-- `Delete` → remove stored reply/activity
-- `Update` → update cached remote actor
+- `Delete` → remove stored reply/activity, return 410 Gone for the deleted object's URI on subsequent fetches (tombstone record in DynamoDB with TTL)
+- `Update` → update cached remote actor document
+- **Unrecognized types** → log and return 202 (forward compatibility — never reject unknown activity types)
 
 #### `outbox` — `GET /users/{username}/outbox`
 
@@ -353,7 +362,13 @@ Returns an OrderedCollection of the actor's public statuses, paginated.
 
 #### `deliver` — SQS consumer
 
-Reads delivery jobs, constructs signed ActivityPub activities, POSTs to remote inboxes. Handles retries via SQS visibility timeout + DLQ for persistent failures.
+Reads delivery jobs, constructs signed ActivityPub activities, POSTs to remote inboxes. Handles retries via SQS visibility timeout + DLQ for persistent failures. Set `maxReceiveCount: 3` on the DLQ redrive policy.
+
+**Shared inbox coalescing:** When multiple followers are on the same server (e.g. mastodon.social), deliver one copy to that server's `sharedInboxUrl` instead of N individual copies. The `λ post` handler should group follower inboxes by shared inbox URL when enqueuing delivery jobs, producing one SQS message per unique shared inbox. This is practically required — without it, a post to an account with 500 mastodon.social followers sends 500 identical HTTP requests.
+
+#### `followers` — `GET /users/{username}/followers`
+
+Returns an OrderedCollection of follower actor URIs, paginated. Uses GSI1 with `FOLLOWERS#{username}` partition key, ordered by `acceptedAt`. Serves follower count in the collection's `totalItems` (cached in the actor profile record, updated atomically on follow/unfollow via `UpdateItem`).
 
 ### App Stack — Client/Posting Endpoints
 
@@ -367,7 +382,7 @@ Auth: Bearer token (simple shared secret per actor for MVP).
 
 Receives multipart upload, writes to S3 (environment bucket), stores metadata in DynamoDB (environment table). Returns media ID for attachment to statuses.
 
-Media flows through the Lambda — no presigned URLs, no direct S3 access from outside AWS.
+Media flows through the Lambda — no presigned URLs, no direct S3 access from outside AWS. **API Gateway payload limit is 6MB**, which covers most images but not high-res photos or video. See Open Question #4 for the video/large-file strategy.
 
 ---
 
@@ -393,7 +408,7 @@ servers:
     description: Stage (client)
 
 paths:
-  # ── Server Stack (federation) ──────────────────────────
+  # ── App Stack — Federation ──────────────────────────
 
   /.well-known/webfinger:
     get:
@@ -511,7 +526,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/OrderedCollection"
 
-  # ── Client Stack (authoring) ───────────────────────────
+  # ── App Stack — Client (authoring) ───────────────────────────
 
   /api/v1/statuses:
     post:
@@ -875,12 +890,25 @@ Outputs:
 ```
 Parameters: Stage, BootstrapStackName, EnvironmentStackName
 Globals:
-  Function: Runtime custom.al2023, MemorySize 256, Timeout 30, Architectures arm64
+  Function: Runtime custom.al2023, MemorySize 512, Timeout 30, Architectures arm64
 Resources:
   # ── Federation (read path) ──────────────
+  # ── DNS + Domain Setup ──────────────
+  ServerDomainName (API Gateway custom domain for federation API):
+    - DomainName: {stage}.activity.happitec.com (prod: activity.happitec.com)
+    - CertificateArn: from bootstrap
+    - BasePathMapping to ServerApi stage
+  ClientDomainName (API Gateway custom domain for client API):
+    - DomainName: client-{stage}.activity.happitec.com (prod: client.activity.happitec.com)
+    - CertificateArn: from bootstrap
+    - BasePathMapping to ClientApi stage
+  FederationDnsRecord (Route 53 alias → CloudFront distribution)
+  ClientDnsRecord (Route 53 alias → ClientDomainName regional domain)
+
+  # ── CloudFront + Federation ────────
   CloudFrontDistribution:
     Origins:
-      - API Gateway (default, for federation endpoints)
+      - ServerDomainName (custom domain, avoids stage-prefix stripping issues)
       - S3 (media, via OAC — read-only, references environment bucket)
     CacheBehaviors:
       - /.well-known/*: TTL 24h
@@ -898,7 +926,14 @@ Resources:
       - POST /users/{username}/inbox → InboxFunction
       - GET /users/{username}/outbox → OutboxFunction
       - GET /users/{username}/followers → FollowersFunction
-  WebFingerFunction, ActorFunction, InboxFunction, OutboxFunction, DeliverFunction
+  WebFingerFunction, ActorFunction, InboxFunction, OutboxFunction, FollowersFunction
+  DeliverFunction:
+    Timeout: 60 (outbound HTTP to remote servers can be slow)
+    ReservedConcurrentExecutions: 5 (prevent runaway fan-out)
+  InboxFunction:
+    Policies:
+      - DynamoDB: GetItem, PutItem, DeleteItem, UpdateItem, Query (environment table)
+      - SQS: SendMessage (environment queue)
 
   # ── Client (write path) ────────────────
   ClientApi (API Gateway REST API, separate domain):
@@ -944,13 +979,14 @@ Package.swift (swift-tools-version: 6.0)
 │   │   └── Delivery/
 │   │       └── ActivityDelivery.swift    # Build + sign + POST
 │   │
-│   ├── WebFingerHandler/             # Server stack
-│   ├── ActorHandler/                 # Server stack
-│   ├── InboxHandler/                 # Server stack
-│   ├── OutboxHandler/                # Server stack
-│   ├── DeliverHandler/               # Server stack (SQS consumer)
-│   ├── PostHandler/                  # Client stack
-│   └── MediaUploadHandler/           # Client stack
+│   ├── WebFingerHandler/             # App stack — federation
+│   ├── ActorHandler/                 # App stack — federation
+│   ├── InboxHandler/                 # App stack — federation
+│   ├── OutboxHandler/                # App stack — federation
+│   ├── FollowersHandler/            # App stack — federation
+│   ├── DeliverHandler/              # App stack — federation (SQS consumer)
+│   ├── PostHandler/                  # App stack — client
+│   └── MediaUploadHandler/           # App stack — client
 │
 ├── Tests/
 │   └── ActivityPubCoreTests/
@@ -984,18 +1020,29 @@ No Vapor, no Hummingbird, no HTTP framework. Each Lambda is a standalone handler
 
 **Reference implementation:** The [APIGatewayV1 example](https://github.com/awslabs/swift-aws-lambda-runtime/tree/main/Examples/APIGatewayV1) in `swift-aws-lambda-runtime` demonstrates the exact pattern — REST API Gateway + SAM + `APIGatewayRequest`/`APIGatewayResponse`.
 
+**Build toolchain:** Cross-compiling Swift for Lambda ARM64 requires either:
+- **Docker-based builds** using the official `swift:6.0-amazonlinux2023` image (recommended — matches the Lambda runtime exactly)
+- **Swift SDK for cross-compilation** (newer, less battle-tested)
+
+The `Makefile` should produce a flat binary + `bootstrap` symlink per handler, zipped for SAM deployment. This is non-trivial first-time setup — see Phase 0.
+
 ---
 
 ## Implementation Phases
 
-### Phase 1 — Bootstrap + environment + read-only presence
+### Phase 0 — Hardcoded federation smoke test
+- Set up the Swift cross-compilation toolchain for Lambda ARM64 (Docker-based build using the official Swift Amazon Linux 2023 image, or Swift SDK for cross-compilation). This is non-trivial setup — budget time for it.
 - Deploy `activity-bootstrap` (Route 53 hosted zone, ACM wildcard cert)
 - Add NS delegation record in parent `happitec.com` zone
+- Deploy a single Lambda behind API Gateway that returns hardcoded WebFinger + Actor JSON — no DynamoDB, no S3, no CloudFront
+- Verify Mastodon can discover and display the profile
+- **Milestone:** `@randomforms@happitec.com` resolves in Mastodon search (even if the profile is static/empty)
+
+### Phase 1 — Full read-only presence
 - Deploy `activity-environment-stage` (S3 bucket, DynamoDB, SQS, Secrets Manager)
-- Deploy `activity-app-stage` with webfinger, actor, empty outbox
-- Seed a test actor in DynamoDB with RSA keypair
-- Verify Mastodon can resolve and display the profile
-- **Milestone:** `@randomforms@happitec.com` shows up when searched in Mastodon
+- Deploy `activity-app-stage` with real webfinger, actor, empty outbox, CloudFront, API Gateway custom domains
+- Seed a test actor in DynamoDB with RSA keypair (CLI tool or script)
+- **Milestone:** `@randomforms@happitec.com` shows live profile data from DynamoDB
 
 ### Phase 2 — Accept followers
 - Inbox handler: verify HTTP Signatures, handle Follow
@@ -1037,3 +1084,9 @@ No Vapor, no Hummingbird, no HTTP framework. Each Lambda is a standalone handler
 4. **Video handling:** Lambda payload limit is 6MB (API Gateway) / 10MB (direct invoke). Options: (a) stream through Lambda with chunked transfer, (b) two-step upload (get upload URL from Lambda, PUT directly to S3 — but this exposes S3), (c) accept the 6MB limit for MVP and add larger upload path later. Recommendation: accept the limit for MVP — most short-form video and all images fit in 6MB.
 
 5. **HTTP Signatures vs. RFC 9421:** Mastodon 4.5+ validates both. The draft standard has wider compatibility with older servers. Build draft first, add RFC 9421 later.
+
+6. **Actor provisioning:** How are new actors created? Options: (a) CLI tool that generates RSA keypair, writes to Secrets Manager, seeds DynamoDB actor record. (b) Small admin Lambda behind an authed endpoint. (c) Manual DynamoDB + Secrets Manager writes. Recommendation: CLI tool — keeps it simple, scriptable, no extra infrastructure.
+
+7. **Rate limiting / WAF:** The inbox endpoint is publicly writable by any federated server. API Gateway throttling should be configured (e.g. 100 req/s default, 200 burst). WAF on CloudFront is advisable for production but overkill for MVP. Flag for Phase 5+.
+
+8. **Cold start latency on inbox:** Remote servers timeout deliveries at 10-30s. Swift Lambda cold starts on 512MB should be ~2-3s, but signature verification + remote key fetch + DynamoDB write could push total time close to limits on cold starts. Monitor in Phase 2; consider provisioned concurrency for the inbox function in production if p99 exceeds 8s.
