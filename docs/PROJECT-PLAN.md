@@ -118,7 +118,7 @@ The public-facing federation surface. **Read-only access to S3** via CloudFront 
 | Resource | Purpose |
 |----------|---------|
 | CloudFront Distribution | Edge cache + OAC for S3 media. Cache-until-invalidated strategy. |
-| API Gateway (HTTP API) | Federation endpoints |
+| API Gateway (REST API) | Federation endpoints |
 | DynamoDB Tables | Actors, statuses, followers, activities, media metadata |
 | SQS Queue + DLQ | Outbound delivery fan-out |
 | λ webfinger | `GET /.well-known/webfinger` |
@@ -137,7 +137,7 @@ The only stack with S3 write access. Separate API Gateway behind auth.
 
 | Resource | Purpose |
 |----------|---------|
-| API Gateway (HTTP API) | Authed posting endpoints |
+| API Gateway (REST API) | Authed posting endpoints |
 | λ post | `POST /api/v1/statuses` — write status, enqueue delivery, invalidate CloudFront |
 | λ media-upload | `POST /api/v2/media` — receive upload, PutObject to S3, write metadata to DynamoDB |
 
@@ -277,7 +277,7 @@ Single-table design. Partition key `PK`, sort key `SK`. GSI1 for reverse lookups
 
 ## Lambda Functions
 
-All Swift, using `swift-aws-lambda-runtime` with API Gateway HTTP API event type. No Vapor — each function is a standalone handler.
+All Swift, using `swift-aws-lambda-runtime` with API Gateway REST API event type. No Vapor — each function is a standalone handler.
 
 ### Server Stack — Federation Endpoints
 
@@ -864,7 +864,7 @@ Resources:
     DefaultCacheBehavior: no cache (POST passthrough)
   CloudFrontOAC (Origin Access Control for S3)
   MediaBucketPolicy (allow OAC read-only — references bootstrap bucket)
-  ServerApi (API Gateway HTTP API):
+  ServerApi (API Gateway REST API):
     Routes:
       - GET /.well-known/webfinger → WebFingerFunction
       - GET /users/{username} → ActorFunction
@@ -884,7 +884,7 @@ Parameters: Stage, BootstrapStackName, ServerStackName
 Globals:
   Function: Runtime custom.al2023, MemorySize 256, Timeout 60, Architectures arm64
 Resources:
-  ClientApi (API Gateway HTTP API):
+  ClientApi (API Gateway REST API):
     Routes:
       - POST /api/v1/statuses → PostFunction
       - POST /api/v2/media → MediaUploadFunction
@@ -956,7 +956,7 @@ Package.swift (swift-tools-version: 6.0)
 | Package | Use |
 |---------|-----|
 | `swift-aws-lambda-runtime` | Lambda handler framework |
-| `swift-aws-lambda-events` | API Gateway + SQS event types |
+| `swift-aws-lambda-events` | API Gateway REST API (`APIGatewayRequest`/`APIGatewayResponse`) + SQS event types |
 | `soto` (or `aws-sdk-swift`) | DynamoDB, S3, SQS, Secrets Manager, CloudFront |
 | `swift-crypto` | RSA-SHA256 signing/verification |
 | `swift-docc-plugin` | Documentation |
