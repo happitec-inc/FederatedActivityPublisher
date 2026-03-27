@@ -24,9 +24,9 @@ A multi-account ActivityPub server running entirely on AWS serverless infrastruc
 
 ---
 
-## Three-Stack Architecture
+## Four-Stack Architecture
 
-Infrastructure is split into three independently deployable SAM stacks. This follows the PPG pattern but with cleaner separation of concerns — bootstrap owns shared resources, server handles the read/federation surface, client handles writes.
+Infrastructure is split into four independently deployable SAM stacks, following the PPG pattern: truly shared resources in bootstrap, per-environment foundation in an environment stack, then app stacks on top.
 
 ```mermaid
 flowchart TB
@@ -35,10 +35,15 @@ flowchart TB
         AUTHOR["Author<br/>(REST client / Mastodon app)"]
     end
 
-    subgraph "activity-bootstrap"
+    subgraph "activity-bootstrap (shared, manual deploy)"
         R53["Route 53<br/>Hosted Zone"]
         ACM["ACM<br/>Wildcard Cert"]
+    end
+
+    subgraph "activity-environment-{stage}"
         S3["S3 Media Bucket<br/>(private, zero public access)"]
+        DDB["DynamoDB<br/>(on-demand, single-table)"]
+        SQS["SQS<br/>(delivery queue + DLQ)"]
         SM["Secrets Manager<br/>RSA Keypairs"]
     end
 
@@ -50,8 +55,6 @@ flowchart TB
         INBOX["λ inbox"]
         OUTBOX["λ outbox"]
         DELIVER["λ deliver<br/>(SQS consumer)"]
-        DDB["DynamoDB<br/>(on-demand)"]
-        SQS["SQS<br/>(delivery queue + DLQ)"]
     end
 
     subgraph "activity-client-{stage}"
@@ -98,18 +101,30 @@ flowchart TB
 
 ### Stack Responsibilities
 
-#### `activity-bootstrap` (manual deploy, rarely changes)
+#### `activity-bootstrap` (manual deploy, never changes)
 
-Owns long-lived shared resources that outlive any server/client deployment.
+Truly shared resources that outlive all environments. Deployed once.
 
 | Resource | Purpose |
 |----------|---------|
 | Route 53 Hosted Zone | DNS for `activity.happitec.com` + subdomains |
 | ACM Wildcard Certificate | `*.activity.happitec.com` + apex |
-| S3 Media Bucket | **Private, zero public access.** No bucket policy, no public ACLs, `BlockPublicAccess: true` on all four settings. Only CloudFront OAC and the client stack can touch it. |
+
+**Exports:** `HostedZoneId`, `CertificateArn`
+
+#### `activity-environment-{stage}` (per-env foundation)
+
+Per-environment data stores and queues. Prod and stage get their own. Destroyed independently of app stacks — you can redeploy server/client without touching data.
+
+| Resource | Purpose |
+|----------|---------|
+| S3 Media Bucket | **Private, zero public access.** `BlockPublicAccess: true` on all four settings. No bucket policy by default — OAC policy added by server stack. |
+| DynamoDB Table | Single-table design (actors, statuses, followers, activities, media metadata). On-demand billing. |
+| SQS Queue + DLQ | Outbound delivery fan-out. Visibility timeout 120s. |
 | Secrets Manager | RSA keypairs per actor. Server reads public keys, deliver reads private keys. |
 
-**Exports:** `HostedZoneId`, `CertificateArn`, `MediaBucketName`, `MediaBucketArn`
+**Imports:** bootstrap exports.
+**Exports:** `MediaBucketName`, `MediaBucketArn`, `TableName`, `TableArn`, `QueueUrl`, `QueueArn`, `SecretsPrefix`
 
 #### `activity-server-{stage}` (federation + read path)
 
@@ -118,9 +133,9 @@ The public-facing federation surface. **Read-only access to S3** via CloudFront 
 | Resource | Purpose |
 |----------|---------|
 | CloudFront Distribution | Edge cache + OAC for S3 media. Cache-until-invalidated strategy. |
+| CloudFront OAC | Origin Access Control for the environment's S3 media bucket. |
+| S3 Bucket Policy | Grants OAC read-only access to the environment's media bucket. |
 | API Gateway (REST API) | Federation endpoints |
-| DynamoDB Tables | Actors, statuses, followers, activities, media metadata |
-| SQS Queue + DLQ | Outbound delivery fan-out |
 | λ webfinger | `GET /.well-known/webfinger` |
 | λ actor | `GET /users/{username}` |
 | λ inbox | `POST /users/{username}/inbox` (signature verification) |
@@ -129,7 +144,8 @@ The public-facing federation surface. **Read-only access to S3** via CloudFront 
 
 **IAM principle:** Server Lambdas get `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:PutItem` (inbox only), `dynamodb:DeleteItem` (inbox only), `sqs:SendMessage`, `secretsmanager:GetSecretValue`. **Zero S3 permissions** — CloudFront OAC handles media serving.
 
-**Imports:** bootstrap exports. **Exports:** `TableName`, `TableArn`, `QueueUrl`, `QueueArn`, `CloudFrontDistributionId`, `ServerApiUrl`
+**Imports:** bootstrap + environment exports.
+**Exports:** `CloudFrontDistributionId`, `ServerApiUrl`, `ServerDomain`
 
 #### `activity-client-{stage}` (authoring + write path)
 
@@ -145,7 +161,7 @@ The only stack with S3 write access. Separate API Gateway behind auth.
 
 Media uploads flow **through the Lambda** — the client never gets a presigned URL or direct S3 access. The bucket stays dark.
 
-**Imports:** bootstrap + server exports.
+**Imports:** bootstrap + environment + server exports.
 
 ---
 
@@ -174,17 +190,17 @@ sequenceDiagram
     participant U as Author
     participant CG as Client API Gateway
     participant P as λ post (client stack)
-    participant DB as DynamoDB (server stack)
-    participant Q as SQS (server stack)
+    participant DB as DynamoDB (environment stack)
+    participant Q as SQS (environment stack)
     participant CF as CloudFront (server stack)
     participant D as λ deliver (server stack)
     participant R as Remote Server
 
     U->>CG: POST /api/v1/statuses {text, media_ids}
     CG->>P: Invoke
-    P->>DB: Write Status record (cross-stack table)
+    P->>DB: Write Status record (environment table)
     P->>DB: Read follower inbox URLs
-    P->>Q: Enqueue delivery jobs (cross-stack queue)
+    P->>Q: Enqueue delivery jobs (environment queue)
     P->>CF: CreateInvalidation /users/{name}/outbox*
     P-->>U: 200 Status JSON
 
@@ -202,8 +218,8 @@ sequenceDiagram
     participant U as Author
     participant CG as Client API Gateway
     participant M as λ media-upload (client stack)
-    participant S3 as S3 Media Bucket (bootstrap)
-    participant DB as DynamoDB (server stack)
+    participant S3 as S3 Media Bucket (environment stack)
+    participant DB as DynamoDB (environment stack)
 
     U->>CG: POST /api/v2/media (multipart)
     CG->>M: Invoke (body passthrough)
@@ -245,15 +261,15 @@ sequenceDiagram
 
 Following the PPG pattern:
 
-| Environment | Trigger | Database | Domain |
-|-------------|---------|----------|--------|
-| **prod** | GitHub release (v-prefixed tag) | Dedicated tables | `activity.happitec.com` |
-| **stage** | Push to main | Dedicated tables | `stage-activity.happitec.com` |
-| **ephemeral** | Push to feature branch | Stage tables (shared) | `{branch}-activity.happitec.com` |
+| Environment | Trigger | Data Layer | Domain |
+|-------------|---------|------------|--------|
+| **prod** | GitHub release (v-prefixed tag) | `activity-environment-prod` (dedicated S3, DynamoDB, SQS, Secrets) | `activity.happitec.com` |
+| **stage** | Push to main | `activity-environment-stage` (dedicated S3, DynamoDB, SQS, Secrets) | `stage-activity.happitec.com` |
+| **ephemeral** | Push to feature branch | Uses stage environment stack (shared) | `{branch}-activity.happitec.com` |
 
-Stack names: `activity-bootstrap`, `activity-server-{stage}`, `activity-client-{stage}`.
+Stack names: `activity-bootstrap`, `activity-environment-{stage}`, `activity-server-{stage}`, `activity-client-{stage}`.
 
-Bootstrap is deployed once manually. Server and client stacks are deployed by CI on the same triggers.
+Bootstrap is deployed once manually. Environment stacks are deployed manually (or on first CI run per environment). Server and client stacks are deployed by CI on the same triggers.
 
 ---
 
@@ -346,13 +362,13 @@ Reads delivery jobs, constructs signed ActivityPub activities, POSTs to remote i
 
 #### `post` — `POST /api/v1/statuses`
 
-Create a new status. Writes to DynamoDB (server stack's table), fans out delivery jobs to SQS (server stack's queue), fires CloudFront invalidation for outbox.
+Create a new status. Writes to DynamoDB (environment stack's table), fans out delivery jobs to SQS (environment stack's queue), fires CloudFront invalidation for outbox.
 
 Auth: Bearer token (simple shared secret per actor for MVP).
 
 #### `media-upload` — `POST /api/v2/media`
 
-Receives multipart upload, writes to S3 (bootstrap's bucket), stores metadata in DynamoDB (server stack's table). Returns media ID for attachment to statuses.
+Receives multipart upload, writes to S3 (environment's bucket), stores metadata in DynamoDB (environment's table). Returns media ID for attachment to statuses.
 
 Media flows through the Lambda — no presigned URLs, no direct S3 access from outside AWS.
 
@@ -823,7 +839,7 @@ components:
 
 ## SAM Template Structure
 
-Three templates, three stacks:
+Four templates, four stacks:
 
 ### `activity-bootstrap/template.yaml`
 
@@ -832,29 +848,42 @@ Parameters: DomainName
 Resources:
   HostedZone (Route 53)
   WildcardCertificate (ACM, *.{domain} + apex)
+Outputs:
+  HostedZoneId, CertificateArn
+```
+
+### `activity-environment/template.yaml`
+
+```
+Parameters: Stage, BootstrapStackName
+Resources:
   MediaBucket (S3):
+    - BucketName: activity-media-{stage}
     - BucketEncryption: AES256
     - PublicAccessBlockConfiguration: all four = true
     - No bucket policy (OAC is added by server stack)
-  ActorKeys (Secrets Manager, one per actor — or dynamic)
+  ActorsTable (DynamoDB, on-demand, single-table)
+  DeliveryQueue (SQS, visibility timeout 120s)
+  DeliveryDLQ (SQS)
+  ActorKeys (Secrets Manager, prefix: activity/{stage}/)
 Outputs:
-  HostedZoneId, CertificateArn, MediaBucketName, MediaBucketArn
+  MediaBucketName, MediaBucketArn,
+  TableName, TableArn,
+  QueueUrl, QueueArn,
+  SecretsPrefix
 ```
 
 ### `activity-server/template.yaml`
 
 ```
-Parameters: Stage, BootstrapStackName
+Parameters: Stage, BootstrapStackName, EnvironmentStackName
 Globals:
   Function: Runtime custom.al2023, MemorySize 256, Timeout 30, Architectures arm64
 Resources:
-  ActorsTable (DynamoDB, on-demand, single-table)
-  DeliveryQueue (SQS, visibility timeout 120s)
-  DeliveryDLQ (SQS)
   CloudFrontDistribution:
     Origins:
       - API Gateway (default, for federation endpoints)
-      - S3 (media, via OAC — read-only)
+      - S3 (media, via OAC — read-only, references environment bucket)
     CacheBehaviors:
       - /.well-known/*: TTL 24h
       - /users/*/outbox*: TTL 365d (invalidated on post)
@@ -863,7 +892,7 @@ Resources:
       - /media/*: TTL 365d, Cache-Control immutable
     DefaultCacheBehavior: no cache (POST passthrough)
   CloudFrontOAC (Origin Access Control for S3)
-  MediaBucketPolicy (allow OAC read-only — references bootstrap bucket)
+  MediaBucketPolicy (allow OAC read-only — references environment bucket)
   ServerApi (API Gateway REST API):
     Routes:
       - GET /.well-known/webfinger → WebFingerFunction
@@ -873,14 +902,13 @@ Resources:
       - GET /users/{username}/followers → FollowersFunction
   WebFingerFunction, ActorFunction, InboxFunction, OutboxFunction, DeliverFunction
 Outputs:
-  TableName, TableArn, QueueUrl, QueueArn,
   CloudFrontDistributionId, ServerApiUrl, ServerDomain
 ```
 
 ### `activity-client/template.yaml`
 
 ```
-Parameters: Stage, BootstrapStackName, ServerStackName
+Parameters: Stage, BootstrapStackName, EnvironmentStackName, ServerStackName
 Globals:
   Function: Runtime custom.al2023, MemorySize 256, Timeout 60, Architectures arm64
 Resources:
@@ -890,14 +918,14 @@ Resources:
       - POST /api/v2/media → MediaUploadFunction
   PostFunction:
     Policies:
-      - DynamoDB: PutItem, GetItem, Query (server table)
-      - SQS: SendMessage (server queue)
+      - DynamoDB: PutItem, GetItem, Query (environment table)
+      - SQS: SendMessage (environment queue)
       - CloudFront: CreateInvalidation (server distribution)
-      - SecretsManager: GetSecretValue (bootstrap keys)
+      - SecretsManager: GetSecretValue (environment keys)
   MediaUploadFunction:
     Policies:
-      - S3: PutObject only (bootstrap media bucket)
-      - DynamoDB: PutItem (server table, media metadata)
+      - S3: PutObject only (environment media bucket)
+      - DynamoDB: PutItem (environment table, media metadata)
 Outputs:
   ClientApiUrl
 ```
@@ -941,6 +969,8 @@ Package.swift (swift-tools-version: 6.0)
 │
 ├── activity-bootstrap/
 │   └── template.yaml
+├── activity-environment/
+│   └── template.yaml
 ├── activity-server/
 │   └── template.yaml
 ├── activity-client/
@@ -969,9 +999,10 @@ No Vapor, no Hummingbird, no HTTP framework. Each Lambda is a standalone handler
 
 ## Implementation Phases
 
-### Phase 1 — Bootstrap + read-only presence
-- Deploy `activity-bootstrap` (Route 53, ACM, S3 bucket, Secrets Manager)
-- Deploy `activity-server` with webfinger, actor, empty outbox
+### Phase 1 — Bootstrap + environment + read-only presence
+- Deploy `activity-bootstrap` (Route 53, ACM cert)
+- Deploy `activity-environment-stage` (S3 bucket, DynamoDB, SQS, Secrets Manager)
+- Deploy `activity-server-stage` with webfinger, actor, empty outbox
 - Seed a test actor in DynamoDB with RSA keypair
 - Verify Mastodon can resolve and display the profile
 - **Milestone:** `@randomforms@happitec.com` shows up when searched in Mastodon
