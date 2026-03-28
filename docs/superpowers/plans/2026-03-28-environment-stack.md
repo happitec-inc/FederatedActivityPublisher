@@ -2,7 +2,7 @@
 
 **Goal:** Create the `activity-environment` SAM template and GitHub Actions workflow. The template defines per-environment data stores (DynamoDB, S3, SQS) parameterized by `Stage`. Deployed manually for prod and stage.
 
-**Architecture:** Single SAM template reused across environments via the `Stage` parameter. Resources have `DeletionPolicy: Retain` since they hold persistent data. Imports bootstrap stack exports. Exports resource names/ARNs for the app stack.
+**Architecture:** Single SAM template reused across environments via the `Stage` parameter. Resources have `DeletionPolicy: Retain` since they hold persistent data. Exports resource names/ARNs for the app stack. (Does not import bootstrap exports — the environment stack is independent of the bootstrap stack at the CloudFormation level; the dependency is logical, not a cross-stack reference.)
 
 **Tech Stack:** AWS SAM, CloudFormation, DynamoDB, S3, SQS, CloudWatch
 
@@ -36,10 +36,6 @@ Parameters:
       - prod
       - stage
     Description: Environment name (prod or stage)
-  BootstrapStackName:
-    Type: String
-    Default: activity-bootstrap
-    Description: Name of the bootstrap stack to import from
 
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
@@ -121,11 +117,20 @@ Resources:
     Properties:
       QueueName: !Sub "activity-delivery-dlq-${Stage}"
 
+  DLQAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "activity-dlq-alarm-${Stage}"
+
   DLQAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "activity-dlq-depth-${Stage}"
       AlarmDescription: !Sub "Messages in activity delivery DLQ (${Stage})"
+      AlarmActions:
+        - !Ref DLQAlarmTopic
+      OKActions:
+        - !Ref DLQAlarmTopic
       Namespace: AWS/SQS
       MetricName: ApproximateNumberOfMessagesVisible
       Dimensions:
@@ -215,7 +220,7 @@ stack_name = "activity-environment-stage"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 region = "us-east-1"
-parameter_overrides = "Stage=stage BootstrapStackName=activity-bootstrap"
+parameter_overrides = "Stage=stage"
 ```
 
 - [ ] **Step 2: Commit**
@@ -281,8 +286,7 @@ jobs:
             --no-fail-on-empty-changeset \
             --region us-east-1 \
             --parameter-overrides \
-              Stage=${{ inputs.stage }} \
-              BootstrapStackName=activity-bootstrap
+              Stage=${{ inputs.stage }}
 
       - name: Print stack outputs
         run: |
