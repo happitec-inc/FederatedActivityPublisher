@@ -35,9 +35,10 @@ jobs:
           aws-region: us-east-1
 
       - name: Install Swift
-        uses: swift-actions/setup-swift@v3
+        uses: happitec-inc/happitec-logo-generator/.github/actions/setup-swift-wasm@main
         with:
           swift-version: "6.3"
+          wasm-sdk: "false"
 
       - name: Build Lambda zip
         run: swift package --allow-network-connections docker archive
