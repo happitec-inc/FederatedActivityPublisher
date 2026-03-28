@@ -694,6 +694,26 @@ components:
           oneOf:
             - $ref: "#/components/schemas/Status"
             - type: "null"
+        quote_approval:
+          description: Quote approval policy info (Mastodon 4.5+, FEP-044f)
+          oneOf:
+            - type: object
+              properties:
+                automatic:
+                  type: array
+                  items:
+                    type: string
+                  description: List of auto-approve targets
+                manual:
+                  type: array
+                  items:
+                    type: string
+                  description: List of manual-approve targets
+                current_user:
+                  type: string
+                  enum: [automatic, pending, accepted, rejected]
+                  description: Approval status for the authenticated user
+            - type: "null"
         account:
           type: object
           description: Actor who posted
