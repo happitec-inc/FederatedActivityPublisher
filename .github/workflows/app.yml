@@ -1,0 +1,61 @@
+name: Deploy App Stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Deployment stage"
+        required: true
+        type: choice
+        options:
+          - stage
+          - prod
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install SAM CLI
+        uses: happitec-inc/happitec-logo-generator/.github/actions/setup-sam-portable@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Build Lambda zip
+        run: swift package --allow-network-connections docker archive
+
+      - name: Deploy with SAM
+        run: |
+          sam deploy \
+            --template-file activity-app/template.yaml \
+            --stack-name "activity-app-${{ inputs.stage }}" \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --region us-east-1 \
+            --parameter-overrides Stage=${{ inputs.stage }}
+
+      - name: Print stack outputs
+        run: |
+          OUTPUTS=$(aws cloudformation describe-stacks \
+            --stack-name "activity-app-${{ inputs.stage }}" \
+            --query "Stacks[0].Outputs" \
+            --output table \
+            --region us-east-1)
+          echo "## Stack Outputs" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$OUTPUTS" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
