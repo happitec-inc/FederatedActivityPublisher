@@ -30,8 +30,7 @@ Workflow modeled on `happitec.com/.github/workflows/infrastructure.yml`:
 - `setup-sam-portable` action from `happitec-inc/happitec-logo-generator`
 - `aws-actions/configure-aws-credentials@v6` with secrets
 - `sam build` + `sam deploy` targeting `us-east-1`
-- Triggered on push to main (only when `activity-bootstrap/**` files change)
-- Manual trigger (`workflow_dispatch`) for first-time deploy
+- Manual trigger only (`workflow_dispatch`) — bootstrap is a one-time deploy
 
 ### Post-deploy (manual, not CI)
 
