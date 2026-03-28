@@ -63,6 +63,7 @@ jobs:
           sam deploy \
             --template-file activity-app/template.yaml \
             --stack-name "activity-app-${{ inputs.stage }}" \
+            --resolve-s3 \
             --capabilities CAPABILITY_IAM \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
