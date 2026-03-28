@@ -58,6 +58,8 @@ flowchart TB
         OUTBOX["λ outbox"]
         FOLLOWERS["λ followers"]
         FOLLOWING["λ following"]
+        FEATURED["λ featured"]
+        FEATUREDTAGS["λ featuredTags"]
         DELIVER["λ deliver<br/>(SQS consumer)"]
         APIGW_C["API Gateway<br/>(client, authed)"]
         POST["λ post"]
@@ -69,6 +71,9 @@ flowchart TB
     FED -->|"GET /users/:name"| CF
     FED -->|"POST /users/:name/inbox"| APIGW_S
     FED -->|"GET /users/:name/outbox"| CF
+    FED -->|"GET /users/:name/statuses/:id"| CF
+    FED -->|"GET /users/:name/followers"| CF
+    FED -->|"GET /users/:name/collections/featured"| CF
 
     AUTHOR -->|"POST /api/v1/statuses"| APIGW_C
     AUTHOR -->|"POST /api/v2/media"| APIGW_C
@@ -83,6 +88,8 @@ flowchart TB
     APIGW_S --> OUTBOX
     APIGW_S --> FOLLOWERS
     APIGW_S --> FOLLOWING
+    APIGW_S --> FEATURED
+    APIGW_S --> FEATUREDTAGS
 
     NI --> DDB
     WF --> DDB
@@ -93,6 +100,8 @@ flowchart TB
     INBOX --> SQS
     OUTBOX --> DDB
     FOLLOWERS --> DDB
+    FEATURED --> DDB
+    FEATUREDTAGS --> DDB
 
     SQS --> DELIVER
     DELIVER --> DDB
@@ -155,6 +164,8 @@ Everything that runs code or serves traffic. Two API Gateways (federation + clie
 | λ object | `GET /users/{username}/statuses/{id}` |
 | λ followers | `GET /users/{username}/followers` |
 | λ following | `GET /users/{username}/following` (empty collection) |
+| λ featured | `GET /users/{username}/collections/featured` (pinned posts, empty for MVP) |
+| λ featuredTags | `GET /users/{username}/collections/tags` (featured hashtags, empty for MVP) |
 | λ deliver | SQS consumer → signed HTTP POST to remote inboxes |
 
 **Client surface (write path):**
@@ -166,7 +177,7 @@ Everything that runs code or serves traffic. Two API Gateways (federation + clie
 | λ media-upload | `POST /api/v2/media` — receive upload, PutObject to S3, write metadata to DynamoDB |
 
 **IAM principles:**
-- Federation Lambdas: `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:PutItem` (inbox only), `dynamodb:DeleteItem` (inbox only), `dynamodb:UpdateItem` (inbox — like/boost count increment), `sqs:SendMessage`, `ssm:GetParameter` (with decryption). **Zero S3 permissions** — CloudFront OAC handles media serving.
+- Federation Lambdas: `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:PutItem` (inbox only), `dynamodb:DeleteItem` (inbox only), `dynamodb:UpdateItem` (inbox — like/boost count increment), `sqs:SendMessage`. **`ssm:GetParameter` only on `λ deliver`** (for signing outbound requests with our private key — inbox uses remote actors' public keys from DynamoDB, not SSM). **Zero S3 permissions** — CloudFront OAC handles media serving.
 - Client Lambdas: `dynamodb:PutItem`, `dynamodb:GetItem`, `dynamodb:Query`, `s3:PutObject` (media bucket), `sqs:SendMessage`, `cloudfront:CreateInvalidation`. **No S3 read/delete.**
 
 Media uploads flow **through the Lambda** — the client never gets a presigned URL or direct S3 access. The bucket stays dark.
@@ -187,6 +198,8 @@ Cache-until-invalidated. The `λ post` function fires a CloudFront invalidation 
 | `/users/*/outbox*` | 365d (effectively indefinite), **cache key includes `page`, `min_id`, `max_id` query params** | New post (`λ post` invalidates) | API Gateway |
 | `/users/*/statuses/*` | 365d (effectively indefinite) | Post edit/delete (`λ post` or `λ inbox` invalidates) | API Gateway |
 | `/users/*` (GET, no /inbox, /statuses, /outbox, /followers, /following) | 24h | Profile update | API Gateway |
+| `/users/*/collections/featured` | 24h | Pin/unpin (Phase 5+) | API Gateway |
+| `/users/*/collections/tags` | 24h | Featured tag update (rare) | API Gateway |
 | `/users/*/followers*` | 1h | Follow/unfollow | API Gateway |
 | `/media/*` | Immutable (365d, `Cache-Control: immutable`) | Never | S3 via OAC |
 | `POST /users/*/inbox` | No cache (POST passthrough) | — | API Gateway |
@@ -1086,7 +1099,7 @@ components:
       properties:
         status:
           type: string
-          description: Text content of the status (HTML or plain text)
+          description: Plain text content of the status (converted to HTML by the server before storing and federating)
         media_ids:
           type: array
           items:
@@ -1147,6 +1160,7 @@ components:
           format: date-time
         content:
           type: string
+          description: HTML content of the status (sanitized for remote content, server-generated for local)
         visibility:
           type: string
         sensitive:
@@ -1289,6 +1303,8 @@ Resources:
       - /.well-known/webfinger: TTL 24h, cache key includes `resource` query string parameter (CloudFront CachePolicy with QueryStringsConfig whitelist)
       - /users/*/outbox*: TTL 365d (invalidated on post), cache key includes `page`, `min_id`, `max_id` query params
       - /users/*/statuses/*: TTL 365d (invalidated on edit/delete)
+      - /users/*/collections/featured: TTL 24h (invalidated on pin/unpin, Phase 5+)
+      - /users/*/collections/tags: TTL 24h (invalidated on featured tag update, rare)
       - /users/*/followers*: TTL 1h
       - /users/*: TTL 24h (actor profiles, catch-all for GET)
       - /media/*: TTL 365d, Cache-Control immutable
@@ -1338,7 +1354,7 @@ Resources:
   PostFunction:
     Timeout: 60
     Policies:
-      - DynamoDB: PutItem, GetItem, Query (environment table)
+      - DynamoDB: PutItem, GetItem, Query, UpdateItem (environment table — UpdateItem for atomic statusCount increment)
       - SQS: SendMessage (environment queue)
       - CloudFront: CreateInvalidation (own distribution)
       - SSM: GetParameter with decryption (environment keys)
