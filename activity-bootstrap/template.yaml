@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  activity-bootstrap — shared resources that outlive all environments.
+  Route 53 hosted zone and ACM wildcard certificate for activity.happitec.com.
+  Deployed once, manually. All other stacks import these exports.
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: activity.happitec.com
+    Description: Base domain for the ActivityPub server
+
+Resources:
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneConfig:
+        Comment: !Sub "ActivityPub server zone for ${DomainName}"
+
+  WildcardCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      SubjectAlternativeNames:
+        - !Sub "*.${DomainName}"
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZone
+        - DomainName: !Sub "*.${DomainName}"
+          HostedZoneId: !Ref HostedZone
+
+Outputs:
+  HostedZoneId:
+    Description: Route 53 hosted zone ID for activity.happitec.com
+    Value: !Ref HostedZone
+    Export:
+      Name: !Sub "${AWS::StackName}-HostedZoneId"
+
+  CertificateArn:
+    Description: ACM wildcard certificate ARN (activity.happitec.com + *.activity.happitec.com)
+    Value: !Ref WildcardCertificate
+    Export:
+      Name: !Sub "${AWS::StackName}-CertificateArn"
+
+  NameServers:
+    Description: NS records to add to the parent happitec.com zone
+    Value: !Join
+      - ", "
+      - !GetAtt HostedZone.NameServers
