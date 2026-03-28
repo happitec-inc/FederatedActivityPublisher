@@ -39,8 +39,13 @@ jobs:
           if swift --version 2>/dev/null | grep -q "6.3"; then
             echo "Swift 6.3 already installed"
           else
-            curl -fsSL "https://download.swift.org/swift-6.3-release/ubuntu2404/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04.tar.gz" \
-              | sudo tar xz --strip-components=2 -C /usr/local
+            ARCH=$(uname -m)
+            if [ "$ARCH" = "aarch64" ]; then
+              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404-aarch64/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04-aarch64.tar.gz"
+            else
+              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04.tar.gz"
+            fi
+            curl -fsSL "$SWIFT_URL" | sudo tar xz --strip-components=2 -C /usr/local
           fi
           swift --version
 
