@@ -6,7 +6,7 @@ Replace the hardcoded Phase 0 WebFinger handler with DynamoDB-backed federation 
 
 ## What This Builds
 
-- 8 Lambda handlers (1 upgraded, 7 new)
+- 8 Lambda handlers across 9 routes (1 upgraded, 7 new; NodeInfo handles 2 routes)
 - A minimal shared library (`ActivityPubCore`) with DynamoDB access and model types
 - A provisioning CLI to seed actor records
 - Updated SAM template importing environment stack resources
@@ -26,7 +26,7 @@ Replace the hardcoded Phase 0 WebFinger handler with DynamoDB-backed federation 
 |---------|------------|---------|
 | `aws-sdk-swift` | `AWSDynamoDB` | DynamoDB reads for all handlers |
 | `aws-sdk-swift` | `AWSSSM` | SSM Parameter Store writes (provisioning CLI only) |
-| `swift-crypto` | `Crypto` | RSA keypair generation (provisioning CLI) |
+| `swift-crypto` | `_CryptoExtras` | RSA keypair generation (provisioning CLI — RSA lives in `_CryptoExtras`, not the main `Crypto` module) |
 | `swift-argument-parser` | `ArgumentParser` | CLI argument parsing (provisioning CLI only) |
 
 Package URL: `https://github.com/awslabs/aws-sdk-swift.git`
@@ -50,6 +50,7 @@ Methods:
 **`Actor`** — Codable struct matching the DynamoDB schema:
 - `username`, `displayName`, `summary`, `avatarUrl`, `headerUrl`
 - `publicKeyPem` (PEM-encoded RSA public key)
+- `privateKeyArn` (SSM parameter path, e.g. `/activity/stage/keys/randomforms` — stored in DynamoDB so Lambdas can locate the private key for signing in later phases)
 - `createdAt`, `discoverable`
 - `manuallyApprovesFollowers` (always `false` for now)
 - `followerCount`, `followingCount`, `statusCount` (all 0 initially)
@@ -64,29 +65,35 @@ Methods:
 - `href: String?`
 - `template: String?`
 
-**`OrderedCollection`** — Codable struct for empty collections:
+**`OrderedCollection`** — Codable struct for collections:
 - `context: String` (the `@context` URL)
 - `id: String`
 - `type: String` ("OrderedCollection")
 - `totalItems: Int`
-- `first: String?`
-- `last: String?`
+- `first: String?` (root collection only)
+- `last: String?` (root collection only)
+- `orderedItems: [String]?` (present for featured/featuredTags as empty `[]`; absent for outbox root per spec — "MUST NOT embed orderedItems inline")
 
 ## Lambda Handlers
 
-All handlers depend on `ActivityPubCore`. All read the `TABLE_NAME` and `DOMAIN_NAME` environment variables.
+All handlers depend on `ActivityPubCore`. All read these environment variables:
+- `TABLE_NAME` — DynamoDB table name (imported from environment stack)
+- `SERVER_DOMAIN` — where actor URLs live (`activity.happitec.com`)
+- `HANDLE_DOMAIN` — what goes after the `@` in handles (`happitec.com`)
+
+Handles are `@username@happitec.com`. Actor URLs are `https://activity.happitec.com/users/username`. WebFinger accepts queries for the handle domain and returns URLs on the server domain.
 
 ### WebFingerHandler — `GET /.well-known/webfinger`
 
 Upgraded from Phase 0. Now reads from DynamoDB.
 
 1. Parse `resource` query parameter
-2. Validate format: must be `acct:{username}@{domain}`
+2. Validate format: must be `acct:{username}@{handle_domain}` (where `{handle_domain}` matches `HANDLE_DOMAIN` env var)
 3. Look up actor in DynamoDB via `DynamoDBStore.getActor(username:)`
 4. Return 404 if not found
 5. Return JRD JSON with:
-   - `rel: "self"` link → `https://{domain}/users/{username}`
-   - `rel: "http://webfinger.net/rel/profile-page"` link → `https://{domain}/@{username}`
+   - `rel: "self"` link → `https://{SERVER_DOMAIN}/users/{username}`
+   - `rel: "http://webfinger.net/rel/profile-page"` link → `https://{SERVER_DOMAIN}/@{username}`
 6. Content-Type: `application/jrd+json`
 
 ### ActorHandler — `GET /users/{username}`
@@ -96,8 +103,9 @@ Returns the full ActivityPub Actor document (JSON-LD).
 1. Extract `{username}` from path parameters
 2. Look up actor in DynamoDB
 3. Return 404 if not found
-4. Build Actor JSON-LD with full `@context` (AS2 + security + toot namespace), public key block, endpoints (inbox, outbox, followers, following, featured, featuredTags)
-5. Content-Type: `application/activity+json`
+4. Content-negotiate: if `Accept` header contains `application/activity+json` or `application/ld+json`, return Actor JSON-LD. If `text/html`, return 302 redirect to `https://{SERVER_DOMAIN}/@{username}`. Default to JSON-LD.
+5. Build Actor JSON-LD with full `@context` (AS2 + security + toot namespace), public key block, endpoints (inbox, outbox, followers, following, featured, featuredTags). `attributionDomains` set to `[HANDLE_DOMAIN]`.
+6. Content-Type: `application/activity+json`
 
 The Actor JSON structure follows the spec exactly (lines 349-400 of PROJECT-PLAN.md).
 
@@ -143,18 +151,19 @@ swift run ActivityProvisioner \
 ```
 
 Steps:
-1. Generate RSA 2048 keypair using `swift-crypto`
+1. Generate RSA 2048 keypair using `swift-crypto` (`_CryptoExtras` module)
 2. Store private key as SSM SecureString at `/activity/{stage}/keys/{username}`
 3. Write actor profile to DynamoDB:
    - PK: `ACTOR#{username}`, SK: `PROFILE`
    - All fields from the Actor model
    - `publicKeyPem`: PEM-encoded public key
+   - `privateKeyArn`: SSM parameter path (`/activity/{stage}/keys/{username}`)
    - `followerCount`, `followingCount`, `statusCount`: 0
    - `manuallyApprovesFollowers`: false
    - `discoverable`: true
    - `createdAt`: current ISO 8601 timestamp
 
-Dependencies: `AWSDynamoDB`, `AWSSSM`, `Crypto` (from swift-crypto), `ArgumentParser` (for CLI arg parsing)
+Dependencies: `AWSDynamoDB`, `AWSSSM`, `_CryptoExtras` (from swift-crypto), `ArgumentParser` (for CLI arg parsing)
 
 ## SAM Template Changes
 
@@ -165,9 +174,15 @@ EnvironmentStackName:
   Type: String
   Default: activity-environment-stage
 
-DomainName:
+ServerDomain:
   Type: String
   Default: activity.happitec.com
+  Description: Domain where actor URLs live
+
+HandleDomain:
+  Type: String
+  Default: happitec.com
+  Description: Domain used in handles (@user@happitec.com)
 ```
 
 ### Environment Variables (all Lambda functions)
@@ -177,7 +192,8 @@ Environment:
   Variables:
     TABLE_NAME: !ImportValue
       Fn::Sub: "${EnvironmentStackName}-TableName"
-    DOMAIN_NAME: !Ref DomainName
+    SERVER_DOMAIN: !Ref ServerDomain
+    HANDLE_DOMAIN: !Ref HandleDomain
 ```
 
 ### IAM Policies (federation handlers)
@@ -191,7 +207,7 @@ Policies:
 
 SAM's `DynamoDBReadPolicy` grants `GetItem`, `Scan`, `Query`, `BatchGetItem` on the table. Sufficient for all Phase 1a handlers.
 
-### API Gateway Routes (8 total)
+### API Gateway Routes (9 total, 8 handlers)
 
 ```
 GET /.well-known/webfinger       → WebFingerFunction
@@ -226,7 +242,7 @@ CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/{HandlerN
 
 - `ActivityPubCore` — library target, depends on `AWSDynamoDB`
 - 7 new executable targets (ActorHandler, NodeInfoHandler, OutboxHandler, FollowersHandler, FollowingHandler, FeaturedHandler, FeaturedTagsHandler) — all depend on `ActivityPubCore`, `AWSLambdaRuntime`, `AWSLambdaEvents`
-- `ActivityProvisioner` — executable target, depends on `ActivityPubCore`, `AWSDynamoDB`, `AWSSSM`, `Crypto`, `ArgumentParser`
+- `ActivityProvisioner` — executable target, depends on `ActivityPubCore`, `AWSDynamoDB`, `AWSSSM`, `_CryptoExtras`, `ArgumentParser`
 - Updated `WebFingerHandler` — add `ActivityPubCore` dependency
 
 ## Build Pipeline Changes
@@ -242,8 +258,8 @@ This avoids building the CLI inside Docker (it's not a Lambda and doesn't need t
 ## Success Criteria
 
 1. Run provisioning CLI to seed actor `randomforms` in stage DynamoDB
-2. `GET .../webfinger?resource=acct:randomforms@activity.happitec.com` → 200, dynamic JRD from DynamoDB
-3. `GET .../webfinger?resource=acct:nonexistent@activity.happitec.com` → 404
+2. `GET .../webfinger?resource=acct:randomforms@happitec.com` → 200, dynamic JRD from DynamoDB (note: handle domain is `happitec.com`, actor URLs point to `activity.happitec.com`)
+3. `GET .../webfinger?resource=acct:nonexistent@happitec.com` → 404
 4. `GET .../users/randomforms` → 200, full Actor JSON-LD with public key and all endpoint URLs
 5. `GET .../users/nonexistent` → 404
 6. `GET .../.well-known/nodeinfo` → 200, JRD with link to `/nodeinfo/2.1`
