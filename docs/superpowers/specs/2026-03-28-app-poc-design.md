@@ -89,7 +89,7 @@ Minimal SAM template:
 - Architecture: `arm64`
 - Memory: 512MB
 - Timeout: 30s
-- CodeUri: `.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/WebFingerHandler/WebFingerHandler.zip`
+- CodeUri: `../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/WebFingerHandler/WebFingerHandler.zip` (relative to `activity-app/`, where the template lives)
 - One API event: `GET /.well-known/webfinger`
 - Parameters: `Stage` (for stack naming)
 
