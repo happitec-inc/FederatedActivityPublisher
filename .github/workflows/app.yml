@@ -35,10 +35,14 @@ jobs:
           aws-region: us-east-1
 
       - name: Install Swift
-        uses: happitec-inc/happitec-logo-generator/.github/actions/setup-swift-wasm@main
-        with:
-          swift-version: "6.3"
-          wasm-sdk: "false"
+        run: |
+          if swift --version 2>/dev/null | grep -q "6.3"; then
+            echo "Swift 6.3 already installed"
+          else
+            curl -fsSL "https://download.swift.org/swift-6.3-release/ubuntu2404/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04.tar.gz" \
+              | sudo tar xz --strip-components=2 -C /usr/local
+          fi
+          swift --version
 
       - name: Build Lambda zip
         run: swift package --allow-network-connections docker archive
