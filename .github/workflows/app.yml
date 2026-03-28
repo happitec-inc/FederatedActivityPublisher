@@ -19,6 +19,9 @@ jobs:
   deploy:
     runs-on: [self-hosted, linux]
     steps:
+      - name: Clean workspace
+        run: sudo rm -rf .build/
+
       - name: Checkout
         uses: actions/checkout@v6
 
