@@ -13,6 +13,7 @@ Parameters:
 
 Resources:
   HostedZone:
+    DeletionPolicy: Retain
     Type: AWS::Route53::HostedZone
     Properties:
       Name: !Ref DomainName
@@ -20,6 +21,7 @@ Resources:
         Comment: !Sub "ActivityPub server zone for ${DomainName}"
 
   WildcardCertificate:
+    DeletionPolicy: Retain
     Type: AWS::CertificateManager::Certificate
     Properties:
       DomainName: !Ref DomainName
