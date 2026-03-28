@@ -1,0 +1,9 @@
+version = 0.1
+
+[default.global.parameters]
+stack_name = "activity-bootstrap"
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+region = "us-east-1"
