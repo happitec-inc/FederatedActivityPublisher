@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  activity-environment — per-environment data layer.
+  Long-lived data stores and queues. Prod and stage each get their own stack.
+  You can redeploy the app stack without touching data.
+
+Parameters:
+  Stage:
+    Type: String
+    AllowedValues:
+      - prod
+      - stage
+    Description: Environment name (prod or stage)
+
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
+
+Resources:
+  MediaBucket:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "activity-media-${Stage}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  ActorsTable:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "activity-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  DeliveryQueue:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "activity-delivery-${Stage}"
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeliveryDLQ.Arn
+        maxReceiveCount: 3
+
+  DeliveryDLQ:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "activity-delivery-dlq-${Stage}"
+
+  DLQAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "activity-dlq-alarm-${Stage}"
+
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "activity-dlq-depth-${Stage}"
+      AlarmDescription: !Sub "Messages in activity delivery DLQ (${Stage})"
+      AlarmActions:
+        - !Ref DLQAlarmTopic
+      OKActions:
+        - !Ref DLQAlarmTopic
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt DeliveryDLQ.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  MediaBucketName:
+    Description: S3 media bucket name
+    Value: !Ref MediaBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-MediaBucketName"
+
+  MediaBucketArn:
+    Description: S3 media bucket ARN
+    Value: !GetAtt MediaBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-MediaBucketArn"
+
+  TableName:
+    Description: DynamoDB table name
+    Value: !Ref ActorsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-TableName"
+
+  TableArn:
+    Description: DynamoDB table ARN
+    Value: !GetAtt ActorsTable.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TableArn"
+
+  QueueUrl:
+    Description: SQS delivery queue URL
+    Value: !Ref DeliveryQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-QueueUrl"
+
+  QueueArn:
+    Description: SQS delivery queue ARN
+    Value: !GetAtt DeliveryQueue.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-QueueArn"
+
+  SSMKeyPrefix:
+    Description: SSM Parameter Store prefix for actor keys
+    Value: !Sub "/activity/${Stage}/keys/"
+    Export:
+      Name: !Sub "${AWS::StackName}-SSMKeyPrefix"
