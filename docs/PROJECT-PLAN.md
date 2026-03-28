@@ -295,7 +295,7 @@ Single-table design. Partition key `PK`, sort key `SK`. GSI1 for reverse lookups
 | Entity | PK | SK | Attributes |
 |--------|----|----|------------|
 | Actor | `ACTOR#{username}` | `PROFILE` | displayName, summary, avatarUrl, headerUrl, publicKeyPem, privateKeyArn, createdAt, discoverable, manuallyApprovesFollowers, followerCount, followingCount, statusCount |
-| Status | `ACTOR#{username}` | `STATUS#{ulid}` | content, contentWarning, visibility, attachments[] (denormalized: includes CloudFront URL, contentType, description, blurhash per attachment — avoids N+1 media fetches on outbox reads), inReplyTo, quotedStatusUri, quoteApprovalPolicy (public/followers/nobody), published, sensitive, language, to[], cc[], likesCount, boostsCount, repliesCount, quotesCount |
+| Status | `ACTOR#{username}` | `STATUS#{ulid}` | content (HTML), contentWarning, visibility, attachments[] (denormalized: includes CloudFront URL, contentType, description, blurhash, focalPoint per attachment — avoids N+1 media fetches on outbox reads), inReplyTo, quotedStatusUri, quoteApprovalPolicy (public/followers/nobody), quoteApprovalState (pending/accepted/rejected — for outbound quotes), published, updatedAt (ISO 8601, set on post edits — triggers `Update` federation), sensitive, language, tags[] (array of `{type, name, href}` — Hashtag, Mention, or Emoji entries for the Note's `tag` property), url (human-readable permalink, e.g. `https://activity.happitec.com/@randomforms/{id}`), to[], cc[], likesCount, boostsCount, repliesCount, quotesCount (only incremented on accepted quotes) |
 | Follower | `ACTOR#{username}` | `FOLLOWER#{actorUri}` | inboxUrl, sharedInboxUrl, followActivityId, acceptedAt |
 | Received Activity | `ACTOR#{username}` | `ACTIVITY#{type}#{ulid}` | actorUri, type, objectUri, raw, receivedAt |
 | Media | `MEDIA#{id}` | `META` | s3Key, contentType, blurhash, description, width, height, size |
@@ -323,7 +323,10 @@ All Swift, using `swift-aws-lambda-runtime` with API Gateway REST API event type
 
 #### `webfinger` — `GET /.well-known/webfinger`
 
-Resolves `?resource=acct:username@happitec.com` to the actor URI. The response's `links` array must include `rel: "self"` with `type: "application/activity+json"` and `href` pointing to the actor URL — this is the critical link Mastodon uses for discovery.
+Resolves `?resource=acct:username@happitec.com` to the actor URI. Response Content-Type must be `application/jrd+json`. The response's `links` array must include:
+- `rel: "self"`, `type: "application/activity+json"`, `href: "https://activity.happitec.com/users/{username}"` — the critical link Mastodon uses for ActivityPub discovery.
+- `rel: "http://webfinger.net/rel/profile-page"`, `type: "text/html"`, `href: "https://activity.happitec.com/@{username}"` — human-readable profile page link. Not strictly required for federation but expected by clients and used for link previews.
+- `rel: "http://ostatus.org/schema/1.0/subscribe"`, `template: "https://activity.happitec.com/authorize_interaction?uri={uri}"` — enables Mastodon's remote follow UI ("Follow from another instance" button). Phase 6 requirement; omit for MVP but document as needed for full client compat.
 
 #### `actor` — `GET /users/{username}`
 
@@ -344,7 +347,9 @@ Response (Content-Type: `application/activity+json`):
       "attributionDomains": {"@id": "toot:attributionDomains", "@type": "@id"},
       "schema": "http://schema.org#",
       "PropertyValue": "schema:PropertyValue",
-      "value": "schema:value"
+      "value": "schema:value",
+      "manuallyApprovesFollowers": "as:manuallyApprovesFollowers",
+      "sensitive": "as:sensitive"
     }
   ],
   "id": "https://activity.happitec.com/users/randomforms",
@@ -378,6 +383,20 @@ Response (Content-Type: `application/activity+json`):
 
 Note: `type: "Service"` signals to other servers that this is a bot/service account, not a human. This is correct for app brand accounts.
 
+**Note-level `@context` additions:** When serializing `Note` objects for federation, the `@context` must also include:
+```json
+{
+  "Hashtag": "as:Hashtag",
+  "sensitive": "as:sensitive",
+  "blurhash": "toot:blurhash",
+  "focalPoint": {"@container": "@list", "@id": "toot:focalPoint"},
+  "votersCount": "toot:votersCount",
+  "Emoji": "toot:Emoji",
+  "quoteUri": "toot:quoteUri"
+}
+```
+For Misskey/Calckey compat, also emit `_misskey_quote` alongside `quoteUri`. The canonical FEP-044f property is `quoteUri` (Mastodon namespace `toot:quoteUri`). Mastodon also understands `quoteUrl` for ingestion.
+
 Note: `manuallyApprovesFollowers: false` means all Follow requests are auto-accepted. If set to `true`, inbox would need to store pending follows and expose an approval API — out of scope for MVP. Hardcode `false` in Phase 2; revisit if we need approval flows later.
 
 #### `inbox` — `POST /users/{username}/inbox`
@@ -386,13 +405,13 @@ Receives activities from remote servers. Must verify HTTP Signatures.
 
 **HTTP Signature verification (dual-stack):** Two standards are in play:
 
-1. **Legacy HTTP Signatures (Cavage draft):** Uses a single `Signature:` header with `keyId`, `headers`, `signature` params. Signed headers typically include `(request-target) host date digest`. RSA-SHA256 (RSASSA-PKCS1-v1_5 with SHA-256). POST requests must include `Digest: SHA-256=<base64(sha256(body))>` and `digest` must be in the signature's `headers` parameter. Mastodon still accepts this.
+1. **Legacy HTTP Signatures (Cavage draft):** Uses a single `Signature:` header with `keyId`, `headers`, `signature` params. Signed headers typically include `(request-target) host date digest`. RSA-SHA256 (RSASSA-PKCS1-v1_5 with SHA-256). POST requests must include `Digest: SHA-256=<base64(sha256(body))>` (note: Mastodon's canonical examples use lowercase `sha-256=` in the `Digest` header value — both forms work in practice, but prefer lowercase for maximum compat) and `digest` must be in the signature's `headers` parameter. Mastodon still accepts this.
 
 2. **RFC 9421 HTTP Message Signatures (Mastodon 4.5+):** Uses separate `Signature:` and `Signature-Input:` headers. Signs derived components `@method` and `@target-uri` (both REQUIRED by Mastodon). Uses `Content-Digest` header (RFC 9530) instead of legacy `Digest`. `created` parameter MUST be present. Only supports single signature. Algorithm is still RSASSA-PKCS1-v1_5 with SHA-256.
 
 **Implementation strategy:** For **outbound** delivery (`λ deliver`), sign with the legacy Cavage format for maximum compatibility with older servers. Consider adding RFC 9421 as a secondary signature later. For **inbound** verification (`λ inbox`), accept both formats — check for `Signature-Input` header presence to determine which to verify. Mastodon 4.5 validates both.
 
-Requires fetching the remote actor's public key via their `publicKey.id` URL. To avoid a round-trip on every request, cache fetched actor documents in DynamoDB with a 24h TTL (entity: `REMOTE_ACTOR#{actorUri}`, SK: `PROFILE`). Refresh on signature verification failure (key rotation).
+Requires fetching the remote actor's public key via their `publicKey.id` URL. To avoid a round-trip on every request, cache fetched actor documents in DynamoDB with a 24h TTL (entity: `REMOTE_ACTOR#{actorUri}`, SK: `PROFILE`). Refresh on signature verification failure (key rotation). **Important:** When refreshing on key rotation, update both the `publicKeyPem` field AND the `ttl` attribute — otherwise the TTL might expire before the next verification, causing an unnecessary re-fetch cycle.
 
 **`Date` header staleness:** Mastodon rejects inbound requests where the signed `Date` header is more than **12 hours** old. We should enforce a similar window. For RFC 9421, the `created` parameter serves the same role.
 
@@ -410,7 +429,12 @@ Supported activities:
 - `Delete` → remove stored reply/activity, return 410 Gone for the deleted object's URI on subsequent fetches (tombstone record in DynamoDB with TTL)
 - `Update` → update cached remote actor document; also handle `Update` on Note (federated post edits, Mastodon 3.5+) when `updated` timestamp is present
 - `Flag` → store report for moderation review (from remote instance actors)
-- `QuoteRequest` → Mastodon 4.5+ (FEP-044f). Remote server asks permission to quote one of our posts. Check our `quote_approval_policy`: if auto-approved, send `Accept`; otherwise `Reject`. The `instrument` field contains the quoting status URI/object.
+- `QuoteRequest` → Mastodon 4.5+ (FEP-044f). Remote server asks permission to quote one of our posts. Check the quoted status's `quoteApprovalPolicy`: `public` → auto-accept unless blocked; `followers` → auto-accept if actor is a follower; `nobody` → reject (only author can quote). Private/direct statuses always reject (`distributable?` check — only public/unlisted statuses can be quoted). The `instrument` field contains the URI of the quoting status. On accept, enqueue an `Accept` activity delivery; on reject, enqueue `Reject`.
+- `Accept` (of QuoteRequest) → When WE send a `QuoteRequest` for quoting a remote post, the remote server responds with `Accept`. Update our stored quote's approval state to `accepted`.
+- `Reject` (of QuoteRequest) → Remote server rejected our quote. Update stored quote's approval state to `rejected`. Consider removing the quote reference from the status (or marking it as rejected in the API response).
+- `Block` → Remote user blocked one of our actors. Log and store. For MVP: log + 202 (no behavioral change), but document that eventually blocked actors should not appear in follower lists and deliveries should be suppressed.
+- `Move` → Account migration. Remote actor moved to a new URI. Log + 202 for MVP. Full handling would re-follow the new actor and update stored references. Document as Phase 5+.
+- `Add` / `Remove` → Used for pinned posts (featured collection management). Log + 202 for MVP.
 - **Unrecognized types** → log and return 202 (forward compatibility — never reject unknown activity types)
 
 #### `object` — `GET /users/{username}/statuses/{id}`
@@ -419,13 +443,19 @@ Object resolution endpoint. Remote servers fetch Note objects directly by URI (e
 
 #### `outbox` — `GET /users/{username}/outbox`
 
-Returns an OrderedCollection of the actor's public statuses, paginated.
+Returns an `OrderedCollection` of the actor's public statuses, paginated. The root collection (no `page` param, or `page=false`) returns only `totalItems`, `first`, and `last` URIs — it MUST NOT embed `orderedItems` inline. Only `OrderedCollectionPage` responses (when `page=true` is in the query) contain `orderedItems`, plus `partOf` (pointing back to the collection URI), `next`, and `prev` pagination links.
+
+**Content negotiation for browser requests:** If the `Accept` header indicates `text/html` (e.g., a browser visit), return a 302 redirect to the human-readable profile page (`/@{username}`) instead of raw JSON. This applies to the actor endpoint as well.
 
 #### `deliver` — SQS consumer
 
 Reads delivery jobs, constructs signed ActivityPub activities, POSTs to remote inboxes. Handles retries via SQS visibility timeout + DLQ for persistent failures. Set `maxReceiveCount: 3` on the DLQ redrive policy.
 
 **Shared inbox coalescing:** When multiple followers are on the same server (e.g. mastodon.social), deliver one copy to that server's `sharedInboxUrl` instead of N individual copies. The `λ post` handler should group follower inboxes by shared inbox URL when enqueuing delivery jobs, producing one SQS message per unique shared inbox. This is practically required — without it, a post to an account with 500 mastodon.social followers sends 500 identical HTTP requests.
+
+**`Collection-Synchronization` header (Phase 5+):** When delivering to a remote server, Mastodon attaches an optional `Collection-Synchronization` header to help the remote server detect follower list drift. The header includes: `collectionId` (sender's followers collection URI), `url` (partial collection endpoint containing only followers from the receiver's domain), and `digest` (XOR of SHA-256 hashes of all follower URIs in that partial collection). If the receiver detects a mismatch, it can fetch the partial collection URL (signed GET) to reconcile. **For MVP:** Don't send this header on outbound deliveries. **For Phase 5+:** Implement partial follower collection endpoint and header generation. Without this, follower count drift can accumulate over time (e.g., if a follower deletes their account on the remote server but our DynamoDB still has the record). **For inbound:** Accept and ignore this header for now — its presence does not affect inbox processing.
+
+**HTML sanitization for inbound content:** When storing `Create` (Note) activities from remote servers, the `content` field contains untrusted HTML. Before serving this content through our API, sanitize it to the Mastodon-compatible allowlist: `<p>`, `<span>`, `<br>`, `<a>`, `<del>`, `<pre>`, `<code>`, `<em>`, `<strong>`, `<b>`, `<i>`, `<u>`, `<ul>`, `<ol>`, `<li>`, `<blockquote>`. Strip all other tags. This can be deferred to API response time rather than inbox processing time, but it must happen before untrusted HTML reaches clients.
 
 #### `followers` — `GET /users/{username}/followers`
 
@@ -434,6 +464,14 @@ Returns an OrderedCollection of follower actor URIs, paginated. Uses GSI1 with `
 #### `nodeinfo` — `GET /.well-known/nodeinfo` + `GET /nodeinfo/2.1`
 
 Two-step discovery: `/.well-known/nodeinfo` returns a link to `/nodeinfo/2.1`, which returns server metadata (software name/version, protocols, user/post counts, open registrations: false). Mastodon 4.x and GoToSocial query this for federation health. Can be a single Lambda or folded into the WebFinger handler. Mostly static — heavy CloudFront caching (24h+).
+
+#### `featured` — `GET /users/{username}/collections/featured`
+
+Returns an `OrderedCollection` of pinned/featured statuses. For MVP, returns an empty collection (`totalItems: 0`, empty `orderedItems`). Required because the actor document advertises a `featured` URL — returning 404 degrades profile display on some servers (Mastodon shows a "could not fetch pinned posts" warning). Served from CloudFront cache (24h), invalidated on pin/unpin (Phase 5+).
+
+#### `featuredTags` — `GET /users/{username}/collections/tags`
+
+Returns an `OrderedCollection` of featured hashtags for the actor. For MVP, returns an empty collection. Similar rationale to `featured` — the actor advertises this URL and some servers attempt to fetch it.
 
 #### `following` — `GET /users/{username}/following`
 
@@ -445,12 +483,34 @@ Returns an empty `OrderedCollection` with `totalItems: 0`. Brand/service account
 
 Create a new status. Writes to DynamoDB (environment table), atomically increments `statusCount` on the actor profile via `UpdateItem`, fans out delivery jobs to SQS (environment queue), fires CloudFront invalidation for outbox.
 
-**Critical: `to`/`cc` addressing on Create activities.** Every outbound `Create` activity and its embedded `Note` must include:
+**Critical: `to`/`cc` addressing on Create activities.** Addressing varies by visibility:
+
+For `public`:
 ```json
 "to": ["https://www.w3.org/ns/activitystreams#Public"],
 "cc": ["https://activity.happitec.com/users/randomforms/followers"]
 ```
-Without these, Mastodon and most servers will **not display the post in followers' timelines** — it's a silent failure where delivery succeeds (202) but the post is invisible.
+For `unlisted`:
+```json
+"to": ["https://activity.happitec.com/users/randomforms/followers"],
+"cc": ["https://www.w3.org/ns/activitystreams#Public"]
+```
+
+For `private` (followers-only):
+```json
+"to": ["https://activity.happitec.com/users/randomforms/followers"],
+"cc": ["https://mentioned.actor/users/someone"]
+```
+No `as:Public` anywhere. Only deliver to follower inboxes + explicitly mentioned actors.
+
+For `direct`:
+```json
+"to": ["https://mentioned.actor/users/someone"],
+"cc": []
+```
+Only mentioned actors in `to`. All `to`/`cc` targets must also appear as `Mention` entries in `tag`.
+
+Without correct addressing, Mastodon and most servers will **not display the post in followers' timelines** — it's a silent failure where delivery succeeds (202) but the post is invisible.
 
 The `Note` must also include `"attributedTo": "https://activity.happitec.com/users/{username}"`.
 
@@ -458,6 +518,15 @@ Outbox items must be `Create` wrapper activities (not bare `Note` objects):
 ```json
 {"type": "Create", "actor": "...", "object": {...Note...}, "to": [...], "cc": [...]}
 ```
+
+**Outbound QuoteRequest flow (FEP-044f):** When `quoted_status_id` is provided and the quoted status is a remote post:
+1. `λ post` stores the status with `quotedStatusUri` and approval state `pending`.
+2. `λ post` enqueues a `QuoteRequest` delivery job targeting the quoted post's actor inbox, with `object` = quoted post URI and `instrument` = our quoting Note URI.
+3. The remote server processes the request and sends back `Accept` or `Reject` to our inbox.
+4. `λ inbox` updates the quote approval state on our stored status accordingly.
+5. Until accepted, the quote should be visible locally but the `quoteUri` property should NOT be included in outbound federation of the Note (to avoid federating unapproved quotes).
+
+**Text-to-HTML conversion:** The `status` field in `CreateStatusRequest` is plain text. Before storing and federating, `λ post` must convert it to valid HTML: wrap paragraphs in `<p>` tags, convert `\n\n` to `</p><p>`, convert single `\n` to `<br>`, autolink URLs, and resolve `@mention` and `#hashtag` syntax to proper `<a>` tags with appropriate `href` attributes. The federated Note's `content` field must be valid HTML — Mastodon will not render plain text correctly.
 
 Auth: Bearer token (simple shared secret per actor for MVP).
 
@@ -646,9 +715,10 @@ paths:
       summary: Receive an ActivityPub activity
       tags: [federation]
       description: |
-        Federation inbox. Receives Follow, Undo, Like, Announce,
-        Create (replies), Delete, and Update activities.
-        Requires valid HTTP Signature.
+        Federation inbox. Receives Follow, Accept, Reject, Undo, Like, Announce,
+        Create (replies), Delete, Update, Flag, QuoteRequest, Block, Move, Add,
+        and Remove activities. Unrecognized types are logged and return 202.
+        Requires valid HTTP Signature (Cavage draft or RFC 9421).
       parameters:
         - $ref: "#/components/parameters/username"
       requestBody:
@@ -729,6 +799,42 @@ paths:
               schema:
                 $ref: "#/components/schemas/OrderedCollection"
 
+  /users/{username}/collections/featured:
+    get:
+      operationId: getFeatured
+      summary: Fetch pinned/featured statuses
+      tags: [federation]
+      description: |
+        Returns an OrderedCollection of pinned statuses.
+        Empty for MVP. Must exist to avoid 404 when remote servers fetch it.
+      parameters:
+        - $ref: "#/components/parameters/username"
+      responses:
+        "200":
+          description: Ordered collection of pinned statuses
+          content:
+            application/activity+json:
+              schema:
+                $ref: "#/components/schemas/OrderedCollection"
+
+  /users/{username}/collections/tags:
+    get:
+      operationId: getFeaturedTags
+      summary: Fetch featured hashtags
+      tags: [federation]
+      description: |
+        Returns an OrderedCollection of featured hashtags.
+        Empty for MVP.
+      parameters:
+        - $ref: "#/components/parameters/username"
+      responses:
+        "200":
+          description: Ordered collection of featured hashtags
+          content:
+            application/activity+json:
+              schema:
+                $ref: "#/components/schemas/OrderedCollection"
+
   # ── App Stack — Client (authoring) ───────────────────────────
 
   /api/v1/statuses:
@@ -793,7 +899,19 @@ paths:
                   description: "Focal point as x,y (-1.0 to 1.0)"
       responses:
         "200":
-          description: Media attachment created
+          description: Media attachment created (synchronous processing)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaAttachment"
+        "202":
+          description: |
+            Media accepted for async processing (Mastodon returns this for /api/v2/media
+            when processing is not instant). The response body is the same MediaAttachment
+            schema but `url` may be null until processing completes. Clients should poll
+            GET /api/v1/media/{id} until `url` is populated. For our MVP with synchronous
+            Lambda processing, we can return 200 directly — but Mastodon client apps
+            (Ivory, Ice Cubes) expect to handle 202 gracefully.
           content:
             application/json:
               schema:
@@ -913,7 +1031,7 @@ components:
           format: uri
         type:
           type: string
-          description: "Activity type: Follow, Undo, Like, Announce, Create, Delete, Update, Flag, QuoteRequest"
+          description: "Activity type: Follow, Accept, Reject, Undo, Like, Announce, Create, Delete, Update, Flag, QuoteRequest, Block, Move, Add, Remove"
         actor:
           type: string
           format: uri
@@ -925,6 +1043,9 @@ components:
 
     OrderedCollection:
       type: object
+      description: |
+        Root collection (type=OrderedCollection): has totalItems, first, last — no orderedItems.
+        Page (type=OrderedCollectionPage): has orderedItems, partOf, next, prev — no first/last.
       properties:
         "@context":
           type: string
@@ -939,11 +1060,18 @@ components:
         first:
           type: string
           format: uri
+          description: Root collection only — URI of first page
         last:
           type: string
           format: uri
+          description: Root collection only — URI of last page
+        partOf:
+          type: string
+          format: uri
+          description: Page only — URI of the parent collection
         orderedItems:
           type: array
+          description: Page only — items on this page
           items:
             $ref: "#/components/schemas/Activity"
         next:
@@ -1178,7 +1306,11 @@ Resources:
       - GET /users/{username}/statuses/{id} → ObjectFunction
       - GET /users/{username}/followers → FollowersFunction
       - GET /users/{username}/following → FollowingFunction
-  NodeInfoFunction, WebFingerFunction, ActorFunction, ObjectFunction, InboxFunction, OutboxFunction, FollowersFunction, FollowingFunction
+      - GET /users/{username}/collections/featured → FeaturedFunction
+      - GET /users/{username}/collections/tags → FeaturedTagsFunction
+  NodeInfoFunction, WebFingerFunction, ActorFunction, ObjectFunction, OutboxFunction, FollowersFunction, FollowingFunction, FeaturedFunction, FeaturedTagsFunction
+  InboxFunction:
+    ReservedConcurrentExecutions: 25 (prevent unbounded invocations from malicious/misconfigured servers — the inbox is publicly writable by all federated servers; tie into WAF/rate-limiting in Open Question #7)
   DeliverFunction:
     Timeout: 60 (outbound HTTP to remote servers can be slow)
     ReservedConcurrentExecutions: 5 (prevent runaway fan-out)
@@ -1188,10 +1320,15 @@ Resources:
       - SQS: ReceiveMessage, DeleteMessage, GetQueueAttributes (environment queue — implicit via SAM Events, but explicit for clarity)
   InboxFunction:
     Policies:
-      - DynamoDB: GetItem, PutItem, DeleteItem, UpdateItem, Query (environment table)
-      - SQS: SendMessage (environment queue)
-      - SSM: GetParameter with decryption (environment keys — for signature verification key cache refresh)
+      - DynamoDB: GetItem, PutItem, DeleteItem, UpdateItem, Query (environment table — remote actor public keys are cached here, NOT in SSM)
+      - SQS: SendMessage (environment queue — for enqueuing Accept/Reject delivery jobs)
       - CloudFront: CreateInvalidation (own distribution — for Delete activity cache busting)
+    # NOTE: InboxFunction does NOT need SSM access. Signature verification uses the remote
+    # actor's PUBLIC key, which is fetched via HTTP and cached in DynamoDB (REMOTE_ACTOR#).
+    # Our own private key (in SSM) is only needed by DeliverFunction and PostFunction for signing.
+    # CloudFront distribution ID: passed as environment variable (Fn::GetAtt from CloudFrontDistribution
+    # in the same template — no circular reference since CloudFront is defined before Lambdas in the
+    # app template, and the InboxFunction's env var references the distribution's logical ID).
 
   # ── Client (write path) ────────────────
   ClientApi (API Gateway REST API, separate domain):
@@ -1245,6 +1382,8 @@ Package.swift (swift-tools-version: 6.0)
 │   ├── OutboxHandler/                # App stack — federation
 │   ├── FollowersHandler/            # App stack — federation
 │   ├── FollowingHandler/            # App stack — federation (returns empty collection)
+│   ├── FeaturedHandler/             # App stack — federation (pinned posts, empty for MVP)
+│   ├── FeaturedTagsHandler/         # App stack — federation (featured hashtags, empty for MVP)
 │   ├── DeliverHandler/              # App stack — federation (SQS consumer)
 │   ├── PostHandler/                  # App stack — client
 │   └── MediaUploadHandler/           # App stack — client
@@ -1334,12 +1473,20 @@ The `Makefile` should produce a flat binary + `bootstrap` symlink per handler, z
 ### Phase 5 — Interactions
 - Inbox: receive and store likes, boosts, replies
 - Inbox: handle `Update` for Note objects (federated post edits — separate code path from actor `Update`)
+- Inbox: handle `Block`, `Move`, `Add`/`Remove` (log + store for MVP; full behavior later)
+- Inbox: handle `Accept`/`Reject` responses to our outbound `QuoteRequest` activities
+- Outbound: send `QuoteRequest` when authoring quotes of remote posts (via `λ post` + `λ deliver`)
+- Implement `Collection-Synchronization` header on outbound deliveries + partial follower collection endpoint
+- Inbound HTML sanitization (allowlisted tags only before serving through client API)
 - Expose counts in outbox
 - Activity idempotency (deduplicate by activity `id` on retry storms)
 - **Milestone:** Full two-way federation for supported activity types
 
 ### Phase 6 (stretch) — Mastodon client API
 - OAuth2 token flow (added to app stack's client API)
+- `GET /api/v1/instance` — first endpoint any Mastodon client fetches; required before any other client compat
+- `GET /api/v1/media/{id}` — poll endpoint for async media processing (needed if we return 202 from media upload)
+- WebFinger `subscribe` template link + `/authorize_interaction` endpoint (enables remote follow UI)
 - Expanded REST API for client compatibility
 - **Milestone:** Post from Ivory or Ice Cubes
 
