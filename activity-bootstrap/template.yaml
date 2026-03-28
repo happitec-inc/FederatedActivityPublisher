@@ -29,8 +29,6 @@ Resources:
       DomainValidationOptions:
         - DomainName: !Ref DomainName
           HostedZoneId: !Ref HostedZone
-        - DomainName: !Sub "*.${DomainName}"
-          HostedZoneId: !Ref HostedZone
 
 Outputs:
   HostedZoneId:
