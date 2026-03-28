@@ -1,0 +1,58 @@
+name: Deploy Environment Stack
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Environment to deploy (prod or stage)"
+        required: true
+        type: choice
+        options:
+          - stage
+          - prod
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install SAM CLI
+        uses: happitec-inc/happitec-logo-generator/.github/actions/setup-sam-portable@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: SAM build
+        run: sam build --template-file activity-environment/template.yaml
+
+      - name: SAM deploy
+        run: |
+          sam deploy \
+            --template-file .aws-sam/build/template.yaml \
+            --stack-name "activity-environment-${{ inputs.stage }}" \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --region us-east-1 \
+            --parameter-overrides \
+              Stage=${{ inputs.stage }}
+
+      - name: Print stack outputs
+        run: |
+          echo "## Stack Outputs" >> $GITHUB_STEP_SUMMARY
+          aws cloudformation describe-stacks \
+            --stack-name "activity-environment-${{ inputs.stage }}" \
+            --query "Stacks[0].Outputs[].[OutputKey, OutputValue]" \
+            --output table \
+            --region us-east-1 >> $GITHUB_STEP_SUMMARY
