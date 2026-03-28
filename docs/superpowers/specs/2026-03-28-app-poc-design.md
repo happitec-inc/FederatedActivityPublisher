@@ -36,7 +36,7 @@ Prove the Swift-on-Lambda build pipeline works end-to-end: Swift source compiles
 ## Build Pipeline
 
 ```
-swift package archive --allow-network-connections docker
+swift package --allow-network-connections docker archive
   → Pulls swift:6.3-amazonlinux2
   → Builds release binary with --static-swift-stdlib inside container
   → Produces .build/plugins/AWSLambdaPackager/outputs/.../WebFingerHandler.zip
@@ -99,7 +99,7 @@ Manual dispatch only for Phase 0. Steps:
 1. Checkout
 2. Install SAM CLI (setup-sam-portable)
 3. Configure AWS credentials
-4. `swift package archive --allow-network-connections docker` (builds inside Docker, produces zip)
+4. `swift package --allow-network-connections docker archive` (builds inside Docker, produces zip)
 5. `sam deploy` with the pre-built zip
 6. Print stack outputs (API Gateway URL) to job summary
 
