@@ -52,6 +52,9 @@ jobs:
           fi
           swift --version
 
+      - name: Install zip
+        run: which zip || sudo apt-get install -y zip
+
       - name: Build Lambda zip
         run: swift package --allow-network-connections docker archive
 
