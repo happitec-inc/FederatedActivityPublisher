@@ -4,11 +4,6 @@ permissions:
   contents: read
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "activity-bootstrap/**"
   workflow_dispatch:
 
 jobs:
