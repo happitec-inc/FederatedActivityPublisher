@@ -4,7 +4,7 @@ import AWSLambdaRuntime
 let runtime = LambdaRuntime {
     (event: APIGatewayRequest, context: LambdaContext) -> APIGatewayResponse in
 
-    let resource = event.queryStringParameters?["resource"]
+    let resource = event.queryStringParameters["resource"]
 
     guard let resource else {
         return APIGatewayResponse(
