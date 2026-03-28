@@ -1,0 +1,38 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Activity.happitec.com App Stack — Phase 0 PoC
+
+Parameters:
+  Stage:
+    Type: String
+    Default: stage
+    AllowedValues:
+      - stage
+      - prod
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+
+Resources:
+  WebFingerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-webfinger-${Stage}"
+      Runtime: provided.al2023
+      Architectures:
+        - arm64
+      Handler: swift.bootstrap
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/WebFingerHandler/WebFingerHandler.zip
+      Events:
+        WebFinger:
+          Type: Api
+          Properties:
+            Path: /.well-known/webfinger
+            Method: GET
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/.well-known/webfinger"
