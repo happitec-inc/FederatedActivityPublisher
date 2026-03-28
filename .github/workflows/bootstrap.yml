@@ -32,7 +32,7 @@ jobs:
         run: |
           sam deploy \
             --template-file .aws-sam/build/template.yaml \
-            --config-file activity-bootstrap/samconfig.toml \
+            --config-file ${{ github.workspace }}/activity-bootstrap/samconfig.toml \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset
 
