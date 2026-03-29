@@ -398,7 +398,6 @@ Resources:
         HeadersConfig:
           HeaderBehavior: whitelist
           Headers:
-            - Host
             - Date
             - Digest
             - Signature
