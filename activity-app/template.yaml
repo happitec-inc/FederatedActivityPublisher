@@ -85,6 +85,10 @@ Resources:
               Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
         - SSMParameterReadPolicy:
             ParameterName: !Sub "activity/${Stage}/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
       Events:
         CreateStatus:
           Type: Api
@@ -116,6 +120,10 @@ Resources:
               Fn::Sub: "${EnvironmentStackName}-TableName"
         - SSMParameterReadPolicy:
             ParameterName: !Sub "activity/${Stage}/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
       Events:
         UploadMedia:
           Type: Api
@@ -285,6 +293,10 @@ Resources:
               Fn::Sub: "${EnvironmentStackName}-TableName"
         - SSMParameterReadPolicy:
             ParameterName: !Sub "activity/${Stage}/keys/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
       Events:
         SQSEvent:
           Type: SQS
