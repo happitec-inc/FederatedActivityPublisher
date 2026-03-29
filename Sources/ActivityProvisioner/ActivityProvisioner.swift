@@ -22,6 +22,15 @@ struct ActivityProvisioner: AsyncParsableCommand {
     @Option(help: "Actor summary/bio")
     var summary: String = ""
 
+    @Option(name: .customLong("table-name"), help: "DynamoDB table name (default: activity-{stage})")
+    var tableName: String?
+
+    @Option(name: .customLong("server-domain"), help: "Server domain for actor URLs")
+    var serverDomain: String = "activity.happitec.com"
+
+    @Option(name: .customLong("handle-domain"), help: "Handle domain (after the @)")
+    var handleDomain: String = "happitec.com"
+
     @Option(help: "AWS region")
     var region: String = "us-east-1"
 
@@ -45,8 +54,8 @@ struct ActivityProvisioner: AsyncParsableCommand {
         _ = try await ssmClient.putParameter(input: putParameterInput)
 
         // Write actor profile to DynamoDB
-        let tableName = "activity-environment-\(stage)"
-        print("Writing actor profile to DynamoDB table \(tableName)...")
+        let resolvedTableName = tableName ?? "activity-\(stage)"
+        print("Writing actor profile to DynamoDB table \(resolvedTableName)...")
 
         let now = ISO8601DateFormatter().string(from: Date())
 
@@ -67,13 +76,13 @@ struct ActivityProvisioner: AsyncParsableCommand {
                 "followingCount": .n("0"),
                 "statusCount": .n("0"),
             ],
-            tableName: tableName
+            tableName: resolvedTableName
         )
         _ = try await dynamoClient.putItem(input: putItemInput)
 
         print("Actor provisioned successfully!")
-        print("  Actor URI: https://activity.happitec.com/users/\(username)")
-        print("  Handle: @\(username)@happitec.com")
+        print("  Actor URI: https://\(serverDomain)/users/\(username)")
+        print("  Handle: @\(username)@\(handleDomain)")
         print("  SSM Key: \(ssmParameterPath)")
     }
 }
