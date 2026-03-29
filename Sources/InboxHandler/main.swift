@@ -86,10 +86,14 @@ let runtime = LambdaRuntime {
         let publicKeyPem = try await keyManager.getPublicKey(keyId: keyId, store: store)
 
         // Build headers map for verification (lowercase keys)
+        // Override host with SERVER_DOMAIN — CloudFront strips the original Host header
+        // and sends the API Gateway execute-api domain instead. Remote servers signed
+        // with the public domain, so we must use that for verification.
         var requestHeaders: [String: String] = [:]
         for (key, value) in event.headers {
             requestHeaders[key.lowercased()] = value
         }
+        requestHeaders["host"] = serverDomain
 
         // Determine the request path
         let path = "/users/\(username)/inbox"
