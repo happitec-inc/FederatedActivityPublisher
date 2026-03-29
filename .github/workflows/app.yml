@@ -66,8 +66,11 @@ jobs:
       - name: Install zip
         run: which zip || sudo apt-get install -y zip
 
+      - name: Build AL2023 Swift Docker image
+        run: docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
+
       - name: Build Lambda zip
-        run: swift package --allow-network-connections docker archive
+        run: swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3
 
       - name: Deploy with SAM
         run: |
