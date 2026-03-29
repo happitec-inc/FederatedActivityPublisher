@@ -214,11 +214,24 @@ func handleFollow(
 ) async throws -> APIGatewayResponse {
     context.logger.info("Processing Follow from \(actorUri) for \(username)")
 
-    // Look up the remote actor for inbox URLs
+    // Look up the remote actor for inbox URL — should be cached from signature verification.
+    // If cache miss (edge case), re-fetch via KeyManager which re-populates the cache.
     let remoteActorUri = KeyManager().extractActorUri(from: keyId)
-    let remoteActor = try await store.getRemoteActor(actorUri: remoteActorUri)
-    let inboxUrl = remoteActor?.inbox ?? ""
-    let sharedInboxUrl = remoteActor?.sharedInbox
+    var remoteActor = try await store.getRemoteActor(actorUri: remoteActorUri)
+    if remoteActor == nil {
+        let _ = try await keyManager.refreshKey(keyId: keyId, store: store)
+        remoteActor = try await store.getRemoteActor(actorUri: remoteActorUri)
+    }
+    guard let resolvedActor = remoteActor else {
+        context.logger.error("Cannot resolve remote actor \(remoteActorUri) for Follow")
+        return APIGatewayResponse(
+            statusCode: .internalServerError,
+            headers: ["content-type": "application/json"],
+            body: #"{"error":"Cannot resolve remote actor"}"#
+        )
+    }
+    let inboxUrl = resolvedActor.inbox
+    let sharedInboxUrl = resolvedActor.sharedInbox
 
     let formatter = ISO8601DateFormatter()
     let now = formatter.string(from: Date())
@@ -256,7 +269,7 @@ func handleFollow(
     }
 
     // Enqueue delivery job — target the follower's inbox
-    let targetInbox = inboxUrl.isEmpty ? "\(actorUri)/inbox" : inboxUrl
+    let targetInbox = inboxUrl
     let job = DeliveryJob(
         targetInbox: targetInbox,
         activityJSON: acceptJSON,
@@ -298,8 +311,10 @@ func handleUndo(
 
     if objectType == "Follow" {
         context.logger.info("Processing Undo Follow from \(actorUri) for \(username)")
-        try await store.removeFollower(username: username, actorUri: actorUri)
-        try await store.decrementFollowerCount(username: username)
+        let wasRemoved = try await store.removeFollower(username: username, actorUri: actorUri)
+        if wasRemoved {
+            try await store.decrementFollowerCount(username: username)
+        }
     } else {
         context.logger.info("Unhandled Undo type: \(objectType ?? "unknown") from \(actorUri)")
     }
