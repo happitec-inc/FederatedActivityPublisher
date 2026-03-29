@@ -1,4 +1,5 @@
 name: Deploy Environment Stack
+run-name: "Deploy Environment Stack (${{ inputs.stage }})"
 
 permissions:
   contents: read
