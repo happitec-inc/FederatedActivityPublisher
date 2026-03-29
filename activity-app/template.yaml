@@ -448,7 +448,7 @@ Resources:
         Enabled: true
         Comment: !Sub "activity-app-${Stage}"
         Aliases:
-          - !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
+          - !If [IsProd, "activity.happitec.com", !Sub "${Stage}.activity.happitec.com"]
         ViewerCertificate:
           AcmCertificateArn: !ImportValue
             Fn::Sub: "${BootstrapStackName}-CertificateArn"
@@ -558,7 +558,7 @@ Resources:
     Properties:
       HostedZoneId: !ImportValue
         Fn::Sub: "${BootstrapStackName}-HostedZoneId"
-      Name: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
+      Name: !If [IsProd, "activity.happitec.com", !Sub "${Stage}.activity.happitec.com"]
       Type: A
       AliasTarget:
         DNSName: !GetAtt CloudFrontDistribution.DomainName
@@ -578,7 +578,7 @@ Outputs:
     Value: !GetAtt CloudFrontDistribution.DomainName
   ServerDomainOutput:
     Description: Public domain for the federation API
-    Value: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
+    Value: !If [IsProd, "activity.happitec.com", !Sub "${Stage}.activity.happitec.com"]
     Export:
       Name: !Sub "${AWS::StackName}-ServerDomain"
   ClientApiUrl:
