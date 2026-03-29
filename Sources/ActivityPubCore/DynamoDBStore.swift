@@ -82,16 +82,22 @@ public struct DynamoDBStore: Sendable {
         }
     }
 
-    /// Remove a follower record.
-    public func removeFollower(username: String, actorUri: String) async throws {
+    /// Remove a follower record. Returns true if the follower existed, false if not found.
+    public func removeFollower(username: String, actorUri: String) async throws -> Bool {
         let input = DeleteItemInput(
+            conditionExpression: "attribute_exists(SK)",
             key: [
                 "PK": .s("ACTOR#\(username)"),
                 "SK": .s("FOLLOWER#\(actorUri)"),
             ],
             tableName: tableName
         )
-        _ = try await client.deleteItem(input: input)
+        do {
+            _ = try await client.deleteItem(input: input)
+            return true
+        } catch is ConditionalCheckFailedException {
+            return false
+        }
     }
 
     /// Atomically increment the follower count for an actor.
