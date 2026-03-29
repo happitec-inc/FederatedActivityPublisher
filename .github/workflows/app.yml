@@ -70,7 +70,7 @@ jobs:
         run: docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
 
       - name: Build Lambda zip
-        run: swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3
+        run: swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3 --disable-docker-image-update
 
       - name: Deploy with SAM
         run: |
