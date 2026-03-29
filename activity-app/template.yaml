@@ -21,7 +21,7 @@ Parameters:
 
   ServerDomain:
     Type: String
-    Default: activity.happitec.com
+    Default: happitec.com
     Description: Domain where actor URLs live
 
   HandleDomain:
