@@ -67,11 +67,7 @@ jobs:
         run: which zip || sudo apt-get install -y zip
 
       - name: Build Lambda zip
-        run: |
-          swift package --allow-network-connections docker archive \
-            --products WebFingerHandler ActorHandler NodeInfoHandler \
-            OutboxHandler FollowersHandler FollowingHandler \
-            FeaturedHandler FeaturedTagsHandler
+        run: swift package --allow-network-connections docker archive
 
       - name: Deploy with SAM
         run: |
