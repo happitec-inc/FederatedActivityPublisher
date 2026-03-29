@@ -35,7 +35,7 @@ BootstrapStackName:
 
 **CloudFront Distribution:**
 - Two origins:
-  1. API Gateway (federation) — uses the **API Gateway custom domain** (`ServerDomainName`) as origin, NOT the default execute-api URL. This avoids stage-prefix stripping issues (PROJECT-PLAN.md line 1298).
+  1. API Gateway (federation) — uses the **default execute-api domain** with an **origin path** of `/Prod` (SAM's default stage name). We cannot use the API Gateway custom domain as origin because that domain is aliased to the CloudFront distribution itself via Route 53, which would create a DNS resolution loop (CloudFront → Route 53 → CloudFront → 502). The origin path `/Prod` strips the stage prefix so CloudFront paths map 1:1 to API routes.
   2. S3 media bucket (from environment stack) — via OAC, read-only
 - Viewer certificate: ACM wildcard cert imported from bootstrap stack
 - Aliases: `{stage}.activity.happitec.com` (stage) or `activity.happitec.com` (prod)
@@ -84,22 +84,7 @@ CloudFrontOAC:
 **Media Bucket Policy:**
 Grants the CloudFront distribution read-only access to the environment's S3 media bucket. References the environment stack's bucket ARN via `Fn::ImportValue`.
 
-**API Gateway Custom Domain:**
-```yaml
-ServerDomainName:
-  Type: AWS::ApiGateway::DomainName
-  Properties:
-    DomainName: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
-    RegionalCertificateArn: !ImportValue
-      Fn::Sub: "${BootstrapStackName}-CertificateArn"
-    EndpointConfiguration:
-      Types: [REGIONAL]
-```
-
-Note: Using REGIONAL endpoint type because CloudFront is the edge — the API Gateway custom domain is only accessed by CloudFront as an origin, not directly by clients.
-
-**Base Path Mapping:**
-Maps the custom domain to the API Gateway's deployment stage.
+**No API Gateway Custom Domain needed.** CloudFront is the only public entry point — it hits the execute-api URL directly with an origin path of `/Prod`. The custom domain (`stage.activity.happitec.com` or `activity.happitec.com`) is an alias on the CloudFront distribution, not on API Gateway. This avoids the DNS loop that would occur if both CloudFront and API Gateway shared the same hostname.
 
 **Route 53 Records:**
 ```yaml
@@ -129,7 +114,7 @@ CloudFrontDistributionId:
 CloudFrontDomainName:
   Value: !GetAtt CloudFrontDistribution.DomainName
 ServerApiUrl:
-  Value: !Sub "https://${ServerDomainName}"
+  Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
 ServerDomain:
   Value: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
 ```
