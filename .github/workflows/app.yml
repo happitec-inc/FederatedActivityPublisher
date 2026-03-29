@@ -31,7 +31,9 @@ jobs:
       STAGE: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
     steps:
       - name: Clean workspace
-        run: sudo rm -rf .build/
+        run: |
+          sudo rm -rf .build/
+          docker system prune -af --filter "until=24h" || true
 
       - name: Checkout
         uses: actions/checkout@v6
