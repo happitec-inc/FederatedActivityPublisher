@@ -87,6 +87,7 @@ jobs:
             --parameter-overrides \
               Stage=${{ env.STAGE }} \
               EnvironmentStackName=activity-environment-${{ env.STAGE }} \
+              BootstrapStackName=activity-bootstrap \
               ServerDomain=activity.happitec.com \
               HandleDomain=happitec.com
 
