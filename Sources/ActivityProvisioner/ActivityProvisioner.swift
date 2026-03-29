@@ -48,7 +48,7 @@ struct ActivityProvisioner: AsyncParsableCommand {
         let putParameterInput = PutParameterInput(
             name: ssmParameterPath,
             overwrite: true,
-            type: .securestring,
+            type: .secureString,
             value: privateKeyPem
         )
         _ = try await ssmClient.putParameter(input: putParameterInput)
