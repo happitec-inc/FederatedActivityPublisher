@@ -1,0 +1,118 @@
+import Foundation
+
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
+/// Fetches and caches remote actor public keys for HTTP Signature verification.
+public struct KeyManager: Sendable {
+
+    public init() {}
+
+    /// Fetch the public key PEM for a given keyId, using the DynamoDB cache.
+    ///
+    /// - Parameters:
+    ///   - keyId: The key ID from the Signature header (e.g., "https://remote.server/users/alice#main-key").
+    ///   - store: DynamoDBStore for cache reads/writes.
+    /// - Returns: The PEM-encoded public key string.
+    public func getPublicKey(keyId: String, store: DynamoDBStore) async throws -> String {
+        let actorUri = extractActorUri(from: keyId)
+
+        // Check cache
+        if let cached = try await store.getRemoteActor(actorUri: actorUri) {
+            return cached.publicKeyPem
+        }
+
+        // Fetch fresh
+        let actor = try await fetchActorDocument(actorUri: actorUri)
+        try await store.storeRemoteActor(actor)
+        return actor.publicKeyPem
+    }
+
+    /// Force-refresh the public key for a given keyId (for key rotation retry).
+    public func refreshKey(keyId: String, store: DynamoDBStore) async throws -> String {
+        let actorUri = extractActorUri(from: keyId)
+        let actor = try await fetchActorDocument(actorUri: actorUri)
+        try await store.storeRemoteActor(actor)
+        return actor.publicKeyPem
+    }
+
+    /// Extract the actor URI from a keyId by stripping the fragment (e.g., "#main-key").
+    public func extractActorUri(from keyId: String) -> String {
+        if let hashIndex = keyId.firstIndex(of: "#") {
+            return String(keyId[keyId.startIndex..<hashIndex])
+        }
+        return keyId
+    }
+
+    /// Fetch a remote actor's ActivityPub document and parse it.
+    func fetchActorDocument(actorUri: String) async throws -> RemoteActor {
+        guard let url = URL(string: actorUri) else {
+            throw KeyManagerError.invalidActorUri(actorUri)
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("application/activity+json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 10
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw KeyManagerError.fetchFailed(actorUri, statusCode)
+        }
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw KeyManagerError.invalidJSON(actorUri)
+        }
+
+        // Extract public key
+        guard let publicKeyObj = json["publicKey"] as? [String: Any],
+              let publicKeyPem = publicKeyObj["publicKeyPem"] as? String else {
+            throw KeyManagerError.missingPublicKey(actorUri)
+        }
+
+        // Extract inbox
+        guard let inbox = json["inbox"] as? String else {
+            throw KeyManagerError.missingInbox(actorUri)
+        }
+
+        // Extract optional fields
+        let preferredUsername = json["preferredUsername"] as? String
+        var sharedInbox: String?
+        if let endpoints = json["endpoints"] as? [String: Any] {
+            sharedInbox = endpoints["sharedInbox"] as? String
+        }
+
+        let formatter = ISO8601DateFormatter()
+        let fetchedAt = formatter.string(from: Date())
+
+        return RemoteActor(
+            actorUri: actorUri,
+            publicKeyPem: publicKeyPem,
+            preferredUsername: preferredUsername,
+            inbox: inbox,
+            sharedInbox: sharedInbox,
+            fetchedAt: fetchedAt
+        )
+    }
+}
+
+public enum KeyManagerError: Error, CustomStringConvertible {
+    case invalidActorUri(String)
+    case fetchFailed(String, Int)
+    case invalidJSON(String)
+    case missingPublicKey(String)
+    case missingInbox(String)
+
+    public var description: String {
+        switch self {
+        case .invalidActorUri(let uri): return "Invalid actor URI: \(uri)"
+        case .fetchFailed(let uri, let status): return "Failed to fetch actor \(uri): HTTP \(status)"
+        case .invalidJSON(let uri): return "Invalid JSON from actor \(uri)"
+        case .missingPublicKey(let uri): return "Missing publicKey in actor document: \(uri)"
+        case .missingInbox(let uri): return "Missing inbox in actor document: \(uri)"
+        }
+    }
+}
