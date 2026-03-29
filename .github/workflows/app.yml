@@ -1,4 +1,5 @@
 name: Deploy App Stack
+run-name: "Deploy App Stack (${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }})"
 
 on:
   push:
