@@ -83,11 +83,18 @@ public struct Status: Codable, Sendable {
     public let uri: String          // ActivityPub URI
     public let to: [String]
     public let cc: [String]
+    public let tags: [Tag]?          // Hashtag, Mention entries
     public let attachments: [MediaAttachmentRef]?
     public let inReplyTo: String?
     public let likesCount: Int
     public let boostsCount: Int
     public let repliesCount: Int
+}
+
+public struct Tag: Codable, Sendable {
+    public let type: String         // "Hashtag", "Mention", "Emoji"
+    public let name: String         // "#tag" or "@user@domain"
+    public let href: String?        // URL
 }
 
 public struct MediaAttachmentRef: Codable, Sendable {
@@ -255,16 +262,19 @@ Flow:
 4. Convert plain text to HTML via `convertTextToHTML`
 5. Compute `to`/`cc` arrays based on visibility (PROJECT-PLAN.md lines 499-526):
    - `public`: to=[as:Public], cc=[followers collection]
-   - `unlisted`: to=[followers], cc=[as:Public]
-   - `private`: to=[followers], cc=[]
-   - `direct`: to=[mentioned actors], cc=[]
+   - `unlisted`: to=[followers collection], cc=[as:Public]
+   - `private`: to=[followers collection], cc=[mentioned actors] — no as:Public anywhere
+   - `direct`: to=[mentioned actors], cc=[] — all to/cc targets must also be Mention entries in `tag`
+   Note: `direct` and `private` with mentions require resolving actor URIs from `@user@domain` syntax. For MVP, `direct` is non-functional (would need actor URI resolution — deferred). `private` works without mentions (followers-only).
 6. If `media_ids` provided, look up media metadata from DynamoDB to build attachment refs
 7. Store status in DynamoDB
 8. Increment `statusCount` atomically
-9. List all followers for fan-out
-10. Group followers by `sharedInboxUrl` for shared inbox coalescing
-11. Build Create activity JSON (wrapping the Note)
-12. Enqueue one delivery job per unique inbox/shared-inbox to SQS
+9. Delivery fan-out (varies by visibility):
+   - `public`/`unlisted`: list all followers, group by `sharedInboxUrl` for coalescing, enqueue one job per unique inbox
+   - `private`: same as public/unlisted (followers only, no as:Public in addressing)
+   - `direct`: deliver only to mentioned actors' inboxes (not followers) — **deferred for MVP, return error for direct visibility**
+10. Build Create activity JSON (wrapping the Note)
+11. Enqueue delivery jobs to SQS
 13. Fire CloudFront invalidation for `/users/{username}/outbox*`
 14. Return the status as JSON (Mastodon-compatible Status entity)
 
@@ -451,9 +461,13 @@ MediaUploadFunction:
         MEDIA_BUCKET_NAME: !ImportValue
           Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
     Policies:
-      - S3CrudPolicy:
-          BucketName: !ImportValue
-            Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
+      - Statement:
+          - Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub
+              - "${BucketArn}/*"
+              - BucketArn: !ImportValue
+                  Fn::Sub: "${EnvironmentStackName}-MediaBucketArn"
       - DynamoDBCrudPolicy:
           TableName: !ImportValue
             Fn::Sub: "${EnvironmentStackName}-TableName"
@@ -507,11 +521,14 @@ Test cases:
 - [ ] **Step 2: Note builder tests**
 
 Test cases:
-- Public post has correct `to`/`cc` (as:Public in to, followers in cc)
-- Unlisted post has reversed `to`/`cc`
+- `public` post: to=[as:Public], cc=[followers]
+- `unlisted` post: to=[followers], cc=[as:Public]
+- `private` post: to=[followers], cc=[] (no mentions for MVP)
+- `direct` post: returns error (deferred — needs actor URI resolution)
 - Note includes `attributedTo`
-- Create wrapper includes `type: "Create"` and Note as `object`
+- Create wrapper includes `type: "Create"` and Note as `object`, with to/cc at activity level
 - Attachments included in Note when present
+- `tags` array populated for private posts with mentions (future)
 
 - [ ] **Step 3: Commit**
 
