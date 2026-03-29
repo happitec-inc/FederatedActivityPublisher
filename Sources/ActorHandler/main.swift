@@ -11,7 +11,7 @@ let store = try await DynamoDBStore()
 let runtime = LambdaRuntime {
     (event: APIGatewayRequest, context: LambdaContext) -> APIGatewayResponse in
 
-    guard let username = event.pathParameters?["username"] else {
+    guard let username = event.pathParameters["username"] else {
         return APIGatewayResponse(
             statusCode: .badRequest,
             headers: ["content-type": "application/json"],
