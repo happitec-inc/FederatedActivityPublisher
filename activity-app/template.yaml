@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Activity.happitec.com App Stack — Phase 0 PoC
+Description: Activity.happitec.com App Stack — Phase 1a
 
 Parameters:
   Stage:
@@ -10,21 +10,45 @@ Parameters:
       - stage
       - prod
 
+  EnvironmentStackName:
+    Type: String
+    Default: activity-environment-stage
+
+  ServerDomain:
+    Type: String
+    Default: activity.happitec.com
+    Description: Domain where actor URLs live
+
+  HandleDomain:
+    Type: String
+    Default: happitec.com
+    Description: Domain used in handles (@user@happitec.com)
+
 Globals:
   Function:
     Timeout: 30
     MemorySize: 512
+    Runtime: provided.al2023
+    Architectures:
+      - arm64
+    Handler: swift.bootstrap
+    Environment:
+      Variables:
+        TABLE_NAME: !ImportValue
+          Fn::Sub: "${EnvironmentStackName}-TableName"
+        SERVER_DOMAIN: !Ref ServerDomain
+        HANDLE_DOMAIN: !Ref HandleDomain
 
 Resources:
   WebFingerFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "activity-app-webfinger-${Stage}"
-      Runtime: provided.al2023
-      Architectures:
-        - arm64
-      Handler: swift.bootstrap
       CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/WebFingerHandler/WebFingerHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
       Events:
         WebFinger:
           Type: Api
@@ -32,7 +56,120 @@ Resources:
             Path: /.well-known/webfinger
             Method: GET
 
+  ActorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-actor-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/ActorHandler/ActorHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetActor:
+          Type: Api
+          Properties:
+            Path: /users/{username}
+            Method: GET
+
+  NodeInfoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-nodeinfo-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/NodeInfoHandler/NodeInfoHandler.zip
+      Events:
+        NodeInfoDiscovery:
+          Type: Api
+          Properties:
+            Path: /.well-known/nodeinfo
+            Method: GET
+        NodeInfo21:
+          Type: Api
+          Properties:
+            Path: /nodeinfo/2.1
+            Method: GET
+
+  OutboxFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-outbox-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/OutboxHandler/OutboxHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetOutbox:
+          Type: Api
+          Properties:
+            Path: /users/{username}/outbox
+            Method: GET
+
+  FollowersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-followers-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/FollowersHandler/FollowersHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetFollowers:
+          Type: Api
+          Properties:
+            Path: /users/{username}/followers
+            Method: GET
+
+  FollowingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-following-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/FollowingHandler/FollowingHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetFollowing:
+          Type: Api
+          Properties:
+            Path: /users/{username}/following
+            Method: GET
+
+  FeaturedFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-featured-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/FeaturedHandler/FeaturedHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetFeatured:
+          Type: Api
+          Properties:
+            Path: /users/{username}/collections/featured
+            Method: GET
+
+  FeaturedTagsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-featuredtags-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/FeaturedTagsHandler/FeaturedTagsHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetFeaturedTags:
+          Type: Api
+          Properties:
+            Path: /users/{username}/collections/tags
+            Method: GET
+
 Outputs:
   ApiEndpoint:
     Description: API Gateway endpoint URL
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/.well-known/webfinger"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"

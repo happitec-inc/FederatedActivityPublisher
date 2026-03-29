@@ -1,0 +1,755 @@
+openapi: 3.1.0
+info:
+  title: activity.happitec.com
+  description: Serverless ActivityPub server for happitec-inc
+  version: 0.1.0
+  license:
+    name: MIT
+
+servers:
+  - url: https://activity.happitec.com
+    description: Production (federation)
+  - url: https://stage.activity.happitec.com
+    description: Stage (federation)
+  - url: https://client.activity.happitec.com
+    description: Production (client)
+  - url: https://client-stage.activity.happitec.com
+    description: Stage (client)
+
+security: []  # Federation endpoints are public by default; client endpoints override with bearerAuth
+
+paths:
+  # ── Federation — Discovery ──────────────────────────
+
+  /.well-known/nodeinfo:
+    get:
+      operationId: nodeInfoDiscovery
+      summary: NodeInfo discovery document
+      tags: [federation]
+      description: |
+        Returns a JRD with a link to `/nodeinfo/2.1`. Mastodon 4.x and GoToSocial
+        query this for federation health checks.
+      responses:
+        "200":
+          description: NodeInfo discovery links
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [links]
+                properties:
+                  links:
+                    type: array
+                    items:
+                      type: object
+                      required: [rel, href]
+                      properties:
+                        rel:
+                          type: string
+                          example: "http://nodeinfo.diaspora.software/ns/schema/2.1"
+                        href:
+                          type: string
+                          format: uri
+                          example: "https://activity.happitec.com/nodeinfo/2.1"
+
+  /nodeinfo/2.1:
+    get:
+      operationId: nodeInfo
+      summary: NodeInfo 2.1 server metadata
+      tags: [federation]
+      description: |
+        Server metadata: software name/version, protocols, user/status counts,
+        open registrations (false). Mostly static.
+      responses:
+        "200":
+          description: NodeInfo 2.1 document
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeInfo"
+
+  /.well-known/webfinger:
+    get:
+      operationId: webfinger
+      summary: WebFinger resource discovery
+      tags: [federation]
+      description: |
+        Resolves an `acct:` URI to an ActivityPub actor.
+        Required for Mastodon federation compatibility.
+        Handle domain is `happitec.com`; actor URLs point to `activity.happitec.com`.
+      parameters:
+        - name: resource
+          in: query
+          required: true
+          schema:
+            type: string
+            example: "acct:randomforms@happitec.com"
+          description: "Must be in format `acct:{username}@{handle_domain}`"
+      responses:
+        "200":
+          description: WebFinger JRD response
+          content:
+            application/jrd+json:
+              schema:
+                $ref: "#/components/schemas/WebFingerResponse"
+        "400":
+          description: Missing or malformed resource parameter
+        "404":
+          description: Unknown resource
+
+  # ── Federation — Actor ──────────────────────────
+
+  /users/{username}:
+    get:
+      operationId: getActor
+      summary: Fetch ActivityPub actor profile
+      tags: [federation]
+      description: |
+        Returns the full Actor document (JSON-LD) with public key, endpoints, and metadata.
+        Content-negotiates: returns JSON-LD for ActivityPub clients, 302 redirect to
+        `/@{username}` for browser requests (`Accept: text/html`).
+      parameters:
+        - $ref: "#/components/parameters/username"
+      responses:
+        "200":
+          description: Actor document (JSON-LD)
+          content:
+            application/activity+json:
+              schema:
+                $ref: "#/components/schemas/Actor"
+        "302":
+          description: Redirect to human-readable profile (browser request)
+        "404":
+          description: Unknown actor
+
+  /users/{username}/inbox:
+    post:
+      operationId: receiveActivity
+      summary: Receive an ActivityPub activity
+      tags: [federation]
+      description: |
+        Federation inbox. Receives Follow, Accept, Reject, Undo, Like, Announce,
+        Create (replies), Delete, Update, Flag, QuoteRequest, Block, Move, Add,
+        and Remove activities. Unrecognized types are logged and return 202.
+        Requires valid HTTP Signature (Cavage draft or RFC 9421).
+      parameters:
+        - $ref: "#/components/parameters/username"
+      requestBody:
+        required: true
+        content:
+          application/activity+json:
+            schema:
+              $ref: "#/components/schemas/Activity"
+          application/ld+json:
+            schema:
+              $ref: "#/components/schemas/Activity"
+      responses:
+        "202":
+          description: Activity accepted
+        "401":
+          description: Invalid or missing HTTP Signature
+        "404":
+          description: Unknown actor
+
+  # ── Federation — Collections ──────────────────────────
+
+  /users/{username}/outbox:
+    get:
+      operationId: getOutbox
+      summary: Fetch public statuses
+      tags: [federation]
+      description: |
+        Returns an OrderedCollection of the actor's public posts, newest first.
+        Root collection returns totalItems + first/last URIs only (no orderedItems).
+        Pages (page=true) return orderedItems + partOf/next/prev.
+      parameters:
+        - $ref: "#/components/parameters/username"
+        - name: page
+          in: query
+          schema:
+            type: boolean
+        - name: min_id
+          in: query
+          schema:
+            type: string
+        - name: max_id
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Ordered collection of activities
+          content:
+            application/activity+json:
+              schema:
+                $ref: "#/components/schemas/OrderedCollection"
+        "404":
+          description: Unknown actor
+
+  /users/{username}/followers:
+    get:
+      operationId: getFollowers
+      summary: Fetch follower collection
+      tags: [federation]
+      parameters:
+        - $ref: "#/components/parameters/username"
+      responses:
+        "200":
+          description: Ordered collection of follower URIs
+          content:
+            application/activity+json:
+              schema:
+                $ref: "#/components/schemas/OrderedCollection"
+        "404":
+          description: Unknown actor
+
+  /users/{username}/following:
+    get:
+      operationId: getFollowing
+      summary: Fetch following collection
+      tags: [federation]
+      description: Returns an empty OrderedCollection. Brand accounts don't follow others.
+      parameters:
+        - $ref: "#/components/parameters/username"
+      responses:
+        "200":
+          description: Ordered collection (always empty for service accounts)
+          content:
+            application/activity+json:
+              schema:
+                $ref: "#/components/schemas/OrderedCollection"
+        "404":
+          description: Unknown actor
+
+  /users/{username}/collections/featured:
+    get:
+      operationId: getFeatured
+      summary: Fetch pinned/featured statuses
+      tags: [federation]
+      description: |
+        Returns an OrderedCollection of pinned statuses (with orderedItems).
+        Empty for MVP. Must exist to avoid 404 when remote servers fetch it.
+      parameters:
+        - $ref: "#/components/parameters/username"
+      responses:
+        "200":
+          description: Ordered collection of pinned statuses
+          content:
+            application/activity+json:
+              schema:
+                $ref: "#/components/schemas/OrderedCollection"
+        "404":
+          description: Unknown actor
+
+  /users/{username}/collections/tags:
+    get:
+      operationId: getFeaturedTags
+      summary: Fetch featured hashtags
+      tags: [federation]
+      description: |
+        Returns an OrderedCollection of featured hashtags (with orderedItems).
+        Empty for MVP.
+      parameters:
+        - $ref: "#/components/parameters/username"
+      responses:
+        "200":
+          description: Ordered collection of featured hashtags
+          content:
+            application/activity+json:
+              schema:
+                $ref: "#/components/schemas/OrderedCollection"
+        "404":
+          description: Unknown actor
+
+  # ── Federation — Objects ──────────────────────────
+
+  /users/{username}/statuses/{id}:
+    get:
+      operationId: getObject
+      summary: Fetch a single status/Note by ID
+      tags: [federation]
+      description: |
+        Object resolution endpoint. Remote servers fetch Note objects by URI
+        for reply threading, link previews, and quoting. Returns 410 if deleted (tombstone).
+      parameters:
+        - $ref: "#/components/parameters/username"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Note object (JSON-LD)
+          content:
+            application/activity+json:
+              schema:
+                $ref: "#/components/schemas/Activity"
+        "404":
+          description: Unknown status
+        "410":
+          description: Status was deleted (tombstone)
+
+  # ── Client (authoring) ───────────────────────────
+
+  /api/v1/statuses:
+    post:
+      operationId: createStatus
+      summary: Post a new status
+      tags: [client]
+      description: |
+        Creates a status and fans out delivery to all followers.
+        Auth required. Mastodon-compatible subset of POST /api/v1/statuses.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStatusRequest"
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/CreateStatusRequest"
+      responses:
+        "200":
+          description: Status created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "401":
+          description: Invalid or missing auth
+        "422":
+          description: Validation error
+
+  /api/v2/media:
+    post:
+      operationId: uploadMedia
+      summary: Upload media attachment
+      tags: [client]
+      description: |
+        Upload an image or video. Media flows through the Lambda to S3 —
+        no presigned URLs, no direct bucket access.
+        Returns a media ID for use in createStatus.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The media file
+                description:
+                  type: string
+                  description: Alt text
+                focus:
+                  type: string
+                  description: "Focal point as x,y (-1.0 to 1.0)"
+      responses:
+        "200":
+          description: Media attachment created (synchronous processing)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaAttachment"
+        "202":
+          description: |
+            Media accepted for async processing. The response body is the same
+            MediaAttachment schema but `url` may be null until processing completes.
+            Clients should poll GET /api/v1/media/{id} until `url` is populated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaAttachment"
+        "401":
+          description: Invalid or missing auth
+        "413":
+          description: File too large
+        "422":
+          description: Unsupported media type
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Bearer token. MVP uses per-actor shared secret stored in
+        SSM Parameter Store. OAuth2 planned for Phase 6.
+
+  parameters:
+    username:
+      name: username
+      in: path
+      required: true
+      schema:
+        type: string
+        example: randomforms
+
+  schemas:
+    WebFingerResponse:
+      type: object
+      required: [subject, links]
+      properties:
+        subject:
+          type: string
+          example: "acct:randomforms@happitec.com"
+        aliases:
+          type: array
+          items:
+            type: string
+        links:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebFingerLink"
+
+    WebFingerLink:
+      type: object
+      required: [rel]
+      properties:
+        rel:
+          type: string
+        type:
+          type: string
+        href:
+          type: string
+          format: uri
+        template:
+          type: string
+          description: URI template (used for subscribe rel)
+
+    Actor:
+      type: object
+      description: ActivityPub Actor (Person or Service)
+      required: [id, type, preferredUsername, inbox, outbox, publicKey]
+      properties:
+        "@context":
+          oneOf:
+            - type: string
+            - type: array
+        id:
+          type: string
+          format: uri
+        type:
+          type: string
+          enum: [Person, Service]
+        preferredUsername:
+          type: string
+        name:
+          type: string
+        summary:
+          type: string
+        inbox:
+          type: string
+          format: uri
+        outbox:
+          type: string
+          format: uri
+        followers:
+          type: string
+          format: uri
+        following:
+          type: string
+          format: uri
+        url:
+          type: string
+          format: uri
+        icon:
+          type: object
+          properties:
+            type:
+              type: string
+            url:
+              type: string
+              format: uri
+        publicKey:
+          type: object
+          required: [id, owner, publicKeyPem]
+          properties:
+            id:
+              type: string
+            owner:
+              type: string
+            publicKeyPem:
+              type: string
+        discoverable:
+          type: boolean
+        indexable:
+          type: boolean
+        manuallyApprovesFollowers:
+          type: boolean
+        published:
+          type: string
+          format: date-time
+        featured:
+          type: string
+          format: uri
+        featuredTags:
+          type: string
+          format: uri
+        attributionDomains:
+          type: array
+          items:
+            type: string
+
+    Activity:
+      type: object
+      description: Generic ActivityPub activity envelope
+      properties:
+        "@context":
+          oneOf:
+            - type: string
+            - type: array
+        id:
+          type: string
+          format: uri
+        type:
+          type: string
+          description: "Activity type: Follow, Accept, Reject, Undo, Like, Announce, Create, Delete, Update, Flag, QuoteRequest, Block, Move, Add, Remove"
+        actor:
+          type: string
+          format: uri
+        object:
+          description: The object of the activity (URI or inline object)
+          oneOf:
+            - type: string
+            - type: object
+
+    OrderedCollection:
+      type: object
+      description: |
+        Root collection (type=OrderedCollection): has totalItems, first, last — no orderedItems.
+        Page (type=OrderedCollectionPage): has orderedItems, partOf, next, prev — no first/last.
+        Featured/featuredTags collections include orderedItems (empty array for MVP).
+      required: ["@context", id, type, totalItems]
+      properties:
+        "@context":
+          type: string
+        id:
+          type: string
+          format: uri
+        type:
+          type: string
+          enum: [OrderedCollection, OrderedCollectionPage]
+        totalItems:
+          type: integer
+        first:
+          type: string
+          format: uri
+          description: Root collection only — URI of first page
+        last:
+          type: string
+          format: uri
+          description: Root collection only — URI of last page
+        partOf:
+          type: string
+          format: uri
+          description: Page only — URI of the parent collection
+        orderedItems:
+          type: array
+          description: Page only — items on this page (also present on featured/featuredTags)
+          items:
+            $ref: "#/components/schemas/Activity"
+        next:
+          type: string
+          format: uri
+        prev:
+          type: string
+          format: uri
+
+    NodeInfo:
+      type: object
+      required: [version, software, protocols, openRegistrations, usage]
+      properties:
+        version:
+          type: string
+          example: "2.1"
+        software:
+          type: object
+          required: [name, version]
+          properties:
+            name:
+              type: string
+              example: "activity-happitec"
+            version:
+              type: string
+              example: "0.1.0"
+        protocols:
+          type: array
+          items:
+            type: string
+          example: ["activitypub"]
+        services:
+          type: object
+          properties:
+            inbound:
+              type: array
+              items:
+                type: string
+            outbound:
+              type: array
+              items:
+                type: string
+        openRegistrations:
+          type: boolean
+          example: false
+        usage:
+          type: object
+          properties:
+            users:
+              type: object
+              properties:
+                total:
+                  type: integer
+                activeMonth:
+                  type: integer
+                activeHalfyear:
+                  type: integer
+            localPosts:
+              type: integer
+        metadata:
+          type: object
+
+    CreateStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          description: Plain text content (converted to HTML by the server)
+        media_ids:
+          type: array
+          items:
+            type: string
+          description: Media attachment IDs from /api/v2/media
+        sensitive:
+          type: boolean
+          default: false
+        spoiler_text:
+          type: string
+          description: Content warning text
+        visibility:
+          type: string
+          enum: [public, unlisted, private, direct]
+          default: public
+        language:
+          type: string
+          description: ISO 639-1 language code
+          example: en
+        in_reply_to_id:
+          type: string
+          description: ID of status being replied to
+        quoted_status_id:
+          type: string
+          description: ID of status being quoted (Mastodon 4.5+, FEP-044f)
+        quote_approval_policy:
+          type: string
+          enum: [public, followers, nobody]
+          description: Who can quote this status
+
+    Status:
+      type: object
+      description: Mastodon-compatible status entity (subset)
+      properties:
+        id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        content:
+          type: string
+          description: HTML content of the status
+        visibility:
+          type: string
+          enum: [public, unlisted, private, direct]
+        sensitive:
+          type: boolean
+        spoiler_text:
+          type: string
+        language:
+          type: string
+        uri:
+          type: string
+          format: uri
+        url:
+          type: string
+          format: uri
+        replies_count:
+          type: integer
+        reblogs_count:
+          type: integer
+        favourites_count:
+          type: integer
+        quotes_count:
+          type: integer
+          description: Accepted quotes count (Mastodon 4.5+)
+        quote:
+          description: The quoted status, if any
+          oneOf:
+            - $ref: "#/components/schemas/Status"
+            - type: "null"
+        quote_approval:
+          description: Quote approval policy info (Mastodon 4.5+, FEP-044f)
+          oneOf:
+            - type: object
+              properties:
+                automatic:
+                  type: array
+                  items:
+                    type: string
+                  description: List of auto-approve targets
+                manual:
+                  type: array
+                  items:
+                    type: string
+                  description: List of manual-approve targets
+                current_user:
+                  type: string
+                  enum: [automatic, pending, accepted, rejected]
+                  description: Approval status for the authenticated user
+            - type: "null"
+        account:
+          type: object
+          description: Actor who posted
+        media_attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/MediaAttachment"
+
+    MediaAttachment:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [image, video, gifv, audio, unknown]
+        url:
+          oneOf:
+            - type: string
+              format: uri
+            - type: "null"
+          description: May be null if async processing is incomplete
+        preview_url:
+          type: string
+          format: uri
+        description:
+          type: string
+          description: Alt text
+        blurhash:
+          type: string
+        meta:
+          type: object
+          properties:
+            width:
+              type: integer
+            height:
+              type: integer
+            size:
+              type: string
