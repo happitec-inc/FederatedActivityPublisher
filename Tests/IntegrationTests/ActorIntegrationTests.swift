@@ -2,6 +2,9 @@ import Testing
 import OpenAPIRuntime
 import OpenAPIURLSession
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import APIClient
 
 @Test func actorKnownUser() async throws {
@@ -17,7 +20,7 @@ import Foundation
     let response = try await client.getActor(path: .init(username: "randomforms"))
     switch response {
     case .ok(let ok):
-        let actor = try ok.body.json
+        let actor = try ok.body.application_activity_plus_json
         #expect(actor.preferredUsername == "randomforms")
         #expect(actor.publicKey?.publicKeyPem?.contains("BEGIN PUBLIC KEY") == true)
         #expect(actor.inbox?.hasSuffix("/users/randomforms/inbox") == true)

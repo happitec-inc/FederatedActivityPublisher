@@ -17,7 +17,7 @@ import Foundation
     let response = try await client.getOutbox(path: .init(username: "randomforms"))
     switch response {
     case .ok(let ok):
-        let collection = try ok.body.json
+        let collection = try ok.body.application_activity_plus_json
         #expect(collection.totalItems == 0)
     default:
         Issue.record("Expected 200, got \(response)")
@@ -37,7 +37,7 @@ import Foundation
     let response = try await client.getFollowers(path: .init(username: "randomforms"))
     switch response {
     case .ok(let ok):
-        let collection = try ok.body.json
+        let collection = try ok.body.application_activity_plus_json
         #expect(collection.totalItems == 0)
     default:
         Issue.record("Expected 200, got \(response)")
@@ -57,7 +57,7 @@ import Foundation
     let response = try await client.getFollowing(path: .init(username: "randomforms"))
     switch response {
     case .ok(let ok):
-        let collection = try ok.body.json
+        let collection = try ok.body.application_activity_plus_json
         #expect(collection.totalItems == 0)
     default:
         Issue.record("Expected 200, got \(response)")
@@ -77,7 +77,7 @@ import Foundation
     let response = try await client.getFeatured(path: .init(username: "randomforms"))
     switch response {
     case .ok(let ok):
-        let collection = try ok.body.json
+        let collection = try ok.body.application_activity_plus_json
         #expect(collection.totalItems == 0)
     default:
         Issue.record("Expected 200, got \(response)")
@@ -97,7 +97,7 @@ import Foundation
     let response = try await client.getFeaturedTags(path: .init(username: "randomforms"))
     switch response {
     case .ok(let ok):
-        let collection = try ok.body.json
+        let collection = try ok.body.application_activity_plus_json
         #expect(collection.totalItems == 0)
     default:
         Issue.record("Expected 200, got \(response)")
