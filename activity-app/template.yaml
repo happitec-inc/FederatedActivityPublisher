@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Activity.happitec.com App Stack — Phase 1a
+Description: Activity.happitec.com App Stack — Phase 1b
 
 Parameters:
   Stage:
@@ -14,6 +14,11 @@ Parameters:
     Type: String
     Default: activity-environment-stage
 
+  BootstrapStackName:
+    Type: String
+    Default: activity-bootstrap
+    Description: Bootstrap stack for HostedZoneId and CertificateArn
+
   ServerDomain:
     Type: String
     Default: activity.happitec.com
@@ -23,6 +28,9 @@ Parameters:
     Type: String
     Default: happitec.com
     Description: Domain used in handles (@user@happitec.com)
+
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
 
 Globals:
   Function:
@@ -169,7 +177,285 @@ Resources:
             Path: /users/{username}/collections/tags
             Method: GET
 
+  # --- CloudFront Cache Policies ---
+
+  WebFingerCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "activity-webfinger-cache-${Stage}"
+        DefaultTTL: 86400
+        MaxTTL: 86400
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: whitelist
+            QueryStrings:
+              - resource
+          EnableAcceptEncodingGzip: true
+
+  OutboxCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "activity-outbox-cache-${Stage}"
+        DefaultTTL: 31536000
+        MaxTTL: 31536000
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: whitelist
+            QueryStrings:
+              - page
+              - min_id
+              - max_id
+          EnableAcceptEncodingGzip: true
+
+  LongCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "activity-long-cache-${Stage}"
+        DefaultTTL: 31536000
+        MaxTTL: 31536000
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+          EnableAcceptEncodingGzip: true
+
+  MediumCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "activity-medium-cache-${Stage}"
+        DefaultTTL: 86400
+        MaxTTL: 86400
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+          EnableAcceptEncodingGzip: true
+
+  ShortCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "activity-short-cache-${Stage}"
+        DefaultTTL: 3600
+        MaxTTL: 3600
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+          EnableAcceptEncodingGzip: true
+
+  # --- CloudFront Origin Request Policy ---
+
+  InboxOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub "activity-inbox-origin-${Stage}"
+        CookiesConfig:
+          CookieBehavior: none
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers:
+            - Host
+            - Date
+            - Digest
+            - Signature
+            - Signature-Input
+            - Content-Type
+            - Content-Digest
+        QueryStringsConfig:
+          QueryStringBehavior: none
+
+  # --- CloudFront OAC for S3 Media ---
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "activity-media-oac-${Stage}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # --- S3 Media Bucket Policy ---
+
+  MediaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !ImportValue
+        Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub
+              - "${BucketArn}/*"
+              - BucketArn: !ImportValue
+                  Fn::Sub: "${EnvironmentStackName}-MediaBucketArn"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+
+  # --- CloudFront Distribution ---
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "activity-app-${Stage}"
+        Aliases:
+          - !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
+        ViewerCertificate:
+          AcmCertificateArn: !ImportValue
+            Fn::Sub: "${BootstrapStackName}-CertificateArn"
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        HttpVersion: http2and3
+        Origins:
+          - Id: ApiGateway
+            DomainName: !Sub "${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com"
+            OriginPath: /Prod
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+          - Id: S3Media
+            DomainName: !Sub
+              - "${BucketName}.s3.${AWS::Region}.amazonaws.com"
+              - BucketName: !ImportValue
+                  Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: ApiGateway
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled managed policy
+          OriginRequestPolicyId: !Ref InboxOriginRequestPolicy
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+        CacheBehaviors:
+          - PathPattern: /.well-known/nodeinfo
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /nodeinfo/*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /.well-known/webfinger*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref WebFingerCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/outbox*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref OutboxCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/statuses/*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref LongCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/collections/featured
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/collections/tags
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/followers*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref ShortCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/following*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref ShortCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /media/*
+            TargetOriginId: S3Media
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref LongCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+
+  # --- Route 53 DNS Record ---
+
+  FederationDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !ImportValue
+        Fn::Sub: "${BootstrapStackName}-HostedZoneId"
+      Name: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+
 Outputs:
   ApiEndpoint:
-    Description: API Gateway endpoint URL
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+    Description: API Gateway endpoint URL (direct, bypasses CloudFront)
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: !Sub "${AWS::StackName}-CloudFrontDistributionId"
+  CloudFrontDomainName:
+    Description: CloudFront distribution domain name
+    Value: !GetAtt CloudFrontDistribution.DomainName
+  ServerDomainOutput:
+    Description: Public domain for the federation API
+    Value: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
+    Export:
+      Name: !Sub "${AWS::StackName}-ServerDomain"
