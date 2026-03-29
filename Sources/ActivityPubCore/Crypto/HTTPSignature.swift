@@ -69,7 +69,7 @@ public enum HTTPSignature: Sendable {
         let signature = _RSA.Signing.RSASignature(rawRepresentation: signatureData)
         let signingData = Data(signingString.utf8)
 
-        return publicKey.isValidSignature(signature, for: signingData, padding: .insecurePKCS1v15)
+        return publicKey.isValidSignature(signature, for: signingData, padding: .insecurePKCS1v1_5)
     }
 
     /// Extract the `keyId` value from a Signature header.
@@ -123,7 +123,7 @@ public enum HTTPSignature: Sendable {
 
         let privateKey = try _RSA.Signing.PrivateKey(pemRepresentation: privateKeyPem)
         let signingData = Data(signingString.utf8)
-        let signature = try privateKey.signature(for: signingData, padding: .insecurePKCS1v15)
+        let signature = try privateKey.signature(for: signingData, padding: .insecurePKCS1v1_5)
         let signatureBase64 = signature.rawRepresentation.base64EncodedString()
 
         let signatureHeader = #"keyId="\#(keyId)",headers="\#(headersToSign.joined(separator: " "))",signature="\#(signatureBase64)""#

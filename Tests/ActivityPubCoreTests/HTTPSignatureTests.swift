@@ -38,7 +38,7 @@ private func generateTestKeyPair() throws -> (privateKey: _RSA.Signing.PrivateKe
 
     // Sign
     let signingData = Data(signingString.utf8)
-    let signature = try privateKey.signature(for: signingData, padding: .insecurePKCS1v15)
+    let signature = try privateKey.signature(for: signingData, padding: .insecurePKCS1v1_5)
     let signatureBase64 = signature.rawRepresentation.base64EncodedString()
 
     let signatureHeader = #"keyId="https://remote.server/users/bob#main-key",headers="(request-target) host date digest",signature="\#(signatureBase64)""#
@@ -78,7 +78,7 @@ private func generateTestKeyPair() throws -> (privateKey: _RSA.Signing.PrivateKe
     let digest = "sha-256=\(Data(hash).base64EncodedString())"
 
     let signingString = "(request-target): \(method) \(path)\nhost: \(host)\ndate: \(date)\ndigest: \(digest)"
-    let signature = try privateKey.signature(for: Data(signingString.utf8), padding: .insecurePKCS1v15)
+    let signature = try privateKey.signature(for: Data(signingString.utf8), padding: .insecurePKCS1v1_5)
     let signatureBase64 = signature.rawRepresentation.base64EncodedString()
 
     let signatureHeader = #"keyId="https://remote.server/users/bob#main-key",headers="(request-target) host date digest",signature="\#(signatureBase64)""#
@@ -116,7 +116,7 @@ private func generateTestKeyPair() throws -> (privateKey: _RSA.Signing.PrivateKe
     let digest = "sha-256=\(Data(hash).base64EncodedString())"
 
     let signingString = "(request-target): \(method) \(path)\nhost: \(host)\ndate: \(date)\ndigest: \(digest)"
-    let signature = try otherPrivateKey.signature(for: Data(signingString.utf8), padding: .insecurePKCS1v15)
+    let signature = try otherPrivateKey.signature(for: Data(signingString.utf8), padding: .insecurePKCS1v1_5)
     let signatureBase64 = signature.rawRepresentation.base64EncodedString()
 
     let signatureHeader = #"keyId="https://remote.server/users/bob#main-key",headers="(request-target) host date digest",signature="\#(signatureBase64)""#
