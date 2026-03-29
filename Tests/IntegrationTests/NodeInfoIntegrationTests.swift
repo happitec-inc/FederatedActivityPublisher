@@ -18,7 +18,7 @@ import Foundation
     switch response {
     case .ok(let ok):
         let body = try ok.body.json
-        #expect(body.links?.isEmpty == false)
+        #expect(body.links.isEmpty == false)
     default:
         Issue.record("Expected 200, got \(response)")
     }
@@ -38,7 +38,7 @@ import Foundation
     switch response {
     case .ok(let ok):
         let info = try ok.body.json
-        #expect(info.software?.name == "activity-happitec")
+        #expect(info.software.name == "activity-happitec")
         #expect(info.protocols == ["activitypub"])
         #expect(info.openRegistrations == false)
     default:

@@ -52,6 +52,78 @@ Globals:
           Fn::Sub: "${EnvironmentStackName}-SSMKeyPrefix"
 
 Resources:
+  # --- Client API Gateway (separate, not behind CloudFront) ---
+  ClientApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      Auth:
+        DefaultAuthorizer: NONE
+      BinaryMediaTypes:
+        - "multipart/form-data"
+        - "application/octet-stream"
+        - "image/*"
+
+  PostFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-post-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/PostHandler/PostHandler.zip
+      Timeout: 60
+      Environment:
+        Variables:
+          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistribution
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - SQSSendMessagePolicy:
+            QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
+        - Statement:
+            - Effect: Allow
+              Action: cloudfront:CreateInvalidation
+              Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/*"
+      Events:
+        CreateStatus:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ClientApi
+            Path: /api/v1/statuses
+            Method: POST
+
+  MediaUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-media-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/MediaUploadHandler/MediaUploadHandler.zip
+      Timeout: 60
+      Environment:
+        Variables:
+          MEDIA_BUCKET_NAME: !ImportValue
+            Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub
+                - "${BucketArn}/*"
+                - BucketArn: !ImportValue
+                    Fn::Sub: "${EnvironmentStackName}-MediaBucketArn"
+        - DynamoDBCrudPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/*"
+      Events:
+        UploadMedia:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ClientApi
+            Path: /api/v2/media
+            Method: POST
+
   WebFingerFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -510,3 +582,8 @@ Outputs:
     Value: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
     Export:
       Name: !Sub "${AWS::StackName}-ServerDomain"
+  ClientApiUrl:
+    Description: Client API endpoint URL
+    Value: !Sub "https://${ClientApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+    Export:
+      Name: !Sub "${AWS::StackName}-ClientApiUrl"

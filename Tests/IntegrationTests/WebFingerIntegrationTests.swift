@@ -22,8 +22,8 @@ import FoundationNetworking
     case .ok(let ok):
         let jrd = try ok.body.application_jrd_plus_json
         #expect(jrd.subject == "acct:randomforms@happitec.com")
-        #expect(jrd.links?.isEmpty == false)
-        let selfLink = jrd.links?.first { $0.rel == "self" }
+        #expect(jrd.links.isEmpty == false)
+        let selfLink = jrd.links.first { $0.rel == "self" }
         #expect(selfLink?.href?.contains("activity.happitec.com/users/randomforms") == true)
     default:
         Issue.record("Expected 200, got \(response)")

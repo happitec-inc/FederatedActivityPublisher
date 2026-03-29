@@ -22,8 +22,8 @@ import FoundationNetworking
     case .ok(let ok):
         let actor = try ok.body.application_activity_plus_json
         #expect(actor.preferredUsername == "randomforms")
-        #expect(actor.publicKey?.publicKeyPem?.contains("BEGIN PUBLIC KEY") == true)
-        #expect(actor.inbox?.hasSuffix("/users/randomforms/inbox") == true)
+        #expect(actor.publicKey.publicKeyPem.contains("BEGIN PUBLIC KEY") == true)
+        #expect(actor.inbox.hasSuffix("/users/randomforms/inbox") == true)
     default:
         Issue.record("Expected 200, got \(response)")
     }

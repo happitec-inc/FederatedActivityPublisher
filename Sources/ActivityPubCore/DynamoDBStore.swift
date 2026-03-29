@@ -236,6 +236,204 @@ public struct DynamoDBStore: Sendable {
         return RemoteActor.fromDynamoDB(item)
     }
 
+    // MARK: - Status Storage
+
+    /// Store a status in DynamoDB.
+    public func storeStatus(_ status: Status) async throws {
+        let item = status.toDynamoDB()
+        let input = PutItemInput(
+            item: item,
+            tableName: tableName
+        )
+        _ = try await client.putItem(input: input)
+    }
+
+    /// Atomically increment the status count for an actor.
+    public func incrementStatusCount(username: String, by amount: Int = 1) async throws {
+        let input = UpdateItemInput(
+            expressionAttributeNames: ["#sc": "statusCount"],
+            expressionAttributeValues: [":val": .n(String(amount))],
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("PROFILE"),
+            ],
+            tableName: tableName,
+            updateExpression: "SET #sc = #sc + :val"
+        )
+        _ = try await client.updateItem(input: input)
+    }
+
+    /// Fetch a single status by username and ID.
+    public func getStatus(username: String, id: String) async throws -> Status? {
+        let input = GetItemInput(
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("STATUS#\(id)"),
+            ],
+            tableName: tableName
+        )
+        let output = try await client.getItem(input: input)
+        guard let item = output.item else { return nil }
+        return Status.fromDynamoDB(item)
+    }
+
+    /// List statuses for a user, newest first, with cursor-based pagination.
+    /// Queries main table (PK=ACTOR#{username}, SK begins_with STATUS#) in reverse order.
+    /// ULIDs sort lexicographically by time so reverse SK order = newest first.
+    /// `maxId` is the ULID of the last status seen — statuses older than this are returned.
+    /// Uses ExclusiveStartKey to skip past maxId when provided.
+    /// Returns (statuses, hasMore).
+    public func listStatuses(username: String, limit: Int = 20, maxId: String? = nil) async throws -> ([Status], Bool) {
+        let keyCondition = "#pk = :pk AND begins_with(#sk, :prefix)"
+        let exprValues: [String: DynamoDBClientTypes.AttributeValue] = [
+            ":pk": .s("ACTOR#\(username)"),
+            ":prefix": .s("STATUS#"),
+        ]
+
+        // When maxId is provided, set ExclusiveStartKey so DynamoDB starts scanning
+        // just before STATUS#{maxId} (exclusive). Since we scan in reverse, this means
+        // "give me items with SK < STATUS#{maxId}" within the begins_with range.
+        var exclusiveStartKey: [String: DynamoDBClientTypes.AttributeValue]?
+        if let maxId {
+            exclusiveStartKey = [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("STATUS#\(maxId)"),
+            ]
+        }
+
+        let input = QueryInput(
+            exclusiveStartKey: exclusiveStartKey,
+            expressionAttributeNames: ["#pk": "PK", "#sk": "SK"],
+            expressionAttributeValues: exprValues,
+            keyConditionExpression: keyCondition,
+            limit: limit,
+            scanIndexForward: false,
+            tableName: tableName
+        )
+
+        let output = try await client.query(input: input)
+        let items = output.items ?? []
+
+        let statuses = items.compactMap { Status.fromDynamoDB($0) }
+        let hasMore = output.lastEvaluatedKey != nil
+
+        return (statuses, hasMore)
+    }
+
+    // MARK: - Follower Listing (for delivery fan-out)
+
+    /// Fetch ALL followers for a user (paginated internally). Used for delivery fan-out.
+    public func listAllFollowers(username: String) async throws -> [Follower] {
+        var followers: [Follower] = []
+        var exclusiveStartKey: [String: DynamoDBClientTypes.AttributeValue]?
+
+        repeat {
+            let input = QueryInput(
+                exclusiveStartKey: exclusiveStartKey,
+                expressionAttributeNames: ["#gsi1pk": "GSI1PK"],
+                expressionAttributeValues: [":pk": .s("FOLLOWERS#\(username)")],
+                indexName: "GSI1",
+                keyConditionExpression: "#gsi1pk = :pk",
+                tableName: tableName
+            )
+
+            let output = try await client.query(input: input)
+            let items = output.items ?? []
+
+            for item in items {
+                guard
+                    case .s(let actorUri) = item["actorUri"],
+                    case .s(let inboxUrl) = item["inboxUrl"],
+                    case .s(let followActivityId) = item["followActivityId"],
+                    case .s(let acceptedAt) = item["acceptedAt"]
+                else {
+                    continue
+                }
+
+                var sharedInboxUrl: String?
+                if case .s(let url) = item["sharedInboxUrl"] {
+                    sharedInboxUrl = url
+                }
+
+                followers.append(Follower(
+                    actorUri: actorUri,
+                    inboxUrl: inboxUrl,
+                    sharedInboxUrl: sharedInboxUrl,
+                    followActivityId: followActivityId,
+                    acceptedAt: acceptedAt
+                ))
+            }
+
+            exclusiveStartKey = output.lastEvaluatedKey
+        } while exclusiveStartKey != nil
+
+        return followers
+    }
+
+    // MARK: - Media Metadata
+
+    /// Store media attachment metadata.
+    public func storeMediaMetadata(
+        id: String, username: String, s3Key: String, contentType: String,
+        description: String?, blurhash: String?,
+        width: Int?, height: Int?, size: Int?
+    ) async throws {
+        var item: [String: DynamoDBClientTypes.AttributeValue] = [
+            "PK": .s("MEDIA#\(id)"),
+            "SK": .s("META"),
+            "id": .s(id),
+            "username": .s(username),
+            "s3Key": .s(s3Key),
+            "contentType": .s(contentType),
+        ]
+
+        if let description { item["description"] = .s(description) }
+        if let blurhash { item["blurhash"] = .s(blurhash) }
+        if let width { item["width"] = .n(String(width)) }
+        if let height { item["height"] = .n(String(height)) }
+        if let size { item["size"] = .n(String(size)) }
+
+        let input = PutItemInput(item: item, tableName: tableName)
+        _ = try await client.putItem(input: input)
+    }
+
+    /// Fetch media metadata by ID. Returns a MediaAttachmentRef with the CloudFront URL populated.
+    public func getMediaMetadata(id: String, serverDomain: String) async throws -> MediaAttachmentRef? {
+        let input = GetItemInput(
+            key: [
+                "PK": .s("MEDIA#\(id)"),
+                "SK": .s("META"),
+            ],
+            tableName: tableName
+        )
+        let output = try await client.getItem(input: input)
+        guard let item = output.item else { return nil }
+
+        guard
+            case .s(let mediaId) = item["id"],
+            case .s(let s3Key) = item["s3Key"],
+            case .s(let contentType) = item["contentType"]
+        else {
+            return nil
+        }
+
+        let url = "https://\(serverDomain)/\(s3Key)"
+
+        var description: String?
+        if case .s(let desc) = item["description"] { description = desc }
+
+        var blurhash: String?
+        if case .s(let bh) = item["blurhash"] { blurhash = bh }
+
+        return MediaAttachmentRef(
+            id: mediaId,
+            url: url,
+            contentType: contentType,
+            description: description,
+            blurhash: blurhash
+        )
+    }
+
     // MARK: - ULID Generation
 
     /// Generate a simple ULID-like identifier (timestamp + random).
