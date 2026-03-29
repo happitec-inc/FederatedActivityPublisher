@@ -14,6 +14,7 @@ let package = Package(
         .executable(name: "FollowingHandler", targets: ["FollowingHandler"]),
         .executable(name: "FeaturedHandler", targets: ["FeaturedHandler"]),
         .executable(name: "FeaturedTagsHandler", targets: ["FeaturedTagsHandler"]),
+        .executable(name: "ProfileHandler", targets: ["ProfileHandler"]),
         .executable(name: "ActivityProvisioner", targets: ["ActivityProvisioner"]),
         .executable(name: "InboxHandler", targets: ["InboxHandler"]),
         .executable(name: "DeliverHandler", targets: ["DeliverHandler"]),
@@ -100,6 +101,14 @@ let package = Package(
         ),
         .executableTarget(
             name: "FeaturedTagsHandler",
+            dependencies: [
+                "ActivityPubCore",
+                .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
+                .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
+            ]
+        ),
+        .executableTarget(
+            name: "ProfileHandler",
             dependencies: [
                 "ActivityPubCore",
                 .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),

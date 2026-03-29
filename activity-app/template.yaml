@@ -261,6 +261,22 @@ Resources:
             Path: /users/{username}/collections/tags
             Method: GET
 
+  ProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-profile-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/ProfileHandler/ProfileHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetProfile:
+          Type: Api
+          Properties:
+            Path: /@{username}
+            Method: GET
+
   InboxFunction:
     Type: AWS::Serverless::Function
     Properties:
