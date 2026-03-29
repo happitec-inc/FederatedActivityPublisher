@@ -46,6 +46,10 @@ Globals:
           Fn::Sub: "${EnvironmentStackName}-TableName"
         SERVER_DOMAIN: !Ref ServerDomain
         HANDLE_DOMAIN: !Ref HandleDomain
+        QUEUE_URL: !ImportValue
+          Fn::Sub: "${EnvironmentStackName}-QueueUrl"
+        SSM_KEY_PREFIX: !ImportValue
+          Fn::Sub: "${EnvironmentStackName}-SSMKeyPrefix"
 
 Resources:
   WebFingerFunction:
@@ -176,6 +180,46 @@ Resources:
           Properties:
             Path: /users/{username}/collections/tags
             Method: GET
+
+  InboxFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-inbox-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/InboxHandler/InboxHandler.zip
+      ReservedConcurrentExecutions: 25
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - SQSSendMessagePolicy:
+            QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
+      Events:
+        PostInbox:
+          Type: Api
+          Properties:
+            Path: /users/{username}/inbox
+            Method: POST
+
+  DeliverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-deliver-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/DeliverHandler/DeliverHandler.zip
+      Timeout: 60
+      ReservedConcurrentExecutions: 5
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/keys/*"
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-QueueArn"
+            BatchSize: 1
 
   # --- CloudFront Cache Policies ---
 

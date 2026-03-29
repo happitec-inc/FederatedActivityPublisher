@@ -15,6 +15,8 @@ let package = Package(
         .executable(name: "FeaturedHandler", targets: ["FeaturedHandler"]),
         .executable(name: "FeaturedTagsHandler", targets: ["FeaturedTagsHandler"]),
         .executable(name: "ActivityProvisioner", targets: ["ActivityProvisioner"]),
+        .executable(name: "InboxHandler", targets: ["InboxHandler"]),
+        .executable(name: "DeliverHandler", targets: ["DeliverHandler"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swift-server/swift-aws-lambda-runtime.git", from: "2.0.0"),
@@ -32,6 +34,9 @@ let package = Package(
             name: "ActivityPubCore",
             dependencies: [
                 .product(name: "AWSDynamoDB", package: "aws-sdk-swift"),
+                .product(name: "AWSSQS", package: "aws-sdk-swift"),
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "_CryptoExtras", package: "swift-crypto"),
             ]
         ),
 
@@ -99,6 +104,23 @@ let package = Package(
                 .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
             ]
         ),
+        .executableTarget(
+            name: "InboxHandler",
+            dependencies: [
+                "ActivityPubCore",
+                .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
+                .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
+            ]
+        ),
+        .executableTarget(
+            name: "DeliverHandler",
+            dependencies: [
+                "ActivityPubCore",
+                .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
+                .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
+                .product(name: "AWSSSM", package: "aws-sdk-swift"),
+            ]
+        ),
 
         // Provisioning CLI
         .executableTarget(
@@ -129,6 +151,8 @@ let package = Package(
             name: "ActivityPubCoreTests",
             dependencies: [
                 "ActivityPubCore",
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "_CryptoExtras", package: "swift-crypto"),
             ]
         ),
 
