@@ -29,8 +29,15 @@ Parameters:
     Default: happitec.com
     Description: Domain used in handles (@user@happitec.com)
 
+  PrNumber:
+    Type: String
+    Default: ""
+    Description: PR number for ephemeral deployments (empty for stage/prod)
+
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
+  IsEphemeral: !Not [!Equals [!Ref PrNumber, ""]]
+  IsNotEphemeral: !Equals [!Ref PrNumber, ""]
 
 Globals:
   Function:
@@ -72,7 +79,7 @@ Resources:
       Timeout: 60
       Environment:
         Variables:
-          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistribution
+          CLOUDFRONT_DISTRIBUTION_ID: !If [IsNotEphemeral, !Ref CloudFrontDistribution, ""]
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !ImportValue
@@ -350,6 +357,7 @@ Resources:
   # --- CloudFront Cache Policies ---
 
   WebFingerCachePolicy:
+    Condition: IsNotEphemeral
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
@@ -369,6 +377,7 @@ Resources:
           EnableAcceptEncodingGzip: true
 
   OutboxCachePolicy:
+    Condition: IsNotEphemeral
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
@@ -390,6 +399,7 @@ Resources:
           EnableAcceptEncodingGzip: true
 
   LongCachePolicy:
+    Condition: IsNotEphemeral
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
@@ -407,6 +417,7 @@ Resources:
           EnableAcceptEncodingGzip: true
 
   MediumCachePolicy:
+    Condition: IsNotEphemeral
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
@@ -424,6 +435,7 @@ Resources:
           EnableAcceptEncodingGzip: true
 
   ShortCachePolicy:
+    Condition: IsNotEphemeral
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
@@ -443,6 +455,7 @@ Resources:
   # --- CloudFront Origin Request Policy ---
 
   InboxOriginRequestPolicy:
+    Condition: IsNotEphemeral
     Type: AWS::CloudFront::OriginRequestPolicy
     Properties:
       OriginRequestPolicyConfig:
@@ -464,6 +477,7 @@ Resources:
   # --- CloudFront OAC for S3 Media ---
 
   CloudFrontOAC:
+    Condition: IsNotEphemeral
     Type: AWS::CloudFront::OriginAccessControl
     Properties:
       OriginAccessControlConfig:
@@ -475,6 +489,7 @@ Resources:
   # --- S3 Media Bucket Policy ---
 
   MediaBucketPolicy:
+    Condition: IsNotEphemeral
     Type: AWS::S3::BucketPolicy
     Properties:
       Bucket: !ImportValue
@@ -496,6 +511,7 @@ Resources:
   # --- CloudFront Distribution ---
 
   CloudFrontDistribution:
+    Condition: IsNotEphemeral
     Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
@@ -608,6 +624,7 @@ Resources:
   # --- Route 53 DNS Record ---
 
   FederationDnsRecord:
+    Condition: IsNotEphemeral
     Type: AWS::Route53::RecordSet
     Properties:
       HostedZoneId: !ImportValue
@@ -623,14 +640,17 @@ Outputs:
     Description: API Gateway endpoint URL (direct, bypasses CloudFront)
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
   CloudFrontDistributionId:
+    Condition: IsNotEphemeral
     Description: CloudFront distribution ID
     Value: !Ref CloudFrontDistribution
     Export:
       Name: !Sub "${AWS::StackName}-CloudFrontDistributionId"
   CloudFrontDomainName:
+    Condition: IsNotEphemeral
     Description: CloudFront distribution domain name
     Value: !GetAtt CloudFrontDistribution.DomainName
   ServerDomainOutput:
+    Condition: IsNotEphemeral
     Description: Public domain for the federation API
     Value: !If [IsProd, "activity.happitec.com", !Sub "${Stage}.activity.happitec.com"]
     Export:
