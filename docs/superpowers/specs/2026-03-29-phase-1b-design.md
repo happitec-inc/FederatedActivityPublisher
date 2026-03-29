@@ -6,11 +6,12 @@ Put CloudFront in front of the federation API with full cache behaviors, custom 
 
 ## What This Builds
 
-- CloudFront distribution with 10 cache behaviors + 2 origins (API Gateway + S3)
+- CloudFront distribution with 11 cache behaviors + 2 origins (API Gateway custom domain + S3)
 - Origin Access Control for S3 media bucket
 - API Gateway custom domain for the federation API
 - Route 53 alias records
 - Custom cache policies (WebFinger query string whitelist, outbox pagination)
+- Custom origin request policy for inbox (forwards HTTP Signature headers)
 - WebFinger redirect on happitec.com (separate PR to happitec.com repo)
 
 ## What This Does NOT Include
@@ -34,13 +35,13 @@ BootstrapStackName:
 
 **CloudFront Distribution:**
 - Two origins:
-  1. API Gateway (federation) — uses the API Gateway's default domain as origin, not a custom domain
+  1. API Gateway (federation) — uses the **API Gateway custom domain** (`ServerDomainName`) as origin, NOT the default execute-api URL. This avoids stage-prefix stripping issues (PROJECT-PLAN.md line 1298).
   2. S3 media bucket (from environment stack) — via OAC, read-only
 - Viewer certificate: ACM wildcard cert imported from bootstrap stack
 - Aliases: `{stage}.activity.happitec.com` (stage) or `activity.happitec.com` (prod)
-- Default cache behavior: no cache (POST passthrough for inbox)
+- Default cache behavior: no cache (POST passthrough for inbox), with a custom origin request policy that forwards all headers needed for HTTP Signature verification (`Host`, `Date`, `Digest`, `Signature`, `Signature-Input`, `Content-Type`, `Content-Digest`)
 
-**Cache Behaviors (10 patterns from PROJECT-PLAN.md lines 194-206):**
+**Cache Behaviors (11 patterns — matches PROJECT-PLAN.md lines 194-206):**
 
 | Path Pattern | TTL | Cache Key Extras | Origin |
 |---|---|---|---|
@@ -52,13 +53,21 @@ BootstrapStackName:
 | `/users/*/collections/featured` | 24h | — | API Gateway |
 | `/users/*/collections/tags` | 24h | — | API Gateway |
 | `/users/*/followers*` | 1h | — | API Gateway |
+| `/users/*/following*` | 1h | — | API Gateway |
 | `/users/*` | 24h | — (catch-all GET for actor profiles) | API Gateway |
 | `/media/*` | 365d, immutable | — | S3 via OAC |
+
+Note: `/users/*/following*` is explicit at 1h (same as followers) rather than falling through to the 24h catch-all. Even though following is always empty for now, it should match the followers TTL for consistency.
 
 Custom cache policies needed:
 - **WebFingerCachePolicy**: whitelist `resource` query param in cache key
 - **OutboxCachePolicy**: whitelist `page`, `min_id`, `max_id` query params
 - Default managed policies for the rest (CachingOptimized for long TTL, CachingDisabled for POST passthrough)
+
+Custom origin request policy for inbox (default behavior):
+- **InboxOriginRequestPolicy**: forwards `Host`, `Date`, `Digest`, `Signature`, `Signature-Input`, `Content-Type`, `Content-Digest` headers to the origin. Required for HTTP Signature verification in Phase 2.
+
+`Cache-Control: immutable` for `/media/*`: The S3 objects themselves should be stored with `Cache-Control: public, max-age=31536000, immutable` metadata (set at upload time by `λ media-upload` in Phase 3). CloudFront respects the origin's `Cache-Control` header. The cache behavior TTL (365d) acts as a backstop.
 
 **CloudFront OAC:**
 ```yaml
@@ -80,7 +89,7 @@ Grants the CloudFront distribution read-only access to the environment's S3 medi
 ServerDomainName:
   Type: AWS::ApiGateway::DomainName
   Properties:
-    DomainName: !If [IsProd, !Sub "${ServerDomain}", !Sub "${Stage}.${ServerDomain}"]
+    DomainName: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
     RegionalCertificateArn: !ImportValue
       Fn::Sub: "${BootstrapStackName}-CertificateArn"
     EndpointConfiguration:
@@ -119,6 +128,8 @@ CloudFrontDistributionId:
   Value: !Ref CloudFrontDistribution
 CloudFrontDomainName:
   Value: !GetAtt CloudFrontDistribution.DomainName
+ServerApiUrl:
+  Value: !Sub "https://${ServerDomainName}"
 ServerDomain:
   Value: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
 ```
@@ -131,10 +142,15 @@ Add a CloudFront Function to the existing happitec.com CloudFront distribution t
 function handler(event) {
   var request = event.request;
   if (request.uri === '/.well-known/webfinger') {
+    // Reconstruct query string, preserving URL encoding
+    // CloudFront decodes query values — re-encode special chars like @
     var qs = request.querystring;
-    var qsString = Object.keys(qs).map(function(k) {
-      return k + '=' + qs[k].value;
-    }).join('&');
+    var pairs = [];
+    for (var key in qs) {
+      var val = qs[key].value;
+      pairs.push(encodeURIComponent(key) + '=' + encodeURIComponent(val));
+    }
+    var qsString = pairs.join('&');
     return {
       statusCode: 302,
       statusDescription: 'Found',
@@ -146,6 +162,8 @@ function handler(event) {
   return request;
 }
 ```
+
+Note: `encodeURIComponent` is used because CloudFront decodes query string values before passing them to the function. The `resource` parameter contains `acct:user@domain` — the `@` and `:` need to be re-encoded in the redirect URL.
 
 This lives in the happitec.com SAM template as a `AWS::CloudFront::Function` associated with the existing distribution's viewer-request event for the `/.well-known/webfinger` path.
 
@@ -161,4 +179,5 @@ CloudFront distribution creation takes ~15 minutes on first deploy. Subsequent d
 2. Second identical request → response includes `X-Cache: Hit from CloudFront` header
 3. `curl https://stage.activity.happitec.com/users/randomforms` → 200, Actor JSON-LD via CloudFront
 4. `curl -v https://stage.activity.happitec.com/media/test.png` → S3 origin confirmed (or 403/404 if no media — confirms OAC origin is wired)
-5. `curl -L https://happitec.com/.well-known/webfinger?resource=acct:randomforms@happitec.com` → follows 302 redirect, returns WebFinger JSON from activity.happitec.com
+5. `curl -X POST https://stage.activity.happitec.com/users/randomforms/inbox -d '{}' -H 'Content-Type: application/activity+json'` → passes through CloudFront to Lambda (401 or 404, not cached)
+6. `curl -L "https://happitec.com/.well-known/webfinger?resource=acct:randomforms@happitec.com"` → follows 302 redirect, returns WebFinger JSON from activity.happitec.com
