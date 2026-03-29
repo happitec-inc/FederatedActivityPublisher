@@ -17,6 +17,8 @@ let package = Package(
         .executable(name: "ActivityProvisioner", targets: ["ActivityProvisioner"]),
         .executable(name: "InboxHandler", targets: ["InboxHandler"]),
         .executable(name: "DeliverHandler", targets: ["DeliverHandler"]),
+        .executable(name: "PostHandler", targets: ["PostHandler"]),
+        .executable(name: "MediaUploadHandler", targets: ["MediaUploadHandler"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swift-server/swift-aws-lambda-runtime.git", from: "2.0.0"),
@@ -118,6 +120,27 @@ let package = Package(
                 "ActivityPubCore",
                 .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
                 .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
+                .product(name: "AWSSSM", package: "aws-sdk-swift"),
+            ]
+        ),
+
+        .executableTarget(
+            name: "PostHandler",
+            dependencies: [
+                "ActivityPubCore",
+                .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
+                .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
+                .product(name: "AWSSSM", package: "aws-sdk-swift"),
+                .product(name: "AWSCloudFront", package: "aws-sdk-swift"),
+            ]
+        ),
+        .executableTarget(
+            name: "MediaUploadHandler",
+            dependencies: [
+                "ActivityPubCore",
+                .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
+                .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
+                .product(name: "AWSS3", package: "aws-sdk-swift"),
                 .product(name: "AWSSSM", package: "aws-sdk-swift"),
             ]
         ),
