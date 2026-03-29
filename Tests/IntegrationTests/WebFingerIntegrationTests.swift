@@ -2,6 +2,9 @@ import Testing
 import OpenAPIRuntime
 import OpenAPIURLSession
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import APIClient
 
 @Test func webFingerKnownActor() async throws {
@@ -17,7 +20,7 @@ import Foundation
     let response = try await client.webfinger(query: .init(resource: "acct:randomforms@happitec.com"))
     switch response {
     case .ok(let ok):
-        let jrd = try ok.body.json
+        let jrd = try ok.body.application_jrd_plus_json
         #expect(jrd.subject == "acct:randomforms@happitec.com")
         #expect(jrd.links?.isEmpty == false)
         let selfLink = jrd.links?.first { $0.rel == "self" }
