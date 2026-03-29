@@ -88,7 +88,7 @@ jobs:
               Stage=${{ env.STAGE }} \
               EnvironmentStackName=activity-environment-${{ env.STAGE }} \
               BootstrapStackName=activity-bootstrap \
-              ServerDomain=activity.happitec.com \
+              ServerDomain=happitec.com \
               HandleDomain=happitec.com
 
       - name: Print stack outputs
