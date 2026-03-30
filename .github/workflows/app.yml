@@ -1,16 +1,10 @@
 name: Deploy App Stack
-run-name: >-
-  Deploy App Stack (${{
-    github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) ||
-    (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage'
-  }})
+run-name: "Deploy App Stack (${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }})"
 
 on:
   push:
     branches:
       - main
-  pull_request:
-    types: [opened, synchronize, reopened]
   release:
     types: [published]
   workflow_dispatch:
@@ -26,11 +20,6 @@ on:
 permissions:
   contents: read
   id-token: write
-  pull-requests: write
-
-concurrency:
-  group: deploy-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}
-  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -39,9 +28,7 @@ jobs:
       (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
     runs-on: [self-hosted, linux]
     env:
-      STAGE: ${{ github.event_name == 'pull_request' && 'stage' || (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      STACK_NAME: ${{ github.event_name == 'pull_request' && format('activity-app-pr-{0}', github.event.pull_request.number) || format('activity-app-{0}', (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage') }}
+      STAGE: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
     steps:
       - name: Clean workspace
         run: |
@@ -101,7 +88,7 @@ jobs:
         run: |
           sam deploy \
             --template-file activity-app/template.yaml \
-            --stack-name "${{ env.STACK_NAME }}" \
+            --stack-name "activity-app-${{ env.STAGE }}" \
             --resolve-s3 \
             --capabilities CAPABILITY_IAM \
             --no-confirm-changeset \
@@ -112,30 +99,16 @@ jobs:
               EnvironmentStackName=activity-environment-${{ env.STAGE }} \
               BootstrapStackName=activity-bootstrap \
               ServerDomain=happitec.com \
-              HandleDomain=happitec.com \
-              ${{ env.PR_NUMBER && format('PrNumber={0}', env.PR_NUMBER) || '' }}
+              HandleDomain=happitec.com
 
       - name: Print stack outputs
         run: |
           OUTPUTS=$(aws cloudformation describe-stacks \
-            --stack-name "${{ env.STACK_NAME }}" \
+            --stack-name "activity-app-${{ env.STAGE }}" \
             --query "Stacks[0].Outputs" \
             --output table \
             --region us-east-1)
-          echo "## Stack Outputs (${{ env.STACK_NAME }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Stack Outputs (${{ env.STAGE }})" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "$OUTPUTS" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Comment PR with API URL
-        if: github.event_name == 'pull_request'
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          issue-number: ${{ github.event.pull_request.number }}
-          body: |
-            **Ephemeral stack deployed:** `${{ env.STACK_NAME }}`
-
-            API Gateway URL (direct, no CloudFront):
-            ```
-            ${{ steps.outputs.outputs.api_url || 'See job summary for outputs' }}
-            ```

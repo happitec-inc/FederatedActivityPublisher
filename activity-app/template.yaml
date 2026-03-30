@@ -29,15 +29,8 @@ Parameters:
     Default: happitec.com
     Description: Domain used in handles (@user@happitec.com)
 
-  PrNumber:
-    Type: String
-    Default: ""
-    Description: PR number for ephemeral deployments (empty for stage/prod)
-
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
-  IsEphemeral: !Not [!Equals [!Ref PrNumber, ""]]
-  IsNotEphemeral: !Equals [!Ref PrNumber, ""]
 
 Globals:
   Function:
@@ -79,7 +72,7 @@ Resources:
       Timeout: 60
       Environment:
         Variables:
-          CLOUDFRONT_DISTRIBUTION_ID: !If [IsNotEphemeral, !Ref CloudFrontDistribution, ""]
+          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistribution
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !ImportValue
@@ -315,10 +308,13 @@ Resources:
               Fn::Sub: "${EnvironmentStackName}-TableName"
         - SQSSendMessagePolicy:
             QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
-        - Statement:
-            - Effect: Allow
-              Action: cloudfront:CreateInvalidation
-              Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+        - !If
+          - IsNotEphemeral
+          - Statement:
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+          - !Ref AWS::NoValue
       Events:
         PostInbox:
           Type: Api
@@ -612,7 +608,6 @@ Resources:
   # --- Route 53 DNS Record ---
 
   FederationDnsRecord:
-    Condition: IsNotEphemeral
     Type: AWS::Route53::RecordSet
     Properties:
       HostedZoneId: !ImportValue
