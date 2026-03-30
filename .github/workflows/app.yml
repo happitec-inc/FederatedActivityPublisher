@@ -30,14 +30,15 @@ jobs:
     env:
       STAGE: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
     steps:
-      - name: Clean workspace
+      - name: Clean Docker cruft
         run: |
-          sudo rm -rf .build/
           docker container prune -f || true
           docker builder prune -af --filter "until=24h" || true
 
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          clean: false
 
       - name: Install SAM CLI
         uses: happitec-inc/happitec-logo-generator/.github/actions/setup-sam-portable@main
