@@ -1,3 +1,9 @@
 .build/
 .swiftpm/
 Package.resolved
+
+# Secrets / credentials
+*.pem
+*.key
+.env*
+credentials*
