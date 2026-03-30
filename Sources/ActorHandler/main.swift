@@ -36,6 +36,7 @@ let runtime = LambdaRuntime {
                 headers: [
                     "location": "https://\(serverDomain)/@\(username)",
                     "content-type": "text/html",
+                    "vary": "Accept",
                 ]
             )
         }
@@ -44,7 +45,10 @@ let runtime = LambdaRuntime {
 
         return APIGatewayResponse(
             statusCode: .ok,
-            headers: ["content-type": "application/activity+json"],
+            headers: [
+                "content-type": "application/activity+json",
+                "vary": "Accept",
+            ],
             body: body
         )
     } catch {
