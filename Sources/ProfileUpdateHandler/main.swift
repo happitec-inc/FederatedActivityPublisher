@@ -14,6 +14,7 @@ let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] ?? "acti
 let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] ?? "happitec.com"
 let mediaBucketName = ProcessInfo.processInfo.environment["MEDIA_BUCKET_NAME"] ?? ""
 let distributionId = ProcessInfo.processInfo.environment["CLOUDFRONT_DISTRIBUTION_ID"] ?? ""
+let happitecDistributionId = ProcessInfo.processInfo.environment["HAPPITEC_DISTRIBUTION_ID"] ?? ""
 let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "/activity/stage/keys/"
 let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw
 
@@ -315,6 +316,21 @@ let runtime = LambdaRuntime {
                 distributionId: distributionId,
                 invalidationBatch: invalidation
             ))
+
+            // Also invalidate the happitec.com CloudFront distribution (proxies same paths)
+            if !happitecDistributionId.isEmpty {
+                let happitecInvalidation = CloudFrontClientTypes.InvalidationBatch(
+                    callerReference: "profile-update-happitec-\(updateId)",
+                    paths: CloudFrontClientTypes.Paths(
+                        items: invalidationPaths,
+                        quantity: Int(invalidationPaths.count)
+                    )
+                )
+                _ = try? await cfClient.createInvalidation(input: CreateInvalidationInput(
+                    distributionId: happitecDistributionId,
+                    invalidationBatch: happitecInvalidation
+                ))
+            }
         }
 
         // 14. Return response
