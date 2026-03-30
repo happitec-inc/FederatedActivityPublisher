@@ -1,0 +1,84 @@
+name: Deploy DocC Documentation
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: macos-26
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Checkout swift-docc-render fork (Mermaid support)
+        uses: actions/checkout@v6
+        with:
+          repository: happitec-inc/swift-docc-render
+          ref: feature/mermaid-diagrams
+          path: swift-docc-render-fork
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Build swift-docc-render fork
+        run: |
+          cd swift-docc-render-fork
+          npm install
+          npm run build
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.0.app/Contents/Developer
+
+      - name: Build DocC via swift-docc-plugin
+        env:
+          DOCC_HTML_DIR: ${{ github.workspace }}/swift-docc-render-fork/dist
+        run: |
+          swift package \
+            --allow-writing-to-directory ./docs \
+            generate-documentation \
+            --target ActivityPubCore \
+            --output-path ./docs \
+            --transform-for-static-hosting \
+            --hosting-base-path activity.happitec.com
+
+      - name: Add root redirect
+        run: |
+          cat > ./docs/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta http-equiv="refresh" content="0; url=documentation/activitypubcore/">
+            <link rel="canonical" href="documentation/activitypubcore/">
+          </head>
+          <body>
+            <a href="documentation/activitypubcore/">Redirecting…</a>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ./docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
