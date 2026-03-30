@@ -132,6 +132,48 @@ Resources:
             Path: /api/v2/media
             Method: POST
 
+  ProfileUpdateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-profileupdate-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/ProfileUpdateHandler/ProfileUpdateHandler.zip
+      Timeout: 60
+      Environment:
+        Variables:
+          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistribution
+          MEDIA_BUCKET_NAME: !ImportValue
+            Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - Statement:
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub
+                - "${BucketArn}/*"
+                - BucketArn: !ImportValue
+                    Fn::Sub: "${EnvironmentStackName}-MediaBucketArn"
+        - SQSSendMessagePolicy:
+            QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+        - Statement:
+            - Effect: Allow
+              Action: cloudfront:CreateInvalidation
+              Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+      Events:
+        UpdateCredentials:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ClientApi
+            Path: /api/v1/accounts/update_credentials
+            Method: PATCH
+
   WebFingerFunction:
     Type: AWS::Serverless::Function
     Properties:
