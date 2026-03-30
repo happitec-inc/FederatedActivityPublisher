@@ -30,8 +30,9 @@ jobs:
     env:
       STAGE: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
     steps:
-      - name: Clean Docker cruft
+      - name: Clean stale caches
         run: |
+          rm -rf .build/repositories
           docker container prune -f || true
           docker builder prune -af --filter "until=24h" || true
 
