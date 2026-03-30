@@ -134,6 +134,20 @@ let runtime = LambdaRuntime {
             )
         }
 
+        // Verify actor field matches HTTP Signature's actor
+        let bodyActorUri = json["actor"] as? String ?? ""
+        let signingActorUri = keyManager.extractActorUri(from: keyId)
+        if !bodyActorUri.isEmpty && bodyActorUri != signingActorUri {
+            context.logger.warning(
+                "Actor mismatch: body actor=\(bodyActorUri) but signing key actor=\(signingActorUri)"
+            )
+            return APIGatewayResponse(
+                statusCode: .forbidden,
+                headers: ["content-type": "application/json"],
+                body: #"{"error":"Actor does not match signing key"}"#
+            )
+        }
+
         // Extract activity fields
         guard let activityType = json["type"] as? String else {
             context.logger.warning("Missing activity type")
