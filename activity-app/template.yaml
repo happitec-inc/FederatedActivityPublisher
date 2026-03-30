@@ -29,6 +29,11 @@ Parameters:
     Default: happitec.com
     Description: Domain used in handles (@user@happitec.com)
 
+  HappitecDistributionId:
+    Type: String
+    Default: ""
+    Description: CloudFront distribution ID for happitec.com (cross-invalidation)
+
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
 
@@ -73,6 +78,7 @@ Resources:
       Environment:
         Variables:
           CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistribution
+          HAPPITEC_DISTRIBUTION_ID: !Ref HappitecDistributionId
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !ImportValue
@@ -82,7 +88,9 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: cloudfront:CreateInvalidation
-              Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+              Resource:
+                - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+                - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
         - SSMParameterReadPolicy:
             ParameterName: !Sub "activity/${Stage}/*"
         - Statement:
@@ -141,6 +149,7 @@ Resources:
       Environment:
         Variables:
           CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistribution
+          HAPPITEC_DISTRIBUTION_ID: !Ref HappitecDistributionId
           MEDIA_BUCKET_NAME: !ImportValue
             Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
       Policies:
@@ -165,7 +174,9 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: cloudfront:CreateInvalidation
-              Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+              Resource:
+                - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+                - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
       Events:
         UpdateCredentials:
           Type: Api
