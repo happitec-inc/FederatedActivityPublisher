@@ -32,7 +32,7 @@ jobs:
     steps:
       - name: Clean stale caches
         run: |
-          rm -rf .build/repositories
+          sudo rm -rf .build/repositories
           docker container prune -f || true
           docker builder prune -af --filter "until=24h" || true
 
