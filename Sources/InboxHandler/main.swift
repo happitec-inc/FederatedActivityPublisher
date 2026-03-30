@@ -1,14 +1,17 @@
 import AWSLambdaEvents
 import AWSLambdaRuntime
+import AWSCloudFront
 import ActivityPubCore
 import Foundation
 
 let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] ?? "activity.happitec.com"
 let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] ?? "happitec.com"
+let distributionId = ProcessInfo.processInfo.environment["CLOUDFRONT_DISTRIBUTION_ID"] ?? ""
 
 let store = try await DynamoDBStore()
 let sqsClient = try await SQSDeliveryClient()
 let keyManager = KeyManager()
+let cfClient = try await CloudFrontClient()
 
 let runtime = LambdaRuntime {
     (event: APIGatewayRequest, context: LambdaContext) -> APIGatewayResponse in
@@ -283,6 +286,9 @@ func handleFollow(
 
     context.logger.info("Follow accepted from \(actorUri), Accept enqueued to \(targetInbox)")
 
+    // Invalidate followers cache so the count updates
+    await invalidateFollowersCache(username: username, context: context)
+
     return APIGatewayResponse(
         statusCode: .accepted,
         headers: ["content-type": "application/json"],
@@ -318,6 +324,7 @@ func handleUndo(
         let wasRemoved = try await store.removeFollower(username: username, actorUri: actorUri)
         if wasRemoved {
             try await store.decrementFollowerCount(username: username)
+            await invalidateFollowersCache(username: username, context: context)
         }
     } else {
         context.logger.info("Unhandled Undo type: \(objectType ?? "unknown") from \(actorUri)")
@@ -344,6 +351,28 @@ func extractObjectUri(from json: [String: Any]) -> String? {
 
 enum InboxError: Error {
     case encodingFailed
+}
+
+/// Invalidate CloudFront cache for the followers collection so count updates are visible.
+func invalidateFollowersCache(username: String, context: LambdaContext) async {
+    guard !distributionId.isEmpty else { return }
+    do {
+        let paths = CloudFrontClientTypes.Paths(
+            items: ["/users/\(username)/followers*"],
+            quantity: 1
+        )
+        let batch = CloudFrontClientTypes.InvalidationBatch(
+            callerReference: UUID().uuidString,
+            paths: paths
+        )
+        _ = try await cfClient.createInvalidation(input: CreateInvalidationInput(
+            distributionId: distributionId,
+            invalidationBatch: batch
+        ))
+        context.logger.info("Invalidated followers cache for \(username)")
+    } catch {
+        context.logger.error("Failed to invalidate followers cache: \(error)")
+    }
 }
 
 try await runtime.run()
