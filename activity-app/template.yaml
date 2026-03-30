@@ -59,6 +59,14 @@ Globals:
           Fn::Sub: "${EnvironmentStackName}-SSMKeyPrefix"
 
 Resources:
+  # --- Federation API Gateway (behind CloudFront) ---
+  FederationApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      Auth:
+        DefaultAuthorizer: NONE
+
   # --- Client API Gateway (separate, not behind CloudFront) ---
   ClientApi:
     Type: AWS::Serverless::Api
@@ -152,6 +160,7 @@ Resources:
         WebFinger:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /.well-known/webfinger
             Method: GET
 
@@ -168,6 +177,7 @@ Resources:
         GetActor:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /users/{username}
             Method: GET
 
@@ -180,11 +190,13 @@ Resources:
         NodeInfoDiscovery:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /.well-known/nodeinfo
             Method: GET
         NodeInfo21:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /nodeinfo/2.1
             Method: GET
 
@@ -201,6 +213,7 @@ Resources:
         GetOutbox:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /users/{username}/outbox
             Method: GET
 
@@ -217,6 +230,7 @@ Resources:
         GetFollowers:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /users/{username}/followers
             Method: GET
 
@@ -233,6 +247,7 @@ Resources:
         GetFollowing:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /users/{username}/following
             Method: GET
 
@@ -249,6 +264,7 @@ Resources:
         GetFeatured:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /users/{username}/collections/featured
             Method: GET
 
@@ -265,6 +281,7 @@ Resources:
         GetFeaturedTags:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /users/{username}/collections/tags
             Method: GET
 
@@ -281,6 +298,7 @@ Resources:
         GetObject:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /users/{username}/statuses/{id}
             Method: GET
 
@@ -297,6 +315,7 @@ Resources:
         GetProfile:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /profile/{username}
             Method: GET
 
@@ -308,21 +327,18 @@ Resources:
       ReservedConcurrentExecutions: 25
       Environment:
         Variables:
-          CLOUDFRONT_DISTRIBUTION_ID: !If [IsNotEphemeral, !Ref CloudFrontDistribution, ""]
+          CLOUDFRONT_DISTRIBUTION_ID: ""
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !ImportValue
               Fn::Sub: "${EnvironmentStackName}-TableName"
         - SQSSendMessagePolicy:
             QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
-        - Statement:
-            - Effect: Allow
-              Action: cloudfront:CreateInvalidation
-              Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
       Events:
         PostInbox:
           Type: Api
           Properties:
+            RestApiId: !Ref FederationApi
             Path: /users/{username}/inbox
             Method: POST
 
@@ -515,8 +531,8 @@ Resources:
         HttpVersion: http2and3
         Origins:
           - Id: ApiGateway
-            DomainName: !Sub "${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com"
-            OriginPath: /Prod
+            DomainName: !Sub "${FederationApi}.execute-api.${AWS::Region}.amazonaws.com"
+            OriginPath: !Sub "/${Stage}"
             CustomOriginConfig:
               HTTPSPort: 443
               OriginProtocolPolicy: https-only
@@ -624,9 +640,9 @@ Resources:
         HostedZoneId: Z2FDTNDATAQYW2
 
 Outputs:
-  ApiEndpoint:
-    Description: API Gateway endpoint URL (direct, bypasses CloudFront)
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  FederationApiEndpoint:
+    Description: Federation API Gateway endpoint URL (direct, bypasses CloudFront)
+    Value: !Sub "https://${FederationApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
   CloudFrontDistributionId:
     Description: CloudFront distribution ID
     Value: !Ref CloudFrontDistribution
