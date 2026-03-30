@@ -10,16 +10,14 @@ let store = try await DynamoDBStore()
 let runtime = LambdaRuntime {
     (event: APIGatewayRequest, context: LambdaContext) -> APIGatewayResponse in
 
-    // Extract username from /@{username} path
-    let path = event.path ?? ""
-    guard path.hasPrefix("/@"), path.count > 2 else {
+    // Extract username from path parameter (/profile/{username})
+    guard let username = event.pathParameters["username"] else {
         return APIGatewayResponse(
             statusCode: .notFound,
             headers: ["content-type": "text/html"],
             body: "<html><body><h1>Not Found</h1></body></html>"
         )
     }
-    let username = String(path.dropFirst(2))
 
     do {
         guard let actor = try await store.getActor(username: username) else {
