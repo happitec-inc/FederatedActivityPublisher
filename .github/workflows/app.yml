@@ -104,6 +104,21 @@ jobs:
               ServerDomain=happitec.com \
               HandleDomain=happitec.com
 
+      - name: Upload frontend assets
+        run: |
+          MEDIA_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "activity-environment-${{ env.STAGE }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='MediaBucketName'].OutputValue" \
+            --output text \
+            --region us-east-1 2>/dev/null || echo "")
+          if [ -n "$MEDIA_BUCKET" ] && [ "$MEDIA_BUCKET" != "None" ]; then
+            aws s3 sync frontend/ "s3://$MEDIA_BUCKET/frontend/" \
+              --cache-control "public, max-age=31536000, immutable"
+            echo "Uploaded frontend assets to s3://$MEDIA_BUCKET/frontend/"
+          else
+            echo "Warning: Could not determine media bucket name, skipping frontend upload"
+          fi
+
       - name: Print stack outputs
         run: |
           OUTPUTS=$(aws cloudformation describe-stacks \
