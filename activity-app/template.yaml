@@ -261,6 +261,22 @@ Resources:
             Path: /users/{username}/collections/tags
             Method: GET
 
+  ObjectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-object-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/ObjectHandler/ObjectHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetObject:
+          Type: Api
+          Properties:
+            Path: /users/{username}/statuses/{id}
+            Method: GET
+
   ProfileFunction:
     Type: AWS::Serverless::Function
     Properties:
