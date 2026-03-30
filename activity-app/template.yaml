@@ -301,20 +301,17 @@ Resources:
       ReservedConcurrentExecutions: 25
       Environment:
         Variables:
-          CLOUDFRONT_DISTRIBUTION_ID: !If [IsNotEphemeral, !Ref CloudFrontDistribution, ""]
+          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistribution
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !ImportValue
               Fn::Sub: "${EnvironmentStackName}-TableName"
         - SQSSendMessagePolicy:
             QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
-        - !If
-          - IsNotEphemeral
-          - Statement:
-              - Effect: Allow
-                Action: cloudfront:CreateInvalidation
-                Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
-          - !Ref AWS::NoValue
+        - Statement:
+            - Effect: Allow
+              Action: cloudfront:CreateInvalidation
+              Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
       Events:
         PostInbox:
           Type: Api
