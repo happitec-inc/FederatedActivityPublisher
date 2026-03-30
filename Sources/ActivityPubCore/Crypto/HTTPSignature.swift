@@ -126,7 +126,7 @@ public enum HTTPSignature: Sendable {
         let signature = try privateKey.signature(for: signingData, padding: .insecurePKCS1v1_5)
         let signatureBase64 = signature.rawRepresentation.base64EncodedString()
 
-        let signatureHeader = #"keyId="\#(keyId)",headers="\#(headersToSign.joined(separator: " "))",signature="\#(signatureBase64)""#
+        let signatureHeader = #"keyId="\#(keyId)",algorithm="rsa-sha256",headers="\#(headersToSign.joined(separator: " "))",signature="\#(signatureBase64)""#
 
         return [
             "Signature": signatureHeader,
