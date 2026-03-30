@@ -2,11 +2,14 @@ import Foundation
 
 /// Convert plain text to ActivityPub-compatible HTML.
 ///
-/// Rules:
-/// 1. HTML-escape special characters (<, >, &, ")
-/// 2. Split on double newlines into paragraphs, wrap each in <p>...</p>
-/// 3. Convert single newlines within paragraphs to <br>
-/// 4. Autolink URLs (https?://...) to <a href="...">...</a>
+/// Applies the following transformations in order:
+/// 1. HTML-escape special characters (`<`, `>`, `&`, `"`)
+/// 2. Split on double newlines into paragraphs, wrap each in `<p>...</p>`
+/// 3. Convert single newlines within paragraphs to `<br>`
+/// 4. Autolink URLs (`https?://...`) to `<a href="...">...</a>`
+///
+/// - Parameter text: Plain text input from the posting API.
+/// - Returns: HTML string suitable for ActivityPub Note content.
 public func convertTextToHTML(_ text: String) -> String {
     if text.isEmpty {
         return "<p></p>"

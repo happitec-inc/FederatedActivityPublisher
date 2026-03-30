@@ -1,14 +1,23 @@
 import Foundation
 
-/// API request model for creating a new status (POST /api/v1/statuses).
-/// Matches the Mastodon-compatible OpenAPI schema.
+/// API request model for creating a new status (`POST /api/v1/statuses`).
+///
+/// Follows the Mastodon-compatible API schema. The `status` field contains plain text
+/// which is converted to HTML by ``convertTextToHTML(_:)`` before storage.
 public struct CreateStatusRequest: Codable, Sendable {
-    public let status: String       // plain text
+    /// Plain text content of the status. Converted to HTML before federation.
+    public let status: String
+    /// IDs of previously uploaded media attachments to include.
     public let mediaIds: [String]?
+    /// Whether the status contains sensitive content (shows behind a content warning).
     public let sensitive: Bool?
+    /// Content warning / spoiler text displayed above the content.
     public let spoilerText: String?
-    public let visibility: String?  // default: "public"
+    /// Visibility level. Defaults to `public` if not specified.
+    public let visibility: String?
+    /// ISO 639-1 language code for the status content.
     public let language: String?
+    /// ID of the status being replied to, if this is a reply.
     public let inReplyToId: String?
 
     enum CodingKeys: String, CodingKey {

@@ -1,8 +1,17 @@
 import Foundation
 
 /// Build the full actor JSON-LD document for ActivityPub federation.
-/// Used by both ActorHandler (serving GET /users/{username}) and
-/// ProfileUpdateHandler (embedding in Update activity).
+///
+/// Produces the complete JSON-LD representation of an actor including context,
+/// endpoints, public key, profile fields, and Mastodon-compatible extensions.
+/// Used by ActorHandler (`GET /users/{username}`) and ProfileUpdateHandler
+/// (embedding in Update activities).
+///
+/// - Parameters:
+///   - actor: The local actor to serialize.
+///   - serverDomain: The domain hosting ActivityPub endpoints (e.g. `activity.happitec.com`).
+///   - handleDomain: The domain used in handles (e.g. `happitec.com`).
+/// - Returns: A JSON string containing the actor's JSON-LD document.
 public func buildActorJSONLD(
     actor: Actor,
     serverDomain: String,

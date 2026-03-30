@@ -1,8 +1,13 @@
 import Foundation
 
-/// A profile field key-value pair.
+/// A profile metadata field displayed as a key-value pair on an actor's profile.
+///
+/// Stored as a JSON-encoded array in the ``Actor/fields`` property. Values that are
+/// URLs are automatically converted to anchor tags during serialization.
 public struct ProfileField: Codable, Sendable {
+    /// The field label (e.g. "Website", "Location").
     public let name: String
+    /// The field value (plain text or URL).
     public let value: String
 
     public init(name: String, value: String) {

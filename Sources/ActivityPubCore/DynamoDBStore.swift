@@ -7,10 +7,19 @@ import Foundation
 /// use it for read-only formatting after initialization.
 public nonisolated(unsafe) let iso8601Formatter = ISO8601DateFormatter()
 
+/// Persistence layer for all DynamoDB operations in the ActivityPub server.
+///
+/// Manages actors, statuses, followers, interactions, replies, remote actor caching,
+/// and media metadata using a single-table design. All methods are async and use the
+/// AWS SDK's DynamoDB client.
 public struct DynamoDBStore: Sendable {
     private let client: DynamoDBClient
     private let tableName: String
 
+    /// Create a new store, optionally overriding the table name.
+    ///
+    /// If `tableName` is nil, reads from the `TABLE_NAME` environment variable.
+    /// Crashes with `fatalError` if no table name is available.
     public init(tableName: String? = nil) async throws {
         let resolvedTableName = tableName ?? ProcessInfo.processInfo.environment["TABLE_NAME"]
         guard let resolvedTableName, !resolvedTableName.isEmpty else {
@@ -701,7 +710,10 @@ public struct DynamoDBStore: Sendable {
 
     // MARK: - Media Metadata
 
-    /// Store media attachment metadata.
+    /// Store media attachment metadata in DynamoDB.
+    ///
+    /// Creates a record with `PK=MEDIA#{id}`, `SK=META` containing the S3 key,
+    /// content type, and optional description/blurhash/dimensions.
     public func storeMediaMetadata(
         id: String, username: String, s3Key: String, contentType: String,
         description: String?, blurhash: String?,
@@ -765,7 +777,10 @@ public struct DynamoDBStore: Sendable {
 
     // MARK: - ULID Generation
 
-    /// Generate a simple ULID-like identifier (timestamp + random).
+    /// Generate a ULID-like identifier (timestamp + random).
+    ///
+    /// Returns a 32-character hex string: 16 hex digits of millisecond timestamp
+    /// followed by 16 hex digits of random data. Sorts lexicographically by time.
     public func generateULID() -> String {
         let timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
         let random = UInt64.random(in: 0...UInt64.max)

@@ -120,7 +120,11 @@ public func computeAddressing(
 
 // MARK: - JSON Helpers
 
-/// Escape a string for embedding in manually-built JSON.
+/// Escape a string for safe embedding in manually-built JSON.
+///
+/// Handles backslash, double quote, newline, carriage return, and tab characters.
+/// - Parameter value: The raw string to escape.
+/// - Returns: The escaped string (without surrounding quotes).
 public func escapeJSON(_ value: String) -> String {
     value.replacingOccurrences(of: "\\", with: "\\\\")
          .replacingOccurrences(of: "\"", with: "\\\"")
@@ -129,12 +133,18 @@ public func escapeJSON(_ value: String) -> String {
          .replacingOccurrences(of: "\t", with: "\\t")
 }
 
-/// Produce a properly quoted JSON string value.
+/// Produce a properly quoted and escaped JSON string value.
+///
+/// - Parameter value: The raw string to encode.
+/// - Returns: The value wrapped in double quotes with special characters escaped.
 public func jsonString(_ value: String) -> String {
     "\"\(escapeJSON(value))\""
 }
 
-/// Produce a JSON array of strings.
+/// Produce a JSON array of quoted, escaped strings.
+///
+/// - Parameter values: The strings to encode.
+/// - Returns: A JSON array string like `["value1","value2"]`.
 public func jsonArray(_ values: [String]) -> String {
     let items = values.map { jsonString($0) }
     return "[\(items.joined(separator: ","))]"
