@@ -46,7 +46,8 @@ jobs:
       - name: Clean workspace
         run: |
           sudo rm -rf .build/
-          docker system prune -af --filter "until=24h" || true
+          docker container prune -f || true
+          docker builder prune -af --filter "until=24h" || true
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -81,8 +82,17 @@ jobs:
       - name: Install zip
         run: which zip || sudo apt-get install -y zip
 
-      - name: Build AL2023 Swift Docker image
-        run: docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
+      - name: Build AL2023 Swift Docker image (cached)
+        run: |
+          HASH=$(sha256sum docker/Dockerfile.al2023-swift | cut -c1-12)
+          if docker image inspect "swift-al2023:cache-$HASH" >/dev/null 2>&1; then
+            echo "Using cached image (Dockerfile hash: $HASH)"
+            docker tag "swift-al2023:cache-$HASH" swift-al2023:6.3
+          else
+            echo "Building image (Dockerfile hash: $HASH)"
+            docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
+            docker tag swift-al2023:6.3 "swift-al2023:cache-$HASH"
+          fi
 
       - name: Build Lambda zip
         run: swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3 --disable-docker-image-update
