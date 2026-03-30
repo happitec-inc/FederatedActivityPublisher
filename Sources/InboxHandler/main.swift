@@ -236,6 +236,14 @@ let runtime = LambdaRuntime {
                 context: context
             )
 
+        case "Update":
+            return try await handleUpdate(
+                json: json,
+                username: username,
+                actorUri: actorUri,
+                context: context
+            )
+
         default:
             context.logger.info("Unhandled activity type: \(activityType) from \(actorUri)")
             return APIGatewayResponse(
@@ -636,6 +644,124 @@ func handleCreate(
     }
 
     context.logger.info("Reply \(isNew ? "stored" : "duplicate") from \(actorUri) to \(inReplyTo)")
+
+    return APIGatewayResponse(
+        statusCode: .accepted,
+        headers: ["content-type": "application/json"],
+        body: #"{"status":"accepted"}"#
+    )
+}
+
+// MARK: - Update Handling
+
+func handleUpdate(
+    json: [String: Any],
+    username: String,
+    actorUri: String,
+    context: LambdaContext
+) async throws -> APIGatewayResponse {
+    context.logger.info("Processing Update from \(actorUri) for \(username)")
+
+    // Extract the inline object
+    guard let objectDict = json["object"] as? [String: Any],
+          let objectType = objectDict["type"] as? String else {
+        context.logger.warning("Update missing inline object from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    if objectType == "Note" {
+        // Update a reply Note
+        guard let inReplyTo = objectDict["inReplyTo"] as? String,
+              let _ = parseStatusUri(inReplyTo) else {
+            context.logger.info("Update Note not replying to our status from \(actorUri)")
+            return APIGatewayResponse(
+                statusCode: .accepted,
+                headers: ["content-type": "application/json"],
+                body: #"{"status":"accepted"}"#
+            )
+        }
+
+        guard let objectUri = objectDict["id"] as? String else {
+            context.logger.warning("Update Note missing id from \(actorUri)")
+            return APIGatewayResponse(
+                statusCode: .accepted,
+                headers: ["content-type": "application/json"],
+                body: #"{"status":"accepted"}"#
+            )
+        }
+
+        let rawContent = objectDict["content"] as? String ?? ""
+        let sanitizedContent = HTMLSanitizer.sanitize(rawContent)
+
+        try await store.updateReply(
+            username: username,
+            objectUri: objectUri,
+            content: sanitizedContent
+        )
+
+        context.logger.info("Updated reply \(objectUri) from \(actorUri)")
+
+    } else if ["Person", "Service", "Application", "Organization"].contains(objectType) {
+        // Update a remote actor profile
+        guard let remoteActorUri = objectDict["id"] as? String else {
+            context.logger.warning("Update actor missing id from \(actorUri)")
+            return APIGatewayResponse(
+                statusCode: .accepted,
+                headers: ["content-type": "application/json"],
+                body: #"{"status":"accepted"}"#
+            )
+        }
+
+        // Verify the actor updating is the same as the actor being updated
+        guard remoteActorUri == actorUri else {
+            context.logger.warning("Update actor mismatch: activity actor=\(actorUri), object id=\(remoteActorUri)")
+            return APIGatewayResponse(
+                statusCode: .forbidden,
+                headers: ["content-type": "application/json"],
+                body: #"{"error":"Cannot update another actor's profile"}"#
+            )
+        }
+
+        // Extract actor fields
+        guard let publicKeyObj = objectDict["publicKey"] as? [String: Any],
+              let publicKeyPem = publicKeyObj["publicKeyPem"] as? String,
+              let inbox = objectDict["inbox"] as? String else {
+            context.logger.warning("Update actor missing required fields from \(actorUri)")
+            return APIGatewayResponse(
+                statusCode: .accepted,
+                headers: ["content-type": "application/json"],
+                body: #"{"status":"accepted"}"#
+            )
+        }
+
+        let preferredUsername = objectDict["preferredUsername"] as? String
+        var sharedInbox: String?
+        if let endpoints = objectDict["endpoints"] as? [String: Any] {
+            sharedInbox = endpoints["sharedInbox"] as? String
+        }
+
+        let formatter = ISO8601DateFormatter()
+        let now = formatter.string(from: Date())
+
+        let updatedActor = RemoteActor(
+            actorUri: remoteActorUri,
+            publicKeyPem: publicKeyPem,
+            preferredUsername: preferredUsername,
+            inbox: inbox,
+            sharedInbox: sharedInbox,
+            fetchedAt: now
+        )
+
+        try await store.updateRemoteActor(actorUri: remoteActorUri, data: updatedActor)
+        context.logger.info("Updated remote actor profile for \(remoteActorUri)")
+
+    } else {
+        context.logger.info("Update with unhandled object type \(objectType) from \(actorUri)")
+    }
 
     return APIGatewayResponse(
         statusCode: .accepted,
