@@ -219,6 +219,15 @@ let runtime = LambdaRuntime {
                 context: context
             )
 
+        case "Create":
+            return try await handleCreate(
+                json: json,
+                username: username,
+                actorUri: actorUri,
+                bodyString: bodyString,
+                context: context
+            )
+
         default:
             context.logger.info("Unhandled activity type: \(activityType) from \(actorUri)")
             return APIGatewayResponse(
@@ -523,6 +532,102 @@ func handleAnnounce(
     }
 
     context.logger.info("Announce \(isNew ? "stored" : "duplicate") from \(actorUri) on \(objectUri)")
+
+    return APIGatewayResponse(
+        statusCode: .accepted,
+        headers: ["content-type": "application/json"],
+        body: #"{"status":"accepted"}"#
+    )
+}
+
+// MARK: - Create Handling
+
+func handleCreate(
+    json: [String: Any],
+    username: String,
+    actorUri: String,
+    bodyString: String,
+    context: LambdaContext
+) async throws -> APIGatewayResponse {
+    context.logger.info("Processing Create from \(actorUri) for \(username)")
+
+    // Extract the object (must be an inline Note)
+    guard let objectDict = json["object"] as? [String: Any],
+          let objectType = objectDict["type"] as? String else {
+        context.logger.warning("Create missing inline object from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    guard objectType == "Note" else {
+        context.logger.info("Create with non-Note object type \(objectType) from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    // Must have inReplyTo pointing to one of our statuses
+    guard let inReplyTo = objectDict["inReplyTo"] as? String else {
+        context.logger.info("Create Note without inReplyTo from \(actorUri), not a reply")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    guard let parsed = parseStatusUri(inReplyTo) else {
+        context.logger.info("Create Note replying to non-local status \(inReplyTo) from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    // Verify the parent status exists
+    guard try await store.getStatus(username: parsed.username, id: parsed.statusId) != nil else {
+        context.logger.warning("Create Note replying to non-existent status \(inReplyTo) from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    guard let objectUri = objectDict["id"] as? String else {
+        context.logger.warning("Create Note missing id from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .badRequest,
+            headers: ["content-type": "application/json"],
+            body: #"{"error":"Note missing id"}"#
+        )
+    }
+
+    // Sanitize the content
+    let rawContent = objectDict["content"] as? String ?? ""
+    let sanitizedContent = HTMLSanitizer.sanitize(rawContent)
+
+    // Store the reply
+    let isNew = try await store.storeReply(
+        username: parsed.username,
+        actorUri: actorUri,
+        objectUri: objectUri,
+        content: sanitizedContent,
+        inReplyTo: inReplyTo,
+        raw: bodyString
+    )
+
+    if isNew {
+        try await store.incrementRepliesCount(username: parsed.username, statusId: parsed.statusId)
+    }
+
+    context.logger.info("Reply \(isNew ? "stored" : "duplicate") from \(actorUri) to \(inReplyTo)")
 
     return APIGatewayResponse(
         statusCode: .accepted,
