@@ -203,6 +203,22 @@ let runtime = LambdaRuntime {
                 context: context
             )
 
+        case "Like":
+            return try await handleLike(
+                json: json,
+                username: username,
+                actorUri: actorUri,
+                context: context
+            )
+
+        case "Announce":
+            return try await handleAnnounce(
+                json: json,
+                username: username,
+                actorUri: actorUri,
+                context: context
+            )
+
         default:
             context.logger.info("Unhandled activity type: \(activityType) from \(actorUri)")
             return APIGatewayResponse(
@@ -351,7 +367,145 @@ func handleUndo(
     )
 }
 
+// MARK: - Like Handling
+
+func handleLike(
+    json: [String: Any],
+    username: String,
+    actorUri: String,
+    context: LambdaContext
+) async throws -> APIGatewayResponse {
+    context.logger.info("Processing Like from \(actorUri) for \(username)")
+
+    // Extract the object URI (the status being liked)
+    guard let objectUri = extractObjectUri(from: json) else {
+        context.logger.warning("Like missing object URI from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .badRequest,
+            headers: ["content-type": "application/json"],
+            body: #"{"error":"Missing object in Like activity"}"#
+        )
+    }
+
+    // Parse username and statusId from the object URI
+    guard let parsed = parseStatusUri(objectUri) else {
+        context.logger.info("Like for non-local object \(objectUri) from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    // Verify the status exists
+    guard try await store.getStatus(username: parsed.username, id: parsed.statusId) != nil else {
+        context.logger.warning("Like for non-existent status \(objectUri) from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    // Store the interaction
+    let isNew = try await store.storeInteraction(
+        username: parsed.username,
+        actorUri: actorUri,
+        type: "Like",
+        objectUri: objectUri
+    )
+
+    if isNew {
+        try await store.incrementLikesCount(username: parsed.username, statusId: parsed.statusId)
+    }
+
+    context.logger.info("Like \(isNew ? "stored" : "duplicate") from \(actorUri) on \(objectUri)")
+
+    return APIGatewayResponse(
+        statusCode: .accepted,
+        headers: ["content-type": "application/json"],
+        body: #"{"status":"accepted"}"#
+    )
+}
+
+// MARK: - Announce Handling
+
+func handleAnnounce(
+    json: [String: Any],
+    username: String,
+    actorUri: String,
+    context: LambdaContext
+) async throws -> APIGatewayResponse {
+    context.logger.info("Processing Announce from \(actorUri) for \(username)")
+
+    guard let objectUri = extractObjectUri(from: json) else {
+        context.logger.warning("Announce missing object URI from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .badRequest,
+            headers: ["content-type": "application/json"],
+            body: #"{"error":"Missing object in Announce activity"}"#
+        )
+    }
+
+    guard let parsed = parseStatusUri(objectUri) else {
+        context.logger.info("Announce for non-local object \(objectUri) from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    guard try await store.getStatus(username: parsed.username, id: parsed.statusId) != nil else {
+        context.logger.warning("Announce for non-existent status \(objectUri) from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    let isNew = try await store.storeInteraction(
+        username: parsed.username,
+        actorUri: actorUri,
+        type: "Announce",
+        objectUri: objectUri
+    )
+
+    if isNew {
+        try await store.incrementBoostsCount(username: parsed.username, statusId: parsed.statusId)
+    }
+
+    context.logger.info("Announce \(isNew ? "stored" : "duplicate") from \(actorUri) on \(objectUri)")
+
+    return APIGatewayResponse(
+        statusCode: .accepted,
+        headers: ["content-type": "application/json"],
+        body: #"{"status":"accepted"}"#
+    )
+}
+
 // MARK: - Helpers
+
+/// Parse a status URI like `https://activity.happitec.com/users/{username}/statuses/{id}`
+/// or `https://happitec.com/users/{username}/statuses/{id}` into (username, statusId).
+/// Returns nil if the URI doesn't match our domain pattern.
+func parseStatusUri(_ uri: String) -> (username: String, statusId: String)? {
+    // Match both serverDomain and handleDomain
+    let patterns = [
+        "https://\(serverDomain)/users/",
+        "https://\(handleDomain)/users/"
+    ]
+    for prefix in patterns {
+        guard uri.hasPrefix(prefix) else { continue }
+        let remainder = String(uri.dropFirst(prefix.count))
+        let parts = remainder.split(separator: "/", maxSplits: 3)
+        // Expected: ["username", "statuses", "id"]
+        guard parts.count >= 3, parts[1] == "statuses" else { continue }
+        return (username: String(parts[0]), statusId: String(parts[2]))
+    }
+    return nil
+}
 
 func extractObjectUri(from json: [String: Any]) -> String? {
     if let objectStr = json["object"] as? String {
