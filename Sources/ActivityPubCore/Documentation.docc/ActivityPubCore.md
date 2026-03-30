@@ -46,6 +46,7 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 ### Data Store
 
 - ``DynamoDBStore``
+- ``iso8601Formatter``
 
 ### Authentication and Cryptography
 
@@ -54,6 +55,7 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 - ``KeyManagerError``
 - ``BearerAuthResult``
 - ``BearerAuthError``
+- ``authenticateBearer(authHeader:ssmKeyPrefix:ssmClient:)``
 
 ### Content Processing
 

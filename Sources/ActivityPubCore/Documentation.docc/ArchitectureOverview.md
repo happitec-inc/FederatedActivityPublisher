@@ -40,6 +40,7 @@ flowchart TB
         FOLLOWING["following"]
         FEATURED["featured"]
         FEATUREDTAGS["featuredTags"]
+        PROFILE["profile<br/>(HTML pages)"]
         DELIVER["deliver<br/>(SQS consumer)"]
         APIGW_C["API Gateway<br/>(client, authed)"]
         POST["post"]
@@ -66,6 +67,7 @@ flowchart TB
     APIGW_S --> FOLLOWING
     APIGW_S --> FEATURED
     APIGW_S --> FEATUREDTAGS
+    APIGW_S --> PROFILE
 
     WF --> DDB
     ACTOR --> DDB
@@ -74,6 +76,10 @@ flowchart TB
     INBOX --> SQS
     OUTBOX --> DDB
     FOLLOWERS --> DDB
+    FOLLOWING --> DDB
+    FEATURED --> DDB
+    FEATUREDTAGS --> DDB
+    PROFILE --> DDB
 
     SQS --> DELIVER
     DELIVER --> DDB
@@ -103,6 +109,7 @@ sequenceDiagram
     participant Q as SQS
     participant CF as CloudFront
     participant D as deliver Lambda
+    participant SM as SSM Parameter Store
     participant R as Remote Server
 
     U->>CG: POST /api/v1/statuses {text, media_ids}
@@ -114,7 +121,8 @@ sequenceDiagram
     P-->>U: 200 Status JSON
 
     Q->>D: Delivery job {status_id, inbox_url}
-    D->>DB: Read status + actor private key
+    D->>DB: Read status + follower record
+    D->>SM: Read actor private key
     D->>D: Build Create-Note, sign with HTTP Signatures
     D->>R: POST /inbox (signed)
     R-->>D: 202 Accepted
