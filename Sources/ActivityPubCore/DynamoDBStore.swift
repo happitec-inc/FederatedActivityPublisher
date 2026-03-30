@@ -49,6 +49,61 @@ public struct DynamoDBStore: Sendable {
         return output.item != nil
     }
 
+    /// Update an actor's profile fields. Only provided (non-nil) values are updated.
+    public func updateActorProfile(
+        username: String,
+        displayName: String?,
+        summary: String?,
+        avatarUrl: String?,
+        headerUrl: String?,
+        fields: String?
+    ) async throws {
+        var updateParts: [String] = []
+        var exprNames: [String: String] = [:]
+        var exprValues: [String: DynamoDBClientTypes.AttributeValue] = [:]
+
+        if let displayName {
+            updateParts.append("#dn = :dn")
+            exprNames["#dn"] = "displayName"
+            exprValues[":dn"] = .s(displayName)
+        }
+        if let summary {
+            updateParts.append("#sm = :sm")
+            exprNames["#sm"] = "summary"
+            exprValues[":sm"] = .s(summary)
+        }
+        if let avatarUrl {
+            updateParts.append("#au = :au")
+            exprNames["#au"] = "avatarUrl"
+            exprValues[":au"] = .s(avatarUrl)
+        }
+        if let headerUrl {
+            updateParts.append("#hu = :hu")
+            exprNames["#hu"] = "headerUrl"
+            exprValues[":hu"] = .s(headerUrl)
+        }
+        if let fields {
+            updateParts.append("#fl = :fl")
+            exprNames["#fl"] = "fields"
+            exprValues[":fl"] = .s(fields)
+        }
+
+        guard !updateParts.isEmpty else { return }
+
+        let updateExpression = "SET " + updateParts.joined(separator: ", ")
+        let input = UpdateItemInput(
+            expressionAttributeNames: exprNames,
+            expressionAttributeValues: exprValues,
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("PROFILE"),
+            ],
+            tableName: tableName,
+            updateExpression: updateExpression
+        )
+        _ = try await client.updateItem(input: input)
+    }
+
     // MARK: - Follower Storage
 
     /// Store a follower record. Uses conditional write to prevent duplicates.
