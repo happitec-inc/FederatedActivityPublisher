@@ -16,12 +16,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
-    runs-on: [self-hosted, macOS]
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  generate-og-image:
+    uses: happitec-inc/happitec-logo-generator/.github/workflows/generate-og-image.yml@main
+    with:
+      secondary-text: "FederatedActivityPublisher"
+    secrets:
+      token: ${{ secrets.HAPPITEC_READ_ONLY_PAT }}
 
+  build:
+    needs: [generate-og-image]
+    runs-on: [self-hosted, macOS]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -32,6 +36,12 @@ jobs:
           repository: happitec-inc/swift-docc-render
           ref: feature/mermaid-diagrams
           path: swift-docc-render-fork
+
+      - name: Download OG image
+        uses: actions/download-artifact@v6
+        with:
+          name: og-image
+          path: ./og-image/
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -56,16 +66,14 @@ jobs:
             --transform-for-static-hosting \
             --hosting-base-path FederatedActivityPublisher
 
-      - name: Replace OG image with project logo
+      - name: Replace OG image with generated logo
         run: |
-          OG_SOURCE="Sources/ActivityPubCore/Documentation.docc/Resources/og-image.png"
-          if [ -f "$OG_SOURCE" ]; then
-            # DocC places the default OG image at images/og-image.png
+          if [ -f "./og-image/og-image.png" ]; then
             mkdir -p ./docs/images
-            cp "$OG_SOURCE" ./docs/images/og-image.png
-            echo "Replaced default DocC OG image with project logo"
+            cp ./og-image/og-image.png ./docs/images/og-image.png
+            echo "Replaced DocC OG image with generated logo"
           else
-            echo "OG image not found at $OG_SOURCE, skipping"
+            echo "Warning: Generated OG image not found, using default"
           fi
 
       - name: Add root redirect
@@ -84,10 +92,16 @@ jobs:
           EOF
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v3
         with:
           path: ./docs
 
-      - name: Deploy to GitHub Pages
-        id: deployment
+  deploy:
+    needs: build
+    runs-on: [self-hosted, macOS]
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
         uses: actions/deploy-pages@v4
