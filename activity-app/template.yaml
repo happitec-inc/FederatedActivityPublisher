@@ -315,13 +315,10 @@ Resources:
               Fn::Sub: "${EnvironmentStackName}-TableName"
         - SQSSendMessagePolicy:
             QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
-        - !If
-          - IsNotEphemeral
-          - Statement:
-              - Effect: Allow
-                Action: cloudfront:CreateInvalidation
-                Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
-          - !Ref AWS::NoValue
+        - Statement:
+            - Effect: Allow
+              Action: cloudfront:CreateInvalidation
+              Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
       Events:
         PostInbox:
           Type: Api
@@ -357,7 +354,6 @@ Resources:
   # --- CloudFront Cache Policies ---
 
   WebFingerCachePolicy:
-    Condition: IsNotEphemeral
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
@@ -377,7 +373,6 @@ Resources:
           EnableAcceptEncodingGzip: true
 
   OutboxCachePolicy:
-    Condition: IsNotEphemeral
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
@@ -399,7 +394,6 @@ Resources:
           EnableAcceptEncodingGzip: true
 
   LongCachePolicy:
-    Condition: IsNotEphemeral
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
@@ -417,7 +411,6 @@ Resources:
           EnableAcceptEncodingGzip: true
 
   MediumCachePolicy:
-    Condition: IsNotEphemeral
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
@@ -435,7 +428,6 @@ Resources:
           EnableAcceptEncodingGzip: true
 
   ShortCachePolicy:
-    Condition: IsNotEphemeral
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
@@ -455,7 +447,6 @@ Resources:
   # --- CloudFront Origin Request Policy ---
 
   InboxOriginRequestPolicy:
-    Condition: IsNotEphemeral
     Type: AWS::CloudFront::OriginRequestPolicy
     Properties:
       OriginRequestPolicyConfig:
@@ -477,7 +468,6 @@ Resources:
   # --- CloudFront OAC for S3 Media ---
 
   CloudFrontOAC:
-    Condition: IsNotEphemeral
     Type: AWS::CloudFront::OriginAccessControl
     Properties:
       OriginAccessControlConfig:
@@ -489,7 +479,6 @@ Resources:
   # --- S3 Media Bucket Policy ---
 
   MediaBucketPolicy:
-    Condition: IsNotEphemeral
     Type: AWS::S3::BucketPolicy
     Properties:
       Bucket: !ImportValue
@@ -511,7 +500,6 @@ Resources:
   # --- CloudFront Distribution ---
 
   CloudFrontDistribution:
-    Condition: IsNotEphemeral
     Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
@@ -640,17 +628,14 @@ Outputs:
     Description: API Gateway endpoint URL (direct, bypasses CloudFront)
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
   CloudFrontDistributionId:
-    Condition: IsNotEphemeral
     Description: CloudFront distribution ID
     Value: !Ref CloudFrontDistribution
     Export:
       Name: !Sub "${AWS::StackName}-CloudFrontDistributionId"
   CloudFrontDomainName:
-    Condition: IsNotEphemeral
     Description: CloudFront distribution domain name
     Value: !GetAtt CloudFrontDistribution.DomainName
   ServerDomainOutput:
-    Condition: IsNotEphemeral
     Description: Public domain for the federation API
     Value: !If [IsProd, "activity.happitec.com", !Sub "${Stage}.activity.happitec.com"]
     Export:
