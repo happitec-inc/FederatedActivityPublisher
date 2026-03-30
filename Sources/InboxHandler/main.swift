@@ -356,6 +356,52 @@ func handleUndo(
             try await store.decrementFollowerCount(username: username)
             await invalidateFollowersCache(username: username, context: context)
         }
+    } else if objectType == "Like" {
+        context.logger.info("Processing Undo Like from \(actorUri) for \(username)")
+        let likeObjectUri: String?
+        if let objectDict = json["object"] as? [String: Any] {
+            likeObjectUri = extractObjectUri(from: objectDict)
+        } else {
+            likeObjectUri = nil
+        }
+
+        if let likeObjectUri, let parsed = parseStatusUri(likeObjectUri) {
+            let wasRemoved = try await store.removeInteraction(
+                username: parsed.username,
+                actorUri: actorUri,
+                type: "Like",
+                objectUri: likeObjectUri
+            )
+            if wasRemoved {
+                try await store.decrementLikesCount(username: parsed.username, statusId: parsed.statusId)
+            }
+        } else {
+            context.logger.info("Undo Like with unparseable object from \(actorUri)")
+        }
+
+    } else if objectType == "Announce" {
+        context.logger.info("Processing Undo Announce from \(actorUri) for \(username)")
+        let announceObjectUri: String?
+        if let objectDict = json["object"] as? [String: Any] {
+            announceObjectUri = extractObjectUri(from: objectDict)
+        } else {
+            announceObjectUri = nil
+        }
+
+        if let announceObjectUri, let parsed = parseStatusUri(announceObjectUri) {
+            let wasRemoved = try await store.removeInteraction(
+                username: parsed.username,
+                actorUri: actorUri,
+                type: "Announce",
+                objectUri: announceObjectUri
+            )
+            if wasRemoved {
+                try await store.decrementBoostsCount(username: parsed.username, statusId: parsed.statusId)
+            }
+        } else {
+            context.logger.info("Undo Announce with unparseable object from \(actorUri)")
+        }
+
     } else {
         context.logger.info("Unhandled Undo type: \(objectType ?? "unknown") from \(actorUri)")
     }
