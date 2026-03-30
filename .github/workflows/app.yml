@@ -39,7 +39,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          clean: false
+          clean: true
 
       - name: Install SAM CLI
         uses: happitec-inc/happitec-logo-generator/.github/actions/setup-sam-portable@main
