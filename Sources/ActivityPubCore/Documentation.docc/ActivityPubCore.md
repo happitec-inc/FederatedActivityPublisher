@@ -3,12 +3,12 @@
 A serverless ActivityPub federation server for happitec-inc brand accounts, built with Swift and deployed on AWS Lambda.
 
 @Metadata {
-    @DisplayName("ActivityPubCore")
+    @DisplayName("FederatedActivityPublisher")
 }
 
 ## Overview
 
-ActivityPubCore is the shared library powering `activity.happitec.com`, a multi-account ActivityPub server running entirely on AWS serverless infrastructure. It hosts brand accounts for happitec-inc apps (e.g. `@randomforms@happitec.com`, `@wishyouwerehere@happitec.com`) and federates with Mastodon, GoToSocial, Misskey, and other ActivityPub-compatible servers.
+FederatedActivityPublisher is a multi-account ActivityPub server running entirely on AWS serverless infrastructure. The `ActivityPubCore` module is the shared library that powers `activity.happitec.com`, hosting brand accounts for happitec-inc apps and federating with Mastodon, GoToSocial, Misskey, and other ActivityPub-compatible servers.
 
 The server is designed for zero cost at rest -- you only pay when posting or receiving traffic. All compute runs on AWS Lambda, data lives in DynamoDB, media is stored in S3 and served through CloudFront, and delivery fan-out uses SQS.
 
@@ -40,16 +40,19 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 - <doc:BuildingAndDeploying>
 - <doc:ProvisioningAccounts>
 - <doc:ArchitectureOverview>
+- <doc:HTMLRendering>
 - <doc:AWSPermissions>
 - <doc:CostEstimates>
 
 ### Data Store
 
+- <doc:DataStoreOverview>
 - ``DynamoDBStore``
 - ``iso8601Formatter``
 
 ### Authentication and Cryptography
 
+- <doc:AuthenticationOverview>
 - ``HTTPSignature``
 - ``KeyManager``
 - ``KeyManagerError``
@@ -59,6 +62,7 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 
 ### Content Processing
 
+- <doc:HTMLProcessingOverview>
 - ``HTMLSanitizer``
 
 ### Delivery
@@ -82,8 +86,9 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 - ``MultipartPart``
 - ``ProfileField``
 
-### Serialization
+### Federation Serialization
 
+- <doc:FederationOverview>
 - ``buildActorJSONLD(actor:serverDomain:handleDomain:)``
 - ``buildNoteJSON(status:serverDomain:username:)``
 - ``buildCreateActivityJSON(status:noteJSON:serverDomain:username:)``
@@ -97,8 +102,9 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 - ``parseProfileFields(_:)``
 - ``encodeProfileFields(_:)``
 
-### Multipart Parsing
+### Media
 
+- <doc:MediaOverview>
 - ``extractBoundary(from:)``
 - ``parseMultipart(data:boundary:)``
 

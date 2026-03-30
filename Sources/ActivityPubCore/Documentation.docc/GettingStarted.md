@@ -6,6 +6,14 @@ Set up your development environment and understand the project structure.
 
 This guide covers prerequisites, repository setup, and an overview of the three-template architecture that powers `activity.happitec.com`.
 
+### Live Accounts
+
+The following accounts are currently live and federating on the happitec.com domain:
+
+- [happitec.com/@logos](https://happitec.com/@logos) -- the Happitec brand account
+- [happitec.com/@test1](https://happitec.com/@test1) -- a test account used during development
+- [happitec.com/@randomforms](https://happitec.com/@randomforms) -- the RandomForms app account
+
 ### Prerequisites
 
 - **Swift 6.3+** -- the project uses `swift-tools-version: 6.3`

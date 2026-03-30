@@ -56,6 +56,18 @@ jobs:
             --transform-for-static-hosting \
             --hosting-base-path FederatedActivityPublisher
 
+      - name: Replace OG image with project logo
+        run: |
+          OG_SOURCE="Sources/ActivityPubCore/Documentation.docc/Resources/og-image.png"
+          if [ -f "$OG_SOURCE" ]; then
+            # DocC places the default OG image at images/og-image.png
+            mkdir -p ./docs/images
+            cp "$OG_SOURCE" ./docs/images/og-image.png
+            echo "Replaced default DocC OG image with project logo"
+          else
+            echo "OG image not found at $OG_SOURCE, skipping"
+          fi
+
       - name: Add root redirect
         run: |
           cat > ./docs/index.html << 'EOF'
