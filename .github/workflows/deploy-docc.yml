@@ -71,9 +71,10 @@ jobs:
       - name: Replace OG image with generated logo
         run: |
           if [ -f "./og-image/og-image.png" ]; then
-            mkdir -p ./docs/images
-            cp ./og-image/og-image.png ./docs/images/og-image.png
-            echo "Replaced DocC OG image with generated logo"
+            # Convert PNG to JPG for DocC compatibility
+            sips -s format jpeg ./og-image/og-image.png --out ./docs/developer-og.jpg
+            sips -s format jpeg ./og-image/og-image.png --out ./docs/developer-og-twitter.jpg
+            echo "Replaced DocC OG images with generated logo"
           else
             echo "Warning: Generated OG image not found, using default"
           fi
