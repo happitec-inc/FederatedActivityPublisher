@@ -121,8 +121,8 @@ func serverErrorResponse(title: String, message: String) -> APIGatewayResponse {
 
 let sharedStyles = """
     .profile-header { display: flex; gap: 1.2rem; align-items: flex-start; margin-bottom: 1.5rem; }
-    .avatar { width: 80px; height: 80px; border-radius: 50%; object-fit: cover; }
-    .avatar-large { width: 100px; height: 100px; border-radius: 50%; object-fit: cover; }
+    .avatar { width: 80px; height: 80px; border-radius: 4px; object-fit: cover; }
+    .avatar-large { width: 100px; height: 100px; border-radius: 4px; object-fit: cover; }
     .handle { color: #666; font-size: 0.9rem; }
     .type-badge { display: inline-block; font-size: 0.8rem; padding: 0.1rem 0.5rem; border-radius: 3px; background: #e8f0fe; color: #1967d2; margin-top: 0.3rem; }
     .fields-table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
@@ -289,7 +289,12 @@ struct StatusEntry: HTML {
                 div(.class("post-media")) {
                     for attachment in attachments {
                         if attachment.contentType.hasPrefix("image/") {
-                            img(.src(attachment.url), .alt(attachment.description ?? "Media attachment"))
+                            figure {
+                                img(.src(attachment.url), .alt(attachment.description ?? "Media attachment"))
+                                if let desc = attachment.description, !desc.isEmpty {
+                                    figcaption { desc }
+                                }
+                            }
                         }
                     }
                 }
