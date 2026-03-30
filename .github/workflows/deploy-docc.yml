@@ -44,9 +44,6 @@ jobs:
           npm install
           npm run build
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_26.0.app/Contents/Developer
-
       - name: Build DocC via swift-docc-plugin
         env:
           DOCC_HTML_DIR: ${{ github.workspace }}/swift-docc-render-fork/dist
