@@ -244,21 +244,21 @@ func buildStatusResponse(status: Status, serverDomain: String) -> String {
     var mediaAttachments = "[]"
     if let attachments = status.attachments {
         let items = attachments.map { att -> String in
-            let desc = att.description.map { "\"\(escapeJSONValue($0))\"" } ?? "null"
-            let bh = att.blurhash.map { "\"\(escapeJSONValue($0))\"" } ?? "null"
+            let desc = att.description.map { "\"\(escapeJSON($0))\"" } ?? "null"
+            let bh = att.blurhash.map { "\"\(escapeJSON($0))\"" } ?? "null"
             return """
-            {"id":"\(att.id)","type":"\(mediaTypeFromContentType(att.contentType))","url":"\(escapeJSONValue(att.url))","description":\(desc),"blurhash":\(bh)}
+            {"id":"\(att.id)","type":"\(mediaTypeFromContentType(att.contentType))","url":"\(escapeJSON(att.url))","description":\(desc),"blurhash":\(bh)}
             """
         }
         mediaAttachments = "[\(items.joined(separator: ","))]"
     }
 
-    let cw = status.contentWarning.map { "\"\(escapeJSONValue($0))\"" } ?? "null"
-    let lang = status.language.map { "\"\(escapeJSONValue($0))\"" } ?? "null"
-    let replyTo = status.inReplyTo.map { "\"\(escapeJSONValue($0))\"" } ?? "null"
+    let cw = status.contentWarning.map { "\"\(escapeJSON($0))\"" } ?? "null"
+    let lang = status.language.map { "\"\(escapeJSON($0))\"" } ?? "null"
+    let replyTo = status.inReplyTo.map { "\"\(escapeJSON($0))\"" } ?? "null"
 
     return """
-    {"id":"\(status.id)","created_at":"\(escapeJSONValue(status.published))","visibility":"\(status.visibility)","sensitive":\(status.sensitive),"spoiler_text":\(cw),"content":"\(escapeJSONValue(status.content))","url":"\(escapeJSONValue(status.url))","uri":"\(escapeJSONValue(status.uri))","language":\(lang),"in_reply_to_id":\(replyTo),"favourites_count":\(status.likesCount),"reblogs_count":\(status.boostsCount),"replies_count":\(status.repliesCount),"media_attachments":\(mediaAttachments)}
+    {"id":"\(status.id)","created_at":"\(escapeJSON(status.published))","visibility":"\(status.visibility)","sensitive":\(status.sensitive),"spoiler_text":\(cw),"content":"\(escapeJSON(status.content))","url":"\(escapeJSON(status.url))","uri":"\(escapeJSON(status.uri))","language":\(lang),"in_reply_to_id":\(replyTo),"favourites_count":\(status.likesCount),"reblogs_count":\(status.boostsCount),"replies_count":\(status.repliesCount),"media_attachments":\(mediaAttachments)}
     """
 }
 
@@ -267,14 +267,6 @@ func mediaTypeFromContentType(_ contentType: String) -> String {
     if contentType.hasPrefix("video/") { return "video" }
     if contentType.hasPrefix("audio/") { return "audio" }
     return "unknown"
-}
-
-func escapeJSONValue(_ value: String) -> String {
-    value.replacingOccurrences(of: "\\", with: "\\\\")
-         .replacingOccurrences(of: "\"", with: "\\\"")
-         .replacingOccurrences(of: "\n", with: "\\n")
-         .replacingOccurrences(of: "\r", with: "\\r")
-         .replacingOccurrences(of: "\t", with: "\\t")
 }
 
 try await runtime.run()
