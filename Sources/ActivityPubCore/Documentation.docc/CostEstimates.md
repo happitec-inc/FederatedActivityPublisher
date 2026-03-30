@@ -12,19 +12,19 @@ The serverless architecture means you pay only for what you use. At rest (no pos
 |---|---|---|---|
 | **Route 53** (hosted zone) | $0.50 | $0.50 | $0.50 |
 | **Route 53** (DNS queries) | < $0.01 | < $0.01 | $0.10 |
-| **Lambda** (invocations) | < $0.01 | $0.05 | $5.00 |
-| **Lambda** (compute, 512 MB) | < $0.01 | $0.10 | $8.00 |
+| **Lambda** (invocations) | < $0.01 | $0.05 | $20.00 |
+| **Lambda** (compute, 512 MB) | < $0.01 | $0.10 | $35.00 |
 | **DynamoDB** (reads, on-demand) | < $0.01 | $0.02 | $2.00 |
 | **DynamoDB** (writes, on-demand) | < $0.01 | $0.05 | $4.00 |
 | **DynamoDB** (storage) | < $0.01 | < $0.01 | $0.25 |
 | **S3** (storage) | < $0.01 | < $0.01 | $0.50 |
 | **S3** (requests) | < $0.01 | < $0.01 | $0.10 |
-| **SQS** (messages) | < $0.01 | < $0.01 | $0.40 |
+| **SQS** (messages) | < $0.01 | < $0.01 | $2.00 |
 | **CloudFront** (requests) | < $0.01 | $0.10 | $2.00 |
 | **CloudFront** (data transfer) | < $0.01 | $0.10 | $5.00 |
-| **SSM** (parameter reads) | $0.00 | < $0.01 | $0.15 |
+| **SSM** (parameter reads) | $0.00 | < $0.01 | $4.50 |
 | **ACM** (certificate) | $0.00 | $0.00 | $0.00 |
-| **Total** | **~$0.50** | **~$1-2** | **~$15-30** |
+| **Total** | **~$0.50** | **~$1-2** | **~$70-100** |
 
 ### Assumptions
 
@@ -32,7 +32,7 @@ These estimates assume:
 
 - **100 followers:** 2-3 posts per week, minimal inbound traffic. Most federation reads served from CloudFront cache.
 - **1,000 followers:** Daily posts, moderate inbound follows/likes/boosts. Delivery fan-out creates ~1,000 SQS messages per post.
-- **100,000 followers:** Multiple posts per day, heavy inbound traffic. Delivery fan-out batched across SQS. CloudFront serves the vast majority of read traffic.
+- **100,000 followers:** Multiple posts per day, heavy inbound traffic. Each post fans out 100,000 SQS delivery jobs, each invoking the deliver Lambda individually. At 3 posts/day that is ~9M Lambda invocations/month for delivery alone. CloudFront serves the vast majority of read traffic.
 
 ### Cost Optimization Notes
 
