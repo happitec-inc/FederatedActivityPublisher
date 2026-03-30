@@ -145,10 +145,10 @@ let runtime = LambdaRuntime {
             mediaType = "unknown"
         }
 
-        let descJSON = description.map { "\"\(escapeMediaJSON($0))\"" } ?? "null"
+        let descJSON = description.map { "\"\(escapeJSON($0))\"" } ?? "null"
 
         let response = """
-        {"id":"\(mediaId)","type":"\(mediaType)","url":"\(escapeMediaJSON(mediaUrl))","preview_url":"\(escapeMediaJSON(mediaUrl))","description":\(descJSON),"blurhash":null}
+        {"id":"\(mediaId)","type":"\(mediaType)","url":"\(escapeJSON(mediaUrl))","preview_url":"\(escapeJSON(mediaUrl))","description":\(descJSON),"blurhash":null}
         """
 
         return APIGatewayResponse(
@@ -165,14 +165,6 @@ let runtime = LambdaRuntime {
             body: #"{"error":"Internal server error"}"#
         )
     }
-}
-
-func escapeMediaJSON(_ value: String) -> String {
-    value.replacingOccurrences(of: "\\", with: "\\\\")
-         .replacingOccurrences(of: "\"", with: "\\\"")
-         .replacingOccurrences(of: "\n", with: "\\n")
-         .replacingOccurrences(of: "\r", with: "\\r")
-         .replacingOccurrences(of: "\t", with: "\\t")
 }
 
 try await runtime.run()
