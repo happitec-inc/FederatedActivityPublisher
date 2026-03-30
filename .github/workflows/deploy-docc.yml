@@ -26,6 +26,8 @@ jobs:
   build:
     needs: [generate-og-image]
     runs-on: [self-hosted, macOS]
+    env:
+      PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
