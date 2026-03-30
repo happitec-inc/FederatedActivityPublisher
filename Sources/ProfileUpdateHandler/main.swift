@@ -369,7 +369,7 @@ func buildUpdateActivityJSON(
     let followersCollection = "\(actorUrl)/followers"
 
     let json = """
-    {"@context":"https://www.w3.org/ns/activitystreams","id":"\(actorUrl)#update-\(updateId)","type":"Update","actor":"\(actorUrl)","to":["\(publicURI)"],"cc":["\(followersCollection)"],"object":\(actorJSONLD)}
+    {"@context":["https://www.w3.org/ns/activitystreams","https://w3id.org/security/v1",{"toot":"http://joinmastodon.org/ns#","discoverable":"toot:discoverable","indexable":"toot:indexable","featured":{"@id":"toot:featured","@type":"@id"},"featuredTags":{"@id":"toot:featuredTags","@type":"@id"},"attributionDomains":{"@id":"toot:attributionDomains","@type":"@id"},"schema":"http://schema.org#","PropertyValue":"schema:PropertyValue","value":"schema:value","manuallyApprovesFollowers":"as:manuallyApprovesFollowers","sensitive":"as:sensitive"}],"id":"\(actorUrl)#update-\(updateId)","type":"Update","actor":"\(actorUrl)","to":["\(publicURI)"],"cc":["\(followersCollection)"],"object":\(actorJSONLD)}
     """
     return json.trimmingCharacters(in: .whitespacesAndNewlines)
 }

@@ -53,7 +53,15 @@ public func authenticateBearer(
     let username = String(parts[0])
     let storedToken = String(parts[1])
 
-    guard token == storedToken else {
+    // Constant-time comparison to prevent timing attacks
+    let tokenBytes = Array(token.utf8)
+    let storedBytes = Array(storedToken.utf8)
+    var result: UInt8 = 0
+    // Always iterate over stored length to keep timing constant
+    for i in 0..<storedBytes.count {
+        result |= storedBytes[i] ^ (i < tokenBytes.count ? tokenBytes[i] : ~storedBytes[i])
+    }
+    guard tokenBytes.count == storedBytes.count, result == 0 else {
         throw BearerAuthError.invalidToken
     }
 
