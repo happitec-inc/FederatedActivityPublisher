@@ -89,9 +89,9 @@ func buildActorJSON(actor: Actor, actorUrl: String) -> String {
       ],
       "id": "\(actorUrl)",
       "type": "Service",
-      "preferredUsername": \(escapeJSONString(actor.username)),
-      "name": \(escapeJSONString(actor.displayName)),
-      "summary": \(escapeJSONString(actor.summary)),
+      "preferredUsername": \(jsonString(actor.username)),
+      "name": \(jsonString(actor.displayName)),
+      "summary": \(jsonString(actor.summary)),
       "inbox": "\(actorUrl)/inbox",
       "outbox": "\(actorUrl)/outbox",
       "followers": "\(actorUrl)/followers",
@@ -100,7 +100,7 @@ func buildActorJSON(actor: Actor, actorUrl: String) -> String {
       "publicKey": {
         "id": "\(actorUrl)#main-key",
         "owner": "\(actorUrl)",
-        "publicKeyPem": \(escapeJSONString(actor.publicKeyPem))
+        "publicKeyPem": \(jsonString(actor.publicKeyPem))
       },
       "discoverable": \(actor.discoverable),
       "indexable": false,
@@ -112,23 +112,6 @@ func buildActorJSON(actor: Actor, actorUrl: String) -> String {
     }
     """
     return json
-}
-
-/// Escape a string for safe inclusion as a JSON string value.
-func escapeJSONString(_ value: String) -> String {
-    // Use JSONEncoder to produce a properly escaped JSON string
-    if let data = try? JSONEncoder().encode(value),
-       let str = String(data: data, encoding: .utf8) {
-        return str
-    }
-    // Fallback: manual escaping
-    let escaped = value
-        .replacingOccurrences(of: "\\", with: "\\\\")
-        .replacingOccurrences(of: "\"", with: "\\\"")
-        .replacingOccurrences(of: "\n", with: "\\n")
-        .replacingOccurrences(of: "\r", with: "\\r")
-        .replacingOccurrences(of: "\t", with: "\\t")
-    return "\"\(escaped)\""
 }
 
 try await runtime.run()

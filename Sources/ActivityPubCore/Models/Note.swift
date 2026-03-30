@@ -121,7 +121,7 @@ public func computeAddressing(
 // MARK: - JSON Helpers
 
 /// Escape a string for embedding in manually-built JSON.
-func escapeJSON(_ value: String) -> String {
+public func escapeJSON(_ value: String) -> String {
     value.replacingOccurrences(of: "\\", with: "\\\\")
          .replacingOccurrences(of: "\"", with: "\\\"")
          .replacingOccurrences(of: "\n", with: "\\n")
@@ -130,12 +130,12 @@ func escapeJSON(_ value: String) -> String {
 }
 
 /// Produce a properly quoted JSON string value.
-func jsonString(_ value: String) -> String {
+public func jsonString(_ value: String) -> String {
     "\"\(escapeJSON(value))\""
 }
 
 /// Produce a JSON array of strings.
-func jsonArray(_ values: [String]) -> String {
+public func jsonArray(_ values: [String]) -> String {
     let items = values.map { jsonString($0) }
     return "[\(items.joined(separator: ","))]"
 }
