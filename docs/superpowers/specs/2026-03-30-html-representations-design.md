@@ -199,6 +199,9 @@ If the post has a media attachment, use the first image as `og:image` and set `t
 Update ActorHandler and ObjectHandler to check the `Accept` header:
 - If `Accept` includes `text/html` (and does NOT include `application/activity+json` or `application/ld+json`): return 302 redirect to the HTML page
 - Otherwise: serve JSON-LD as usual
+- **Both handlers must include `Vary: Accept` in their responses** so CloudFront does not cache the redirect for ActivityPub clients or the JSON-LD for browsers
+
+**Post page visibility:** Requests for private or direct posts return 404 — only public and unlisted posts are accessible via HTML pages.
 
 **ActorHandler** redirects browsers visiting `https://happitec.com/users/randomforms` to `https://happitec.com/@randomforms`.
 
