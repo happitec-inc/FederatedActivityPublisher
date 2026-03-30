@@ -82,6 +82,25 @@ sam deploy \
   --parameter-overrides Stage=stage ...
 ```
 
+## CI/CD Configuration
+
+Workflows support both self-hosted and GitHub-hosted runners. Set these repository variables to use self-hosted runners:
+
+| Variable | Self-hosted | Default (GitHub-hosted) |
+|----------|-------------|------------------------|
+| `RUNNER_LABELS_LINUX` | `["self-hosted", "linux"]` | `ubuntu-latest` |
+| `RUNNER_LABELS_MACOS` | `["self-hosted", "macOS"]` | `macos-15` |
+
+Additional required variables and secrets:
+
+| Name | Type | Purpose |
+|------|------|---------|
+| `AWS_ACCESS_KEY_ID` | Secret | AWS credentials for deployment |
+| `AWS_SECRET_ACCESS_KEY` | Secret | AWS credentials for deployment |
+| `HAPPITEC_DISTRIBUTION_ID` | Variable | happitec.com CloudFront distribution ID (for cross-distribution cache invalidation) |
+| `ACTIVITY_API_DOMAIN` | Variable | API Gateway execute-api domain (set on happitec.com repo) |
+| `ACTIVITY_CDN_DOMAIN` | Variable | Activity CloudFront domain (set on happitec.com repo) |
+
 ## License
 
 [MIT](LICENSE)
