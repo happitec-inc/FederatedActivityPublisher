@@ -195,6 +195,266 @@ public struct DynamoDBStore: Sendable {
         return true
     }
 
+    // MARK: - Interaction Storage
+
+    /// Store a Like or Announce interaction. Uses deterministic SK for direct lookup/delete.
+    /// Returns `true` if newly stored, `false` if duplicate.
+    public func storeInteraction(
+        username: String,
+        actorUri: String,
+        type: String,
+        objectUri: String
+    ) async throws -> Bool {
+        let formatter = ISO8601DateFormatter()
+        let now = formatter.string(from: Date())
+
+        let item: [String: DynamoDBClientTypes.AttributeValue] = [
+            "PK": .s("ACTOR#\(username)"),
+            "SK": .s("INTERACTION#\(type)#\(actorUri)#\(objectUri)"),
+            "actorUri": .s(actorUri),
+            "type": .s(type),
+            "objectUri": .s(objectUri),
+            "createdAt": .s(now),
+        ]
+
+        let input = PutItemInput(
+            conditionExpression: "attribute_not_exists(SK)",
+            item: item,
+            tableName: tableName
+        )
+
+        do {
+            _ = try await client.putItem(input: input)
+            return true
+        } catch is ConditionalCheckFailedException {
+            return false
+        }
+    }
+
+    /// Remove a Like or Announce interaction on Undo/Delete.
+    /// Returns `true` if the interaction existed, `false` if not found.
+    public func removeInteraction(
+        username: String,
+        actorUri: String,
+        type: String,
+        objectUri: String
+    ) async throws -> Bool {
+        let input = DeleteItemInput(
+            conditionExpression: "attribute_exists(SK)",
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("INTERACTION#\(type)#\(actorUri)#\(objectUri)"),
+            ],
+            tableName: tableName
+        )
+        do {
+            _ = try await client.deleteItem(input: input)
+            return true
+        } catch is ConditionalCheckFailedException {
+            return false
+        }
+    }
+
+    // MARK: - Reply Storage
+
+    /// Store an inbound reply Note. Returns `true` if newly stored.
+    public func storeReply(
+        username: String,
+        actorUri: String,
+        objectUri: String,
+        content: String,
+        inReplyTo: String,
+        raw: String
+    ) async throws -> Bool {
+        let formatter = ISO8601DateFormatter()
+        let now = formatter.string(from: Date())
+
+        let item: [String: DynamoDBClientTypes.AttributeValue] = [
+            "PK": .s("ACTOR#\(username)"),
+            "SK": .s("REPLY#\(objectUri)"),
+            "GSI1PK": .s("REPLIES#\(inReplyTo)"),
+            "GSI1SK": .s(now),
+            "actorUri": .s(actorUri),
+            "objectUri": .s(objectUri),
+            "content": .s(content),
+            "inReplyTo": .s(inReplyTo),
+            "raw": .s(raw),
+            "createdAt": .s(now),
+        ]
+
+        let input = PutItemInput(
+            conditionExpression: "attribute_not_exists(SK)",
+            item: item,
+            tableName: tableName
+        )
+
+        do {
+            _ = try await client.putItem(input: input)
+            return true
+        } catch is ConditionalCheckFailedException {
+            return false
+        }
+    }
+
+    /// Remove a stored reply on Delete. Returns the `inReplyTo` value if the reply existed, nil otherwise.
+    /// Uses `ReturnValues: .allOld` so the Delete handler can parse the parent statusId and decrement repliesCount.
+    public func removeReply(username: String, objectUri: String) async throws -> String? {
+        let input = DeleteItemInput(
+            conditionExpression: "attribute_exists(SK)",
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("REPLY#\(objectUri)"),
+            ],
+            returnValues: .allOld,
+            tableName: tableName
+        )
+        do {
+            let output = try await client.deleteItem(input: input)
+            // Extract inReplyTo from the old item so caller can decrement parent reply count
+            if case .s(let inReplyTo) = output.attributes?["inReplyTo"] {
+                return inReplyTo
+            }
+            return ""  // Item existed but had no inReplyTo (shouldn't happen)
+        } catch is ConditionalCheckFailedException {
+            return nil
+        }
+    }
+
+    /// Update a stored reply's content on Update.
+    public func updateReply(
+        username: String,
+        objectUri: String,
+        content: String
+    ) async throws {
+        let formatter = ISO8601DateFormatter()
+        let now = formatter.string(from: Date())
+
+        let input = UpdateItemInput(
+            expressionAttributeNames: ["#c": "content", "#u": "updatedAt"],
+            expressionAttributeValues: [":c": .s(content), ":u": .s(now)],
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("REPLY#\(objectUri)"),
+            ],
+            tableName: tableName,
+            updateExpression: "SET #c = :c, #u = :u"
+        )
+        _ = try await client.updateItem(input: input)
+    }
+
+    /// Refresh a cached remote actor profile. Resets TTL to 24h.
+    public func updateRemoteActor(actorUri: String, data: RemoteActor) async throws {
+        // Re-use the existing storeRemoteActor method which does a full PutItem with fresh TTL
+        try await storeRemoteActor(data)
+    }
+
+    // MARK: - Interaction Counts
+
+    /// Atomically increment the likes count for a status.
+    public func incrementLikesCount(username: String, statusId: String) async throws {
+        let input = UpdateItemInput(
+            expressionAttributeNames: ["#fc": "likesCount"],
+            expressionAttributeValues: [":val": .n("1")],
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("STATUS#\(statusId)"),
+            ],
+            tableName: tableName,
+            updateExpression: "ADD #fc :val"
+        )
+        _ = try await client.updateItem(input: input)
+    }
+
+    /// Atomically decrement the likes count for a status. Floors at zero.
+    public func decrementLikesCount(username: String, statusId: String) async throws {
+        let input = UpdateItemInput(
+            conditionExpression: "#fc > :zero",
+            expressionAttributeNames: ["#fc": "likesCount"],
+            expressionAttributeValues: [":val": .n("-1"), ":zero": .n("0")],
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("STATUS#\(statusId)"),
+            ],
+            tableName: tableName,
+            updateExpression: "ADD #fc :val"
+        )
+        do {
+            _ = try await client.updateItem(input: input)
+        } catch is ConditionalCheckFailedException {
+            // Already at zero -- no-op
+        }
+    }
+
+    /// Atomically increment the boosts count for a status.
+    public func incrementBoostsCount(username: String, statusId: String) async throws {
+        let input = UpdateItemInput(
+            expressionAttributeNames: ["#fc": "boostsCount"],
+            expressionAttributeValues: [":val": .n("1")],
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("STATUS#\(statusId)"),
+            ],
+            tableName: tableName,
+            updateExpression: "ADD #fc :val"
+        )
+        _ = try await client.updateItem(input: input)
+    }
+
+    /// Atomically decrement the boosts count for a status. Floors at zero.
+    public func decrementBoostsCount(username: String, statusId: String) async throws {
+        let input = UpdateItemInput(
+            conditionExpression: "#fc > :zero",
+            expressionAttributeNames: ["#fc": "boostsCount"],
+            expressionAttributeValues: [":val": .n("-1"), ":zero": .n("0")],
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("STATUS#\(statusId)"),
+            ],
+            tableName: tableName,
+            updateExpression: "ADD #fc :val"
+        )
+        do {
+            _ = try await client.updateItem(input: input)
+        } catch is ConditionalCheckFailedException {
+            // Already at zero -- no-op
+        }
+    }
+
+    /// Atomically increment the replies count for a status.
+    public func incrementRepliesCount(username: String, statusId: String) async throws {
+        let input = UpdateItemInput(
+            expressionAttributeNames: ["#fc": "repliesCount"],
+            expressionAttributeValues: [":val": .n("1")],
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("STATUS#\(statusId)"),
+            ],
+            tableName: tableName,
+            updateExpression: "ADD #fc :val"
+        )
+        _ = try await client.updateItem(input: input)
+    }
+
+    /// Atomically decrement the replies count for a status. Floors at zero.
+    public func decrementRepliesCount(username: String, statusId: String) async throws {
+        let input = UpdateItemInput(
+            conditionExpression: "#fc > :zero",
+            expressionAttributeNames: ["#fc": "repliesCount"],
+            expressionAttributeValues: [":val": .n("-1"), ":zero": .n("0")],
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("STATUS#\(statusId)"),
+            ],
+            tableName: tableName,
+            updateExpression: "ADD #fc :val"
+        )
+        do {
+            _ = try await client.updateItem(input: input)
+        } catch is ConditionalCheckFailedException {
+            // Already at zero -- no-op
+        }
+    }
+
     // MARK: - Remote Actor Cache
 
     /// Store a remote actor in the cache with a 24h TTL.
