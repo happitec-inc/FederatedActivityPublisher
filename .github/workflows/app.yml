@@ -113,7 +113,7 @@ jobs:
               BootstrapStackName=activity-bootstrap \
               ServerDomain=happitec.com \
               HandleDomain=happitec.com \
-              PrNumber=${{ env.PR_NUMBER }}
+              ${{ env.PR_NUMBER && format('PrNumber={0}', env.PR_NUMBER) || '' }}
 
       - name: Print stack outputs
         run: |
