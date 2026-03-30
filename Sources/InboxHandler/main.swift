@@ -228,6 +228,14 @@ let runtime = LambdaRuntime {
                 context: context
             )
 
+        case "Delete":
+            return try await handleDelete(
+                json: json,
+                username: username,
+                actorUri: actorUri,
+                context: context
+            )
+
         default:
             context.logger.info("Unhandled activity type: \(activityType) from \(actorUri)")
             return APIGatewayResponse(
@@ -628,6 +636,106 @@ func handleCreate(
     }
 
     context.logger.info("Reply \(isNew ? "stored" : "duplicate") from \(actorUri) to \(inReplyTo)")
+
+    return APIGatewayResponse(
+        statusCode: .accepted,
+        headers: ["content-type": "application/json"],
+        body: #"{"status":"accepted"}"#
+    )
+}
+
+// MARK: - Delete Handling
+
+func handleDelete(
+    json: [String: Any],
+    username: String,
+    actorUri: String,
+    context: LambdaContext
+) async throws -> APIGatewayResponse {
+    context.logger.info("Processing Delete from \(actorUri) for \(username)")
+
+    // Extract the object being deleted
+    let objectUri: String
+    let objectType: String?
+
+    if let objectDict = json["object"] as? [String: Any] {
+        objectUri = objectDict["id"] as? String ?? ""
+        objectType = objectDict["type"] as? String
+    } else if let objectStr = json["object"] as? String {
+        objectUri = objectStr
+        objectType = nil
+    } else {
+        context.logger.warning("Delete with unrecognized object format from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    guard !objectUri.isEmpty else {
+        context.logger.warning("Delete with empty object URI from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    // Case 1: Object URI matches our status pattern -- deleting an interaction or reply
+    if let parsed = parseStatusUri(objectUri) {
+        // Try removing a Like interaction
+        let removedLike = try await store.removeInteraction(
+            username: parsed.username,
+            actorUri: actorUri,
+            type: "Like",
+            objectUri: objectUri
+        )
+        if removedLike {
+            try await store.decrementLikesCount(username: parsed.username, statusId: parsed.statusId)
+            context.logger.info("Deleted Like from \(actorUri) on \(objectUri)")
+        }
+
+        // Try removing an Announce interaction
+        let removedAnnounce = try await store.removeInteraction(
+            username: parsed.username,
+            actorUri: actorUri,
+            type: "Announce",
+            objectUri: objectUri
+        )
+        if removedAnnounce {
+            try await store.decrementBoostsCount(username: parsed.username, statusId: parsed.statusId)
+            context.logger.info("Deleted Announce from \(actorUri) on \(objectUri)")
+        }
+
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    // Check if it's a reply being deleted (objectUri is the remote Note's id, not our status URI)
+    if let inReplyTo = try await store.removeReply(username: username, objectUri: objectUri) {
+        context.logger.info("Deleted reply \(objectUri) from \(actorUri)")
+        // Decrement the parent status's reply count using inReplyTo from the deleted item
+        if !inReplyTo.isEmpty, let parentParsed = parseStatusUri(inReplyTo) {
+            try await store.decrementRepliesCount(username: parentParsed.username, statusId: parentParsed.statusId)
+        }
+    }
+
+    // Case 2: Actor self-deletion (objectUri matches an actor URI, and actorUri == objectUri)
+    if actorUri == objectUri && !objectUri.contains("/statuses/") {
+        context.logger.info("Processing actor self-deletion for \(actorUri)")
+        let wasRemoved = try await store.removeFollower(username: username, actorUri: actorUri)
+        if wasRemoved {
+            try await store.decrementFollowerCount(username: username)
+            await invalidateFollowersCache(username: username, context: context)
+            context.logger.info("Removed follower \(actorUri) via self-deletion")
+        }
+    } else {
+        context.logger.info("Delete for unrecognized object \(objectUri) from \(actorUri)")
+    }
 
     return APIGatewayResponse(
         statusCode: .accepted,
