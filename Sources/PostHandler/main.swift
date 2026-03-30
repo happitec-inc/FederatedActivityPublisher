@@ -195,13 +195,17 @@ let runtime = LambdaRuntime {
             context.logger.info("Enqueued \(jobs.count) delivery jobs for status \(statusId) (\(followers.count) followers)")
         }
 
-        // 13. CloudFront invalidation for outbox
+        // 13. CloudFront invalidation for outbox + profile page
         if !distributionId.isEmpty {
+            let activityPaths = [
+                "/users/\(username)/outbox*",
+                "/profile/\(username)*"
+            ]
             let invalidation = CloudFrontClientTypes.InvalidationBatch(
                 callerReference: "post-\(statusId)",
                 paths: CloudFrontClientTypes.Paths(
-                    items: ["/users/\(username)/outbox*"],
-                    quantity: 1
+                    items: activityPaths,
+                    quantity: Int(activityPaths.count)
                 )
             )
             _ = try? await cfClient.createInvalidation(input: CreateInvalidationInput(
@@ -211,11 +215,16 @@ let runtime = LambdaRuntime {
 
             // Also invalidate the happitec.com CloudFront distribution (proxies same paths)
             if !happitecDistributionId.isEmpty {
+                let happitecPaths = [
+                    "/users/\(username)/outbox*",
+                    "/profile/\(username)*",
+                    "/@\(username)*"
+                ]
                 let happitecInvalidation = CloudFrontClientTypes.InvalidationBatch(
                     callerReference: "post-happitec-\(statusId)",
                     paths: CloudFrontClientTypes.Paths(
-                        items: ["/users/\(username)/outbox*"],
-                        quantity: 1
+                        items: happitecPaths,
+                        quantity: Int(happitecPaths.count)
                     )
                 )
                 _ = try? await cfClient.createInvalidation(input: CreateInvalidationInput(
