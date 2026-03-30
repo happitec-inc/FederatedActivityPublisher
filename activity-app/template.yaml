@@ -299,12 +299,22 @@ Resources:
       FunctionName: !Sub "activity-app-inbox-${Stage}"
       CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/InboxHandler/InboxHandler.zip
       ReservedConcurrentExecutions: 25
+      Environment:
+        Variables:
+          CLOUDFRONT_DISTRIBUTION_ID: !If [IsNotEphemeral, !Ref CloudFrontDistribution, ""]
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !ImportValue
               Fn::Sub: "${EnvironmentStackName}-TableName"
         - SQSSendMessagePolicy:
             QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
+        - !If
+          - IsNotEphemeral
+          - Statement:
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+          - !Ref AWS::NoValue
       Events:
         PostInbox:
           Type: Api
