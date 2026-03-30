@@ -28,6 +28,31 @@ let runtime = LambdaRuntime {
             )
         }
 
+        // Content negotiation: redirect browsers to post page
+        let accept = event.headers["accept"] ?? event.headers["Accept"] ?? ""
+        if accept.contains("text/html") && !accept.contains("application/activity+json") && !accept.contains("application/ld+json") {
+            // Private/direct posts return 404 for HTML requests
+            if status.visibility == "private" || status.visibility == "direct" {
+                return APIGatewayResponse(
+                    statusCode: .notFound,
+                    headers: [
+                        "content-type": "application/json",
+                        "vary": "Accept",
+                    ],
+                    body: #"{"error":"Status not found"}"#
+                )
+            }
+
+            return APIGatewayResponse(
+                statusCode: .found,
+                headers: [
+                    "location": "https://\(serverDomain)/@\(username)/\(statusId)",
+                    "content-type": "text/html",
+                    "vary": "Accept",
+                ]
+            )
+        }
+
         let noteJSON = buildNoteJSON(status: status, serverDomain: serverDomain, username: username)
 
         return APIGatewayResponse(
@@ -35,6 +60,7 @@ let runtime = LambdaRuntime {
             headers: [
                 "content-type": "application/activity+json",
                 "cache-control": "public, max-age=31536000",
+                "vary": "Accept",
             ],
             body: noteJSON
         )
