@@ -79,6 +79,14 @@ jobs:
             echo "Warning: Generated OG image not found, using default"
           fi
 
+      - name: Inject OG meta tags into HTML
+        run: |
+          BASE_URL="https://docs.happitec.com/FederatedActivityPublisher"
+          OG_TAGS='<meta property="og:type" content="website"><meta property="og:site_name" content="Happitec"><meta property="og:title" content="FederatedActivityPublisher — Documentation"><meta property="og:description" content="A serverless ActivityPub server for brand accounts. Swift 6.3 on AWS Lambda, federated with Mastodon."><meta property="og:url" content="'"$BASE_URL"'/documentation/activitypubcore/"><meta property="og:image" content="'"$BASE_URL"'/developer-og.jpg"><meta property="og:image:width" content="2400"><meta property="og:image:height" content="1260"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="FederatedActivityPublisher — Documentation"><meta name="twitter:description" content="A serverless ActivityPub server for brand accounts. Swift 6.3 on AWS Lambda."><meta name="twitter:image" content="'"$BASE_URL"'/developer-og-twitter.jpg">'
+          # Inject into all HTML files after <meta charset>
+          find ./docs -name "*.html" -exec sed -i '' "s|<meta charset=\"utf-8\">|<meta charset=\"utf-8\">${OG_TAGS}|g" {} +
+          echo "Injected OG meta tags into $(find ./docs -name '*.html' | wc -l | tr -d ' ') HTML files"
+
       - name: Add root redirect
         run: |
           cat > ./docs/index.html << 'EOF'
