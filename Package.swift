@@ -39,6 +39,7 @@ let package = Package(
             dependencies: [
                 .product(name: "AWSDynamoDB", package: "aws-sdk-swift"),
                 .product(name: "AWSSQS", package: "aws-sdk-swift"),
+                .product(name: "AWSSSM", package: "aws-sdk-swift"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
             ]

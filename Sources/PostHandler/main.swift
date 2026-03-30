@@ -26,53 +26,34 @@ let runtime = LambdaRuntime {
     do {
         // 1. Verify bearer token auth
         let authHeader = event.headers["authorization"] ?? event.headers["Authorization"] ?? ""
-        guard authHeader.lowercased().hasPrefix("bearer ") else {
+        let authResult: BearerAuthResult
+        do {
+            authResult = try await authenticateBearer(
+                authHeader: authHeader,
+                ssmKeyPrefix: ssmKeyPrefix,
+                ssmClient: ssmClient
+            )
+        } catch BearerAuthError.missingHeader {
             return APIGatewayResponse(
                 statusCode: .unauthorized,
                 headers: ["content-type": "application/json"],
                 body: #"{"error":"Missing or invalid Authorization header"}"#
             )
-        }
-        let token = String(authHeader.dropFirst(7)).trimmingCharacters(in: .whitespaces)
-
-        // Read actor token from SSM — the token includes the username
-        // Token format: stored at {ssmKeyPrefix}/token/{username}
-        // For MVP, we check all possible actor tokens by extracting username from the token path
-        // Actually, we store the token at a known SSM path and it maps to a username
-        let tokenParamName = "\(ssmKeyPrefix)/client-token"
-        let tokenOutput = try await ssmClient.getParameter(input: GetParameterInput(
-            name: tokenParamName,
-            withDecryption: true
-        ))
-        guard let storedValue = tokenOutput.parameter?.value else {
-            context.logger.error("Client token not configured at \(tokenParamName)")
-            return APIGatewayResponse(
-                statusCode: .internalServerError,
-                headers: ["content-type": "application/json"],
-                body: #"{"error":"Server configuration error"}"#
-            )
-        }
-
-        // Token format in SSM: "username:token"
-        let parts = storedValue.split(separator: ":", maxSplits: 1)
-        guard parts.count == 2 else {
-            context.logger.error("Invalid client token format in SSM")
-            return APIGatewayResponse(
-                statusCode: .internalServerError,
-                headers: ["content-type": "application/json"],
-                body: #"{"error":"Server configuration error"}"#
-            )
-        }
-        let username = String(parts[0])
-        let storedToken = String(parts[1])
-
-        guard token == storedToken else {
+        } catch BearerAuthError.invalidToken {
             return APIGatewayResponse(
                 statusCode: .unauthorized,
                 headers: ["content-type": "application/json"],
                 body: #"{"error":"Invalid bearer token"}"#
             )
+        } catch let error as BearerAuthError {
+            context.logger.error("Bearer auth error: \(error)")
+            return APIGatewayResponse(
+                statusCode: .internalServerError,
+                headers: ["content-type": "application/json"],
+                body: #"{"error":"Server configuration error"}"#
+            )
         }
+        let username = authResult.username
 
         // 2. Parse request body
         guard let bodyString = event.body else {
