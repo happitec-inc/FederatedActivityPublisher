@@ -244,6 +244,23 @@ let runtime = LambdaRuntime {
                 context: context
             )
 
+        case "Accept", "Reject", "Block", "Move", "Add", "Remove", "Flag":
+            let objectUri = extractObjectUri(from: json) ?? "unknown"
+            context.logger.info("Stub handler: \(activityType) from \(actorUri), object=\(objectUri)")
+            return APIGatewayResponse(
+                statusCode: .accepted,
+                headers: ["content-type": "application/json"],
+                body: #"{"status":"accepted"}"#
+            )
+
+        case "EmojiReact":
+            context.logger.info("Ignored EmojiReact from \(actorUri)")
+            return APIGatewayResponse(
+                statusCode: .accepted,
+                headers: ["content-type": "application/json"],
+                body: #"{"status":"accepted"}"#
+            )
+
         default:
             context.logger.info("Unhandled activity type: \(activityType) from \(actorUri)")
             return APIGatewayResponse(
