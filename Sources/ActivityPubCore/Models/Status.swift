@@ -2,24 +2,45 @@ import AWSDynamoDB
 import Foundation
 
 /// A status (post) record stored in DynamoDB.
+///
+/// Statuses are keyed by `PK=ACTOR#{username}`, `SK=STATUS#{ulid}`. The ULID ensures
+/// lexicographic time ordering, so reverse-scanning SK yields newest-first pagination.
 public struct Status: Codable, Sendable {
-    public let id: String           // ULID
+    /// ULID identifier for the status. Sorts lexicographically by creation time.
+    public let id: String
+    /// Username of the actor who authored this status.
     public let username: String
-    public let content: String      // HTML
+    /// HTML content of the status.
+    public let content: String
+    /// Content warning / spoiler text, if any.
     public let contentWarning: String?
-    public let visibility: String   // public, unlisted, private, direct
+    /// Visibility level: `public`, `unlisted`, `private`, or `direct`.
+    public let visibility: String
+    /// Whether the status contains sensitive content.
     public let sensitive: Bool
+    /// ISO 639-1 language code (e.g. `en`), if specified.
     public let language: String?
-    public let published: String    // ISO 8601
-    public let url: String          // human-readable permalink
-    public let uri: String          // ActivityPub URI
+    /// ISO 8601 publication timestamp.
+    public let published: String
+    /// Human-readable permalink URL.
+    public let url: String
+    /// ActivityPub object URI.
+    public let uri: String
+    /// ActivityPub `to` addressing recipients.
     public let to: [String]
+    /// ActivityPub `cc` addressing recipients.
     public let cc: [String]
+    /// Hashtags, mentions, and emoji tags attached to the status.
     public let tags: [Tag]?
+    /// Media attachments (images, video, audio) referenced by this status.
     public let attachments: [MediaAttachmentRef]?
+    /// URI of the status this is replying to, if any.
     public let inReplyTo: String?
+    /// Number of likes received from remote actors.
     public let likesCount: Int
+    /// Number of boosts (announces) received from remote actors.
     public let boostsCount: Int
+    /// Number of replies received from remote actors.
     public let repliesCount: Int
 
     public init(
@@ -158,11 +179,14 @@ public struct Status: Codable, Sendable {
     }
 }
 
-/// A tag entry (Hashtag, Mention, Emoji) on a status.
+/// A tag entry (Hashtag, Mention, or Emoji) attached to a status.
 public struct Tag: Codable, Sendable {
-    public let type: String         // "Hashtag", "Mention", "Emoji"
-    public let name: String         // "#tag" or "@user@domain"
-    public let href: String?        // URL
+    /// Tag type: `Hashtag`, `Mention`, or `Emoji`.
+    public let type: String
+    /// Tag name (e.g. `#swift` for hashtags, `@user@domain` for mentions).
+    public let name: String
+    /// URL for the tag target, if applicable.
+    public let href: String?
 
     public init(type: String, name: String, href: String?) {
         self.type = type
@@ -172,11 +196,19 @@ public struct Tag: Codable, Sendable {
 }
 
 /// A media attachment reference on a status.
+///
+/// Stores the CloudFront URL, MIME type, alt text, and optional blurhash for
+/// image/video/audio attachments.
 public struct MediaAttachmentRef: Codable, Sendable {
+    /// Unique identifier for the media attachment.
     public let id: String
-    public let url: String          // CloudFront URL
+    /// CloudFront URL where the media is served.
+    public let url: String
+    /// MIME type (e.g. `image/png`, `video/mp4`).
     public let contentType: String
-    public let description: String? // alt text
+    /// Alt text description for accessibility.
+    public let description: String?
+    /// Blurhash placeholder string for the media.
     public let blurhash: String?
 
     public init(id: String, url: String, contentType: String, description: String?, blurhash: String?) {

@@ -1,8 +1,11 @@
 import AWSSSM
 import Foundation
 
-/// Result of bearer token authentication.
+/// Result of a successful bearer token authentication.
+///
+/// Contains the username extracted from the SSM-stored token credential.
 public struct BearerAuthResult: Sendable {
+    /// The authenticated username (parsed from the `username:token` value in SSM).
     public let username: String
 
     public init(username: String) {
@@ -10,10 +13,13 @@ public struct BearerAuthResult: Sendable {
     }
 }
 
-/// Error type for bearer auth failures.
+/// Errors thrown during bearer token authentication.
 public enum BearerAuthError: Error, Sendable {
+    /// The Authorization header is missing or does not start with `Bearer `.
     case missingHeader
+    /// The SSM parameter storing the token is missing or malformed.
     case serverConfigError(String)
+    /// The provided token does not match the stored token.
     case invalidToken
 }
 
