@@ -274,7 +274,7 @@ Resources:
         GetProfile:
           Type: Api
           Properties:
-            Path: /@{username}
+            Path: /profile/{username}
             Method: GET
 
   InboxFunction:
