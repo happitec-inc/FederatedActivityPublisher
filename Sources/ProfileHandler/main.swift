@@ -329,7 +329,7 @@ struct PostPage: HTMLDocument {
            let firstImage = attachments.first(where: { $0.contentType.hasPrefix("image/") }) {
             return firstImage.url
         }
-        return actor.avatarUrl ?? ""
+        return actor.avatarUrl ?? ""  // Empty string handled below — og:image only emitted if non-empty
     }
 
     var twitterCardType: String {
@@ -360,7 +360,9 @@ struct PostPage: HTMLDocument {
         meta(.property("og:title"), .content("\(actor.displayName) on Happitec"))
         meta(.property("og:description"), .content(descriptionText))
         meta(.property("og:url"), .content("https://\(domain)/@\(actor.username)/\(status.id)"))
-        meta(.property("og:image"), .content(ogImage))
+        if !ogImage.isEmpty {
+            meta(.property("og:image"), .content(ogImage))
+        }
         meta(.property("article:published_time"), .content(status.published))
         meta(.property("article:author"), .content("https://\(domain)/@\(actor.username)"))
 
@@ -368,7 +370,9 @@ struct PostPage: HTMLDocument {
         meta(.name("twitter:card"), .content(twitterCardType))
         meta(.name("twitter:title"), .content("\(actor.displayName) on Happitec"))
         meta(.name("twitter:description"), .content(descriptionText))
-        meta(.name("twitter:image"), .content(ogImage))
+        if !ogImage.isEmpty {
+            meta(.name("twitter:image"), .content(ogImage))
+        }
 
         HTMLRaw("<style>\(sharedStyles)</style>")
     }
@@ -479,6 +483,12 @@ struct ErrorPage: HTMLDocument {
 /// Strip HTML tags for use in meta descriptions.
 func stripHTML(_ html: String) -> String {
     html.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        .replacingOccurrences(of: "&amp;", with: "&")
+        .replacingOccurrences(of: "&lt;", with: "<")
+        .replacingOccurrences(of: "&gt;", with: ">")
+        .replacingOccurrences(of: "&quot;", with: "\"")
+        .replacingOccurrences(of: "&#39;", with: "'")
+        .replacingOccurrences(of: "&apos;", with: "'")
         .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
