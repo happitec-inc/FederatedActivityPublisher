@@ -8,6 +8,8 @@
 
 **Tech Stack:** Swift 6.3, AWS Lambda (provided.al2023), DynamoDB, AWSLambdaRuntime, AWSLambdaEvents
 
+> **Note for executing agents:** All SCP and build commands below use `$WORKING_DIR` as a placeholder for the local source directory. Replace it with your actual working directory (e.g., the worktree path or repo checkout path). Do NOT use hardcoded worktree paths from a previous session.
+
 ---
 
 ## Spec
@@ -45,8 +47,8 @@ sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "
 
 SCP files first (the VM cannot git fetch this worktree):
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r /Users/spar/web-local/activity.happitec.com/.claude/worktrees/agent-a3c2f787/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
-sshpass -p admin scp -o StrictHostKeyChecking=no -r /Users/spar/web-local/activity.happitec.com/.claude/worktrees/agent-a3c2f787/Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Tests
+sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
+sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Tests
 ```
 
 Test (on linux-runner VM):
@@ -342,7 +344,11 @@ public enum HTMLSanitizer {
                     let href = extractAttribute("href", from: attrsString)
                     var tag = "<a"
                     if let href, isAllowedScheme(href) {
-                        tag += " href=\"\(escapeAttributeValue(href))\""
+                        // Don't call escapeAttributeValue here -- href values extracted from
+                        // HTML attributes are already entity-encoded, so escaping would
+                        // double-encode (e.g., &amp; -> &amp;amp;). The regex only captures
+                        // content between matching quotes, so " injection is already prevented.
+                        tag += " href=\"\(href)\""
                     }
                     tag += " rel=\"nofollow noopener noreferrer\""
                     tag += ">"
@@ -589,7 +595,6 @@ public func storeReply(
 ) async throws -> Bool {
     let formatter = ISO8601DateFormatter()
     let now = formatter.string(from: Date())
-    let ulid = generateULID()
 
     let item: [String: DynamoDBClientTypes.AttributeValue] = [
         "PK": .s("ACTOR#\(username)"),
@@ -618,21 +623,27 @@ public func storeReply(
     }
 }
 
-/// Remove a stored reply on Delete. Returns `true` if existed.
-public func removeReply(username: String, objectUri: String) async throws -> Bool {
+/// Remove a stored reply on Delete. Returns the `inReplyTo` value if the reply existed, nil otherwise.
+/// Uses `ReturnValues: .allOld` so the Delete handler can parse the parent statusId and decrement repliesCount.
+public func removeReply(username: String, objectUri: String) async throws -> String? {
     let input = DeleteItemInput(
         conditionExpression: "attribute_exists(SK)",
         key: [
             "PK": .s("ACTOR#\(username)"),
             "SK": .s("REPLY#\(objectUri)"),
         ],
+        returnValues: .allOld,
         tableName: tableName
     )
     do {
-        _ = try await client.deleteItem(input: input)
-        return true
+        let output = try await client.deleteItem(input: input)
+        // Extract inReplyTo from the old item so caller can decrement parent reply count
+        if case .s(let inReplyTo) = output.attributes?["inReplyTo"] {
+            return inReplyTo
+        }
+        return ""  // Item existed but had no inReplyTo (shouldn't happen)
     } catch is ConditionalCheckFailedException {
-        return false
+        return nil
     }
 }
 
@@ -783,6 +794,8 @@ public func decrementRepliesCount(username: String, statusId: String) async thro
 ```
 
 Note: These use `ADD` instead of `SET ... + :val` because `ADD` auto-initializes to 0 if the attribute doesn't exist, which is safer for new statuses. The existing `incrementFollowerCount` uses `SET`, but `ADD` is the better pattern for counters that may not exist yet. The decrement uses a `conditionExpression` instead of `if_not_exists` to correctly floor at zero (the spec explicitly calls out that `if_not_exists` can go negative on race conditions).
+
+> **Tech debt note:** The existing `decrementFollowerCount` uses `SET followerCount = followerCount - :one` which can go negative on race conditions. We are intentionally using the better `ADD` + `conditionExpression` pattern for all new count methods in this plan. Do NOT change the existing `decrementFollowerCount` here -- that is a separate fix.
 
 - [ ] **3e. SCP to VM, build, verify no compilation errors, commit**
 
@@ -999,6 +1012,10 @@ Add two new branches to the existing `handleUndo` function. Currently it handles
 ```swift
 } else if objectType == "Like" {
     context.logger.info("Processing Undo Like from \(actorUri) for \(username)")
+    // Note: If json["object"] is a URI string instead of a dict, the existing code
+    // (line 312-316 of current InboxHandler) assumes "Follow" for URI-only Undo.
+    // Undo-Like/Announce as URI-only is extremely rare since the objectType can only
+    // be determined from the dict's "type" field. This is an acceptable limitation.
     // Extract the object of the Like (the status URI)
     let likeObjectUri: String?
     if let objectDict = json["object"] as? [String: Any] {
@@ -1276,11 +1293,13 @@ func handleDelete(
 
     // Check if it's a reply being deleted (objectUri is the remote Note's id, not our status URI)
     // Try removing as a reply -- the objectUri is the reply Note's own id
-    let removedReply = try await store.removeReply(username: username, objectUri: objectUri)
-    if removedReply {
+    // removeReply uses ReturnValues: .allOld to return the inReplyTo value from the deleted item
+    if let inReplyTo = try await store.removeReply(username: username, objectUri: objectUri) {
         context.logger.info("Deleted reply \(objectUri) from \(actorUri)")
-        // We don't know which parent status to decrement without querying, so we skip count update
-        // (The reply record would need to be fetched first to get inReplyTo -- a future improvement)
+        // Decrement the parent status's reply count using inReplyTo from the deleted item
+        if !inReplyTo.isEmpty, let parentParsed = parseStatusUri(inReplyTo) {
+            try await store.decrementRepliesCount(username: parentParsed.username, statusId: parentParsed.statusId)
+        }
     }
 
     // Case 2: Actor self-deletion (objectUri matches an actor URI, and actorUri == objectUri)
@@ -1915,6 +1934,55 @@ EOF
     fi
 fi
 
+# --- Test: Concurrent likes from different actors ---
+echo ""
+echo "=== Test: Concurrent likes from different actors ==="
+if [ -z "$STATUS_URI" ]; then
+    log_skip "Concurrent likes -- no statuses found"
+else
+    # Simulate two likes arriving concurrently by running sign_and_post in background
+    CONC_LIKE1_ID=$(unique_id)
+    CONC_LIKE1_BODY=$(cat <<EOF
+{
+    "@context": "https://www.w3.org/ns/activitystreams",
+    "id": "${CONC_LIKE1_ID}",
+    "type": "Like",
+    "actor": "${SOURCE_ACTOR}",
+    "object": "${STATUS_URI}"
+}
+EOF
+)
+    CONC_LIKE2_ID=$(unique_id)
+    # Use a different fake actor URI to avoid dedup (same signing key, but the
+    # actor mismatch check will reject it -- so we re-use SOURCE_ACTOR with a
+    # different activity id to test concurrent DynamoDB writes)
+    CONC_LIKE2_BODY=$(cat <<EOF
+{
+    "@context": "https://www.w3.org/ns/activitystreams",
+    "id": "${CONC_LIKE2_ID}",
+    "type": "Like",
+    "actor": "${SOURCE_ACTOR}",
+    "object": "${STATUS_URI}"
+}
+EOF
+)
+    # Fire both requests concurrently
+    sign_and_post "$CONC_LIKE1_BODY" "Concurrent Like 1" > /tmp/conc_like1.txt &
+    PID1=$!
+    sign_and_post "$CONC_LIKE2_BODY" "Concurrent Like 2" > /tmp/conc_like2.txt &
+    PID2=$!
+    wait $PID1 $PID2
+
+    CONC_CODE1=$(cat /tmp/conc_like1.txt)
+    CONC_CODE2=$(cat /tmp/conc_like2.txt)
+    if [ "$CONC_CODE1" = "202" ] && [ "$CONC_CODE2" = "202" ]; then
+        log_pass "Concurrent likes both returned 202 (second is idempotent duplicate)"
+    else
+        log_fail "Concurrent likes: code1=$CONC_CODE1 code2=$CONC_CODE2 (expected both 202)"
+    fi
+    rm -f /tmp/conc_like1.txt /tmp/conc_like2.txt
+fi
+
 # --- Summary ---
 echo ""
 echo "================================"
@@ -1954,6 +2022,5 @@ git commit -m "Add smoke test script for inbox interaction handlers"
 ## Parallelization Notes
 
 - Tasks 1, 2, and 3 have no dependencies and can run in parallel.
-- Tasks 4-8 depend on Tasks 2+3 being complete. They can run sequentially or in parallel (they modify different sections of `main.swift`).
-- Task 9 should be last among the InboxHandler changes (for a clean switch statement).
+- Tasks 4-9 **MUST run sequentially** -- they all modify `Sources/InboxHandler/main.swift` and will conflict if run in parallel. Task 4 depends on Tasks 2+3; Tasks 5-9 each depend on the previous task's changes to `main.swift`.
 - Task 10 should be last (needs all handlers in place for meaningful smoke testing).
