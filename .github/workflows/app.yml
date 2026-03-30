@@ -112,9 +112,9 @@ jobs:
             --output text \
             --region us-east-1 2>/dev/null || echo "")
           if [ -n "$MEDIA_BUCKET" ] && [ "$MEDIA_BUCKET" != "None" ]; then
-            aws s3 sync frontend/ "s3://$MEDIA_BUCKET/frontend/" \
+            aws s3 sync frontend/ "s3://$MEDIA_BUCKET/media/frontend/" \
               --cache-control "public, max-age=31536000, immutable"
-            echo "Uploaded frontend assets to s3://$MEDIA_BUCKET/frontend/"
+            echo "Uploaded frontend assets to s3://$MEDIA_BUCKET/media/frontend/"
           else
             echo "Warning: Could not determine media bucket name, skipping frontend upload"
           fi
