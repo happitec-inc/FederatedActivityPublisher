@@ -40,8 +40,7 @@ let runtime = LambdaRuntime {
             )
         }
 
-        let actorUrl = "https://\(serverDomain)/users/\(username)"
-        let body = buildActorJSON(actor: actor, actorUrl: actorUrl)
+        let body = buildActorJSONLD(actor: actor, serverDomain: serverDomain, handleDomain: handleDomain)
 
         return APIGatewayResponse(
             statusCode: .ok,
@@ -56,62 +55,6 @@ let runtime = LambdaRuntime {
             body: #"{"error":"Internal server error"}"#
         )
     }
-}
-
-func buildActorJSON(actor: Actor, actorUrl: String) -> String {
-    // Build the icon block if avatarUrl is present
-    var iconBlock = ""
-    if let avatarUrl = actor.avatarUrl {
-        iconBlock = """
-        ,"icon":{"type":"Image","url":"\(avatarUrl)"}
-        """
-    }
-
-    // Build the full Actor JSON-LD matching PROJECT-PLAN.md lines 349-394 exactly
-    let json = """
-    {
-      "@context": [
-        "https://www.w3.org/ns/activitystreams",
-        "https://w3id.org/security/v1",
-        {
-          "toot": "http://joinmastodon.org/ns#",
-          "discoverable": "toot:discoverable",
-          "indexable": "toot:indexable",
-          "featured": {"@id": "toot:featured", "@type": "@id"},
-          "featuredTags": {"@id": "toot:featuredTags", "@type": "@id"},
-          "attributionDomains": {"@id": "toot:attributionDomains", "@type": "@id"},
-          "schema": "http://schema.org#",
-          "PropertyValue": "schema:PropertyValue",
-          "value": "schema:value",
-          "manuallyApprovesFollowers": "as:manuallyApprovesFollowers",
-          "sensitive": "as:sensitive"
-        }
-      ],
-      "id": "\(actorUrl)",
-      "type": "Service",
-      "preferredUsername": \(jsonString(actor.username)),
-      "name": \(jsonString(actor.displayName)),
-      "summary": \(jsonString(actor.summary)),
-      "inbox": "\(actorUrl)/inbox",
-      "outbox": "\(actorUrl)/outbox",
-      "followers": "\(actorUrl)/followers",
-      "following": "\(actorUrl)/following",
-      "url": "https://\(serverDomain)/@\(actor.username)"\(iconBlock),
-      "publicKey": {
-        "id": "\(actorUrl)#main-key",
-        "owner": "\(actorUrl)",
-        "publicKeyPem": \(jsonString(actor.publicKeyPem))
-      },
-      "discoverable": \(actor.discoverable),
-      "indexable": false,
-      "manuallyApprovesFollowers": \(actor.manuallyApprovesFollowers),
-      "published": "\(actor.createdAt)",
-      "featured": "\(actorUrl)/collections/featured",
-      "featuredTags": "\(actorUrl)/collections/tags",
-      "attributionDomains": ["\(handleDomain)"]
-    }
-    """
-    return json
 }
 
 try await runtime.run()
