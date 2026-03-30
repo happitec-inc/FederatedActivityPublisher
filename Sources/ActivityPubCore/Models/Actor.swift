@@ -7,6 +7,7 @@ public struct Actor: Codable, Sendable {
     public let summary: String
     public let avatarUrl: String?
     public let headerUrl: String?
+    public let fields: String?  // JSON-encoded: [{"name":"...","value":"..."}]
     public let publicKeyPem: String
     public let privateKeyArn: String
     public let createdAt: String
@@ -19,6 +20,7 @@ public struct Actor: Codable, Sendable {
     public init(
         username: String, displayName: String, summary: String,
         avatarUrl: String? = nil, headerUrl: String? = nil,
+        fields: String? = nil,
         publicKeyPem: String, privateKeyArn: String,
         createdAt: String, discoverable: Bool = true,
         manuallyApprovesFollowers: Bool = false,
@@ -29,6 +31,7 @@ public struct Actor: Codable, Sendable {
         self.summary = summary
         self.avatarUrl = avatarUrl
         self.headerUrl = headerUrl
+        self.fields = fields
         self.publicKeyPem = publicKeyPem
         self.privateKeyArn = privateKeyArn
         self.createdAt = createdAt
@@ -70,12 +73,18 @@ public struct Actor: Codable, Sendable {
             headerUrl = url
         }
 
+        var fields: String?
+        if case .s(let f) = attributes["fields"] {
+            fields = f
+        }
+
         return Actor(
             username: username,
             displayName: displayName,
             summary: summary,
             avatarUrl: avatarUrl,
             headerUrl: headerUrl,
+            fields: fields,
             publicKeyPem: publicKeyPem,
             privateKeyArn: privateKeyArn,
             createdAt: createdAt,
