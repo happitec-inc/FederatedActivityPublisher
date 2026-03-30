@@ -17,15 +17,15 @@ This guide covers prerequisites, repository setup, and an overview of the three-
 ### Clone the Repository
 
 ```bash
-git clone https://github.com/happitec-inc/activity.happitec.com.git
-cd activity.happitec.com
+git clone https://github.com/happitec-inc/FederatedActivityPublisher.git
+cd FederatedActivityPublisher
 swift package resolve
 ```
 
 ### Project Structure
 
 ```
-activity.happitec.com/
+FederatedActivityPublisher/
   Sources/
     ActivityPubCore/        # Shared library (models, DB, crypto, delivery)
     WebFingerHandler/       # Lambda: GET /.well-known/webfinger

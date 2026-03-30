@@ -1,1 +1,1 @@
-# activity.happitec.com
+# FederatedActivityPublisher
