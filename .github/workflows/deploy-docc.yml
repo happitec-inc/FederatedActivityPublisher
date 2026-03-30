@@ -57,7 +57,7 @@ jobs:
             --target ActivityPubCore \
             --output-path ./docs \
             --transform-for-static-hosting \
-            --hosting-base-path activity.happitec.com
+            --hosting-base-path FederatedActivityPublisher
 
       - name: Add root redirect
         run: |
