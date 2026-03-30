@@ -332,7 +332,7 @@ Resources:
         GetProfile:
           Type: Api
           Properties:
-            Path: /profile/{username}
+            Path: /profile/{proxy+}
             Method: GET
 
   InboxFunction:
