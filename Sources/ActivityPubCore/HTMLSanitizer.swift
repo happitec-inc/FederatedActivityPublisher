@@ -134,12 +134,4 @@ public enum HTMLSanitizer {
         return trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
     }
 
-    /// Escape special characters in an HTML attribute value.
-    private static func escapeAttributeValue(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-    }
 }

@@ -1,6 +1,12 @@
 import AWSDynamoDB
 import Foundation
 
+/// Shared ISO8601 date formatter — reused across all DynamoDBStore methods to avoid
+/// repeated allocation. ISO8601DateFormatter is thread-safe and immutable after creation.
+/// Marked nonisolated(unsafe) because ISO8601DateFormatter is not Sendable, but we only
+/// use it for read-only formatting after initialization.
+public nonisolated(unsafe) let iso8601Formatter = ISO8601DateFormatter()
+
 public struct DynamoDBStore: Sendable {
     private let client: DynamoDBClient
     private let tableName: String
@@ -48,8 +54,7 @@ public struct DynamoDBStore: Sendable {
     /// Store a follower record. Uses conditional write to prevent duplicates.
     /// Returns `true` if newly stored, `false` if the follower already exists.
     public func storeFollower(username: String, follower: Follower) async throws -> Bool {
-        let formatter = ISO8601DateFormatter()
-        let now = formatter.string(from: Date())
+        let now = iso8601Formatter.string(from: Date())
 
         var item: [String: DynamoDBClientTypes.AttributeValue] = [
             "PK": .s("ACTOR#\(username)"),
@@ -142,8 +147,7 @@ public struct DynamoDBStore: Sendable {
         objectUri: String?,
         raw: String
     ) async throws -> Bool {
-        let formatter = ISO8601DateFormatter()
-        let now = formatter.string(from: Date())
+        let now = iso8601Formatter.string(from: Date())
         let ulid = generateULID()
 
         // Write dedup record with conditional check
@@ -205,8 +209,7 @@ public struct DynamoDBStore: Sendable {
         type: String,
         objectUri: String
     ) async throws -> Bool {
-        let formatter = ISO8601DateFormatter()
-        let now = formatter.string(from: Date())
+        let now = iso8601Formatter.string(from: Date())
 
         let item: [String: DynamoDBClientTypes.AttributeValue] = [
             "PK": .s("ACTOR#\(username)"),
@@ -266,8 +269,7 @@ public struct DynamoDBStore: Sendable {
         inReplyTo: String,
         raw: String
     ) async throws -> Bool {
-        let formatter = ISO8601DateFormatter()
-        let now = formatter.string(from: Date())
+        let now = iso8601Formatter.string(from: Date())
 
         let item: [String: DynamoDBClientTypes.AttributeValue] = [
             "PK": .s("ACTOR#\(username)"),
@@ -321,17 +323,24 @@ public struct DynamoDBStore: Sendable {
     }
 
     /// Update a stored reply's content on Update.
+    /// Verifies that the stored reply's `actorUri` matches the provided `actorUri` before updating.
+    /// Returns `true` if the update succeeded, `false` if the actor ownership check failed.
     public func updateReply(
         username: String,
         objectUri: String,
-        content: String
-    ) async throws {
-        let formatter = ISO8601DateFormatter()
-        let now = formatter.string(from: Date())
+        content: String,
+        actorUri: String
+    ) async throws -> Bool {
+        let now = iso8601Formatter.string(from: Date())
 
         let input = UpdateItemInput(
+            conditionExpression: "actorUri = :expectedActor",
             expressionAttributeNames: ["#c": "content", "#u": "updatedAt"],
-            expressionAttributeValues: [":c": .s(content), ":u": .s(now)],
+            expressionAttributeValues: [
+                ":c": .s(content),
+                ":u": .s(now),
+                ":expectedActor": .s(actorUri),
+            ],
             key: [
                 "PK": .s("ACTOR#\(username)"),
                 "SK": .s("REPLY#\(objectUri)"),
@@ -339,7 +348,12 @@ public struct DynamoDBStore: Sendable {
             tableName: tableName,
             updateExpression: "SET #c = :c, #u = :u"
         )
-        _ = try await client.updateItem(input: input)
+        do {
+            _ = try await client.updateItem(input: input)
+            return true
+        } catch is ConditionalCheckFailedException {
+            return false
+        }
     }
 
     /// Refresh a cached remote actor profile. Resets TTL to 24h.
