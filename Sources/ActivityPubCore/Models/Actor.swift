@@ -1,20 +1,39 @@
 import Foundation
 import AWSDynamoDB
 
+/// A local ActivityPub actor (account) stored in DynamoDB.
+///
+/// Each actor has an RSA keypair for HTTP Signature signing, profile metadata,
+/// and counters for followers/following/statuses. The private key is stored in
+/// SSM Parameter Store; only the public key PEM is embedded in the actor record.
 public struct Actor: Codable, Sendable {
+    /// The unique username (e.g. `randomforms`). Used in URIs like `/users/randomforms`.
     public let username: String
+    /// Human-readable display name shown on the profile.
     public let displayName: String
+    /// HTML biography/description for the actor profile.
     public let summary: String
+    /// CloudFront URL for the avatar image, if set.
     public let avatarUrl: String?
+    /// CloudFront URL for the header/banner image, if set.
     public let headerUrl: String?
-    public let fields: String?  // JSON-encoded: [{"name":"...","value":"..."}]
+    /// JSON-encoded array of ``ProfileField`` key-value pairs.
+    public let fields: String?
+    /// PEM-encoded RSA public key for HTTP Signature verification.
     public let publicKeyPem: String
+    /// SSM Parameter Store path for the RSA private key.
     public let privateKeyArn: String
+    /// ISO 8601 timestamp of when the actor was created.
     public let createdAt: String
+    /// Whether the actor appears in server directory listings.
     public let discoverable: Bool
+    /// Whether follow requests require manual approval.
     public let manuallyApprovesFollowers: Bool
+    /// Current number of followers.
     public let followerCount: Int
+    /// Current number of accounts being followed.
     public let followingCount: Int
+    /// Total number of statuses posted.
     public let statusCount: Int
 
     public init(

@@ -1,10 +1,17 @@
 import Foundation
 
-/// A single part from a multipart/form-data body.
+/// A single part extracted from a `multipart/form-data` body.
+///
+/// Used by ``parseMultipart(data:boundary:)`` to represent each field or file upload
+/// in a multipart request body.
 public struct MultipartPart: Sendable {
+    /// The field name from the `Content-Disposition` header.
     public let name: String?
+    /// The filename from the `Content-Disposition` header, if this is a file upload.
     public let filename: String?
+    /// The MIME type from the part's `Content-Type` header.
     public let contentType: String?
+    /// The raw bytes of the part body.
     public let data: Data?
 
     public init(name: String?, filename: String?, contentType: String?, data: Data?) {
@@ -15,7 +22,13 @@ public struct MultipartPart: Sendable {
     }
 }
 
-/// Extract the boundary string from a Content-Type header value.
+/// Extract the boundary string from a `Content-Type` header value.
+///
+/// Parses the `boundary=` parameter from a header like
+/// `multipart/form-data; boundary=----WebKitFormBoundary...`.
+///
+/// - Parameter contentType: The full Content-Type header value.
+/// - Returns: The boundary string, or nil if not found.
 public func extractBoundary(from contentType: String) -> String? {
     let parts = contentType.components(separatedBy: ";")
     for part in parts {
@@ -31,7 +44,14 @@ public func extractBoundary(from contentType: String) -> String? {
     return nil
 }
 
-/// Parse a multipart/form-data body into individual parts.
+/// Parse a `multipart/form-data` body into individual ``MultipartPart`` instances.
+///
+/// Splits the body on boundary markers and extracts headers and body data for each part.
+///
+/// - Parameters:
+///   - data: The raw request body bytes.
+///   - boundary: The boundary string extracted from the Content-Type header.
+/// - Returns: An array of parsed parts.
 public func parseMultipart(data: Data, boundary: String) -> [MultipartPart] {
     let boundaryData = Data("--\(boundary)".utf8)
     let crlfData = Data("\r\n".utf8)

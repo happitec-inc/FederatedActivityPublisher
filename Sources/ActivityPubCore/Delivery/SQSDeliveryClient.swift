@@ -1,11 +1,18 @@
 import AWSSQS
 import Foundation
 
-/// Thin wrapper around SQS for enqueueing delivery jobs.
+/// Thin wrapper around SQS for enqueueing ``DeliveryJob`` messages.
+///
+/// Used by PostHandler and InboxHandler to fan out signed HTTP delivery to remote inboxes.
+/// Supports both single-message and batch (up to 10 per call) enqueueing.
 public struct SQSDeliveryClient: Sendable {
     private let client: SQSClient
     private let queueUrl: String
 
+    /// Create a new delivery client, optionally overriding the queue URL.
+    ///
+    /// If `queueUrl` is nil, reads from the `QUEUE_URL` environment variable.
+    /// Crashes with `fatalError` if no queue URL is available.
     public init(queueUrl: String? = nil) async throws {
         let resolvedQueueUrl = queueUrl ?? ProcessInfo.processInfo.environment["QUEUE_URL"]
         guard let resolvedQueueUrl, !resolvedQueueUrl.isEmpty else {
@@ -62,6 +69,8 @@ public struct SQSDeliveryClient: Sendable {
     }
 }
 
+/// Errors from the SQS delivery client.
 public enum SQSDeliveryError: Error {
+    /// The delivery job could not be encoded to JSON.
     case encodingFailed
 }

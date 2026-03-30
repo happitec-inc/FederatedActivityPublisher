@@ -5,8 +5,13 @@ import FoundationNetworking
 #endif
 
 /// Fetches and caches remote actor public keys for HTTP Signature verification.
+///
+/// When an inbox Lambda receives a signed request, it uses KeyManager to resolve the
+/// signer's public key. Keys are cached in DynamoDB as ``RemoteActor`` records with
+/// a 24-hour TTL to avoid refetching on every request.
 public struct KeyManager: Sendable {
 
+    /// Create a new key manager.
     public init() {}
 
     /// Fetch the public key PEM for a given keyId, using the DynamoDB cache.
@@ -99,11 +104,17 @@ public struct KeyManager: Sendable {
     }
 }
 
+/// Errors thrown by ``KeyManager`` when fetching or parsing remote actor documents.
 public enum KeyManagerError: Error, CustomStringConvertible {
+    /// The actor URI could not be parsed as a URL.
     case invalidActorUri(String)
+    /// The HTTP fetch of the actor document returned a non-2xx status code.
     case fetchFailed(String, Int)
+    /// The actor document response was not valid JSON.
     case invalidJSON(String)
+    /// The actor document did not contain a `publicKey.publicKeyPem` field.
     case missingPublicKey(String)
+    /// The actor document did not contain an `inbox` field.
     case missingInbox(String)
 
     public var description: String {

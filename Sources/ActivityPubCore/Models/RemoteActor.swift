@@ -2,12 +2,21 @@ import AWSDynamoDB
 import Foundation
 
 /// Cached remote actor data (public key, inbox URLs) fetched from their ActivityPub profile.
+///
+/// Stored in DynamoDB with `PK=REMOTE_ACTOR#{actorUri}`, `SK=PROFILE` and a 24-hour TTL.
+/// Used by ``KeyManager`` to cache public keys for HTTP Signature verification.
 public struct RemoteActor: Codable, Sendable {
+    /// The remote actor's canonical ActivityPub URI.
     public let actorUri: String
+    /// PEM-encoded RSA public key for verifying this actor's HTTP Signatures.
     public let publicKeyPem: String
+    /// The remote actor's preferred username, if available.
     public let preferredUsername: String?
+    /// The remote actor's personal inbox URL.
     public let inbox: String
+    /// The remote server's shared inbox URL.
     public let sharedInbox: String?
+    /// ISO 8601 timestamp of when this cache entry was fetched.
     public let fetchedAt: String
 
     public init(

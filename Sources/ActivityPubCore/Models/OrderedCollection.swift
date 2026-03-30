@@ -1,12 +1,22 @@
 import Foundation
 
+/// An ActivityPub OrderedCollection, used for outbox, followers, following, featured, and featured tags endpoints.
+///
+/// Nil optional fields are omitted during JSON encoding (no `null` values in the output).
 public struct OrderedCollection: Codable, Sendable {
+    /// The JSON-LD context URI.
     public let context: String
+    /// The collection's canonical URI.
     public let id: String
+    /// The ActivityPub type (`OrderedCollection` or `OrderedCollectionPage`).
     public let type: String
+    /// Total number of items in the collection.
     public let totalItems: Int
+    /// URI of the first page, for paginated collections.
     public let first: String?
+    /// URI of the last page, for paginated collections.
     public let last: String?
+    /// Inline items, used for non-paginated collections.
     public let orderedItems: [String]?
 
     enum CodingKeys: String, CodingKey {
