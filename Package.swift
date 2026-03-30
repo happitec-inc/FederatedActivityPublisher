@@ -130,6 +130,7 @@ let package = Package(
                 "ActivityPubCore",
                 .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
                 .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
+                .product(name: "AWSCloudFront", package: "aws-sdk-swift"),
             ]
         ),
         .executableTarget(
