@@ -134,10 +134,18 @@ let runtime = LambdaRuntime {
             )
         }
 
-        // Verify actor field matches HTTP Signature's actor
+        // Verify actor field is present and matches HTTP Signature's actor
         let bodyActorUri = json["actor"] as? String ?? ""
+        guard !bodyActorUri.isEmpty else {
+            context.logger.warning("Missing actor field in activity body")
+            return APIGatewayResponse(
+                statusCode: .unauthorized,
+                headers: ["content-type": "application/json"],
+                body: #"{"error":"Missing actor field"}"#
+            )
+        }
         let signingActorUri = keyManager.extractActorUri(from: keyId)
-        if !bodyActorUri.isEmpty && bodyActorUri != signingActorUri {
+        guard bodyActorUri == signingActorUri else {
             context.logger.warning(
                 "Actor mismatch: body actor=\(bodyActorUri) but signing key actor=\(signingActorUri)"
             )
@@ -312,8 +320,7 @@ func handleFollow(
     let inboxUrl = resolvedActor.inbox
     let sharedInboxUrl = resolvedActor.sharedInbox
 
-    let formatter = ISO8601DateFormatter()
-    let now = formatter.string(from: Date())
+    let now = iso8601Formatter.string(from: Date())
 
     let follower = Follower(
         actorUri: actorUri,
@@ -714,13 +721,18 @@ func handleUpdate(
         let rawContent = objectDict["content"] as? String ?? ""
         let sanitizedContent = HTMLSanitizer.sanitize(rawContent)
 
-        try await store.updateReply(
+        let updated = try await store.updateReply(
             username: username,
             objectUri: objectUri,
-            content: sanitizedContent
+            content: sanitizedContent,
+            actorUri: actorUri
         )
 
-        context.logger.info("Updated reply \(objectUri) from \(actorUri)")
+        if updated {
+            context.logger.info("Updated reply \(objectUri) from \(actorUri)")
+        } else {
+            context.logger.warning("Update reply rejected: actor \(actorUri) does not own reply \(objectUri)")
+        }
 
     } else if ["Person", "Service", "Application", "Organization"].contains(objectType) {
         // Update a remote actor profile
@@ -761,8 +773,7 @@ func handleUpdate(
             sharedInbox = endpoints["sharedInbox"] as? String
         }
 
-        let formatter = ISO8601DateFormatter()
-        let now = formatter.string(from: Date())
+        let now = iso8601Formatter.string(from: Date())
 
         let updatedActor = RemoteActor(
             actorUri: remoteActorUri,
@@ -797,16 +808,13 @@ func handleDelete(
 ) async throws -> APIGatewayResponse {
     context.logger.info("Processing Delete from \(actorUri) for \(username)")
 
-    // Extract the object being deleted
+    // Extract the object being deleted. The object may be a Tombstone dict or a bare URI string.
     let objectUri: String
-    let objectType: String?
 
     if let objectDict = json["object"] as? [String: Any] {
         objectUri = objectDict["id"] as? String ?? ""
-        objectType = objectDict["type"] as? String
     } else if let objectStr = json["object"] as? String {
         objectUri = objectStr
-        objectType = nil
     } else {
         context.logger.warning("Delete with unrecognized object format from \(actorUri)")
         return APIGatewayResponse(
@@ -825,7 +833,11 @@ func handleDelete(
         )
     }
 
-    // Case 1: Object URI matches our status pattern -- deleting an interaction or reply
+    // Branch 1: Object URI matches our status URI pattern — deleting an interaction or reply
+    // about one of our statuses. This is an edge case; remote servers typically send `Undo`
+    // (not `Delete`) to retract a Like/Announce. Delete via Tombstone may occur when a remote
+    // server purges an object retroactively, carrying the *remote* object's URI rather than
+    // our status URI. We handle it here for completeness.
     if let parsed = parseStatusUri(objectUri) {
         // Try removing a Like interaction
         let removedLike = try await store.removeInteraction(
@@ -851,24 +863,18 @@ func handleDelete(
             context.logger.info("Deleted Announce from \(actorUri) on \(objectUri)")
         }
 
-        return APIGatewayResponse(
-            statusCode: .accepted,
-            headers: ["content-type": "application/json"],
-            body: #"{"status":"accepted"}"#
-        )
-    }
-
-    // Check if it's a reply being deleted (objectUri is the remote Note's id, not our status URI)
-    if let inReplyTo = try await store.removeReply(username: username, objectUri: objectUri) {
-        context.logger.info("Deleted reply \(objectUri) from \(actorUri)")
-        // Decrement the parent status's reply count using inReplyTo from the deleted item
-        if !inReplyTo.isEmpty, let parentParsed = parseStatusUri(inReplyTo) {
-            try await store.decrementRepliesCount(username: parentParsed.username, statusId: parentParsed.statusId)
+        // Also try removing a reply whose objectUri happens to match
+        if let inReplyTo = try await store.removeReply(username: parsed.username, objectUri: objectUri) {
+            context.logger.info("Deleted reply \(objectUri) from \(actorUri)")
+            if !inReplyTo.isEmpty, let parentParsed = parseStatusUri(inReplyTo) {
+                try await store.decrementRepliesCount(username: parentParsed.username, statusId: parentParsed.statusId)
+            }
         }
-    }
 
-    // Case 2: Actor self-deletion (objectUri matches an actor URI, and actorUri == objectUri)
-    if actorUri == objectUri && !objectUri.contains("/statuses/") {
+    // Branch 2: Actor self-deletion (actorUri == objectUri). This is the primary real-world
+    // use of Delete — a remote server announces that an actor account has been removed.
+    // We clean up the follower record and decrement the count.
+    } else if actorUri == objectUri {
         context.logger.info("Processing actor self-deletion for \(actorUri)")
         let wasRemoved = try await store.removeFollower(username: username, actorUri: actorUri)
         if wasRemoved {
@@ -876,8 +882,26 @@ func handleDelete(
             await invalidateFollowersCache(username: username, context: context)
             context.logger.info("Removed follower \(actorUri) via self-deletion")
         }
+
+        // Also try removing a reply by remote objectUri (the deleted actor's Note)
+        if let inReplyTo = try await store.removeReply(username: username, objectUri: objectUri) {
+            context.logger.info("Deleted reply \(objectUri) from \(actorUri)")
+            if !inReplyTo.isEmpty, let parentParsed = parseStatusUri(inReplyTo) {
+                try await store.decrementRepliesCount(username: parentParsed.username, statusId: parentParsed.statusId)
+            }
+        }
+
+    // Branch 3: Unrecognized object — could be a remote Note URI being deleted (reply removal).
+    // Try removing it as a reply; otherwise log and accept for forward compatibility.
     } else {
-        context.logger.info("Delete for unrecognized object \(objectUri) from \(actorUri)")
+        if let inReplyTo = try await store.removeReply(username: username, objectUri: objectUri) {
+            context.logger.info("Deleted reply \(objectUri) from \(actorUri)")
+            if !inReplyTo.isEmpty, let parentParsed = parseStatusUri(inReplyTo) {
+                try await store.decrementRepliesCount(username: parentParsed.username, statusId: parentParsed.statusId)
+            }
+        } else {
+            context.logger.info("Delete for unrecognized object \(objectUri) from \(actorUri)")
+        }
     }
 
     return APIGatewayResponse(
