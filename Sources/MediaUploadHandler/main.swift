@@ -24,47 +24,34 @@ let runtime = LambdaRuntime {
     do {
         // 1. Verify bearer token auth
         let authHeader = event.headers["authorization"] ?? event.headers["Authorization"] ?? ""
-        guard authHeader.lowercased().hasPrefix("bearer ") else {
+        let authResult: BearerAuthResult
+        do {
+            authResult = try await authenticateBearer(
+                authHeader: authHeader,
+                ssmKeyPrefix: ssmKeyPrefix,
+                ssmClient: ssmClient
+            )
+        } catch BearerAuthError.missingHeader {
             return APIGatewayResponse(
                 statusCode: .unauthorized,
                 headers: ["content-type": "application/json"],
                 body: #"{"error":"Missing or invalid Authorization header"}"#
             )
-        }
-        let token = String(authHeader.dropFirst(7)).trimmingCharacters(in: .whitespaces)
-
-        let tokenParamName = "\(ssmKeyPrefix)/client-token"
-        let tokenOutput = try await ssmClient.getParameter(input: GetParameterInput(
-            name: tokenParamName,
-            withDecryption: true
-        ))
-        guard let storedValue = tokenOutput.parameter?.value else {
-            context.logger.error("Client token not configured at \(tokenParamName)")
-            return APIGatewayResponse(
-                statusCode: .internalServerError,
-                headers: ["content-type": "application/json"],
-                body: #"{"error":"Server configuration error"}"#
-            )
-        }
-
-        let parts = storedValue.split(separator: ":", maxSplits: 1)
-        guard parts.count == 2 else {
-            return APIGatewayResponse(
-                statusCode: .internalServerError,
-                headers: ["content-type": "application/json"],
-                body: #"{"error":"Server configuration error"}"#
-            )
-        }
-        let username = String(parts[0])
-        let storedToken = String(parts[1])
-
-        guard token == storedToken else {
+        } catch BearerAuthError.invalidToken {
             return APIGatewayResponse(
                 statusCode: .unauthorized,
                 headers: ["content-type": "application/json"],
                 body: #"{"error":"Invalid bearer token"}"#
             )
+        } catch let error as BearerAuthError {
+            context.logger.error("Bearer auth error: \(error)")
+            return APIGatewayResponse(
+                statusCode: .internalServerError,
+                headers: ["content-type": "application/json"],
+                body: #"{"error":"Server configuration error"}"#
+            )
         }
+        let username = authResult.username
 
         // 2. Parse the request body (multipart or base64)
         guard let bodyString = event.body else {
