@@ -26,11 +26,12 @@ jobs:
     if: >-
       github.event_name != 'release' ||
       (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
-    runs-on: [self-hosted, linux]
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
     env:
       STAGE: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
     steps:
-      - name: Clean workspace
+      - name: Clean workspace (self-hosted)
+        if: ${{ vars.RUNNER_LABELS_LINUX }}
         run: |
           sudo rm -rf .build/
           sudo git clean -fdx -e .git || true
