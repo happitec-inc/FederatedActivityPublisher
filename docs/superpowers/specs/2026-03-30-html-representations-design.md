@@ -1,5 +1,7 @@
 # Workstream C: HTML Representations — Design Spec
 
+> **Prerequisite:** Workstream B (Profile Management) must be merged first — it adds the `fields` property to the Actor model and DynamoDB schema.
+
 ## Goal
 
 Server-rendered HTML profile pages and individual post pages using Elementary (Swift HTML rendering library) with latex.css styling, matching the happitec.com aesthetic.
@@ -41,12 +43,14 @@ struct ProfilePage: HTML {
     var actor: Actor
 
     var content: some HTML {
-        html {
+        html(.lang("en")) {
             head {
                 meta(.charset("utf-8"))
                 meta(.name("viewport"), .content("width=device-width, initial-scale=1"))
                 title { "\(actor.displayName) (@\(actor.preferredUsername)@happitec.com)" }
-                link(.rel("stylesheet"), .href("https://latex.now.sh/style.min.css"))
+                link(.rel("stylesheet"), .href("https://happitec.com/media/frontend/latex.min.css"))
+                link(.rel("alternate"), .type("application/activity+json"),
+                     .href("https://happitec.com/users/\(actor.preferredUsername)"))
             }
             body(.class("latex-dark-auto")) {
                 article {
@@ -57,6 +61,8 @@ struct ProfilePage: HTML {
     }
 }
 ```
+
+> **Accessibility:** Use `lang="en"` on the `<html>` tag. Provide meaningful `alt` text on avatar and header images. Use semantic HTML elements (`<article>`, `<header>`, `<time>`, `<nav>`) for screen reader compatibility.
 
 ### Routing
 
@@ -80,6 +86,14 @@ function handler(event) {
 **Path parsing in Lambda:**
 - `/profile/{username}` → profile page
 - `/profile/{username}/{statusId}` → post page
+
+```swift
+guard let proxyPath = event.pathParameters["proxy"] else { ... }
+let parts = proxyPath.split(separator: "/", maxSplits: 1)
+let username = String(parts[0])
+let statusId = parts.count > 1 ? String(parts[1]) : nil
+// statusId == nil → profile page, statusId != nil → post page
+```
 
 ### Pages
 
@@ -117,15 +131,21 @@ Research-paper style layout with latex.css:
 
 **Data sources:**
 - Actor record from DynamoDB (display name, summary, avatar, header, fields, stats)
-- Recent statuses from DynamoDB (outbox query, latest 20)
+- Recent statuses from DynamoDB (outbox query, latest 20, **public and unlisted only** — private and direct posts are excluded)
 
 **OG meta tags:**
 ```html
 <meta property="og:type" content="profile">
+<meta property="og:site_name" content="Happitec">
 <meta property="og:title" content="Random Forms (@randomforms@happitec.com)">
 <meta property="og:description" content="Generative art for iOS">
 <meta property="og:image" content="https://happitec.com/media/avatars/randomforms">
 <meta property="og:url" content="https://happitec.com/@randomforms">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Random Forms (@randomforms@happitec.com)">
+<meta name="twitter:description" content="Generative art for iOS">
+<meta name="twitter:image" content="https://happitec.com/media/avatars/randomforms">
+<link rel="alternate" type="application/activity+json" href="https://happitec.com/users/randomforms">
 ```
 
 #### Post Page (`/@username/{statusId}`)
@@ -156,15 +176,23 @@ Single post view:
 **OG meta tags:**
 ```html
 <meta property="og:type" content="article">
+<meta property="og:site_name" content="Happitec">
 <meta property="og:title" content="Random Forms on Happitec">
 <meta property="og:description" content="Post text preview (first 200 chars)...">
 <meta property="og:image" content="https://happitec.com/media/{id}/image.png">
 <meta property="og:url" content="https://happitec.com/@randomforms/{statusId}">
 <meta property="article:published_time" content="2026-03-30T14:32:00Z">
 <meta property="article:author" content="https://happitec.com/@randomforms">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Random Forms on Happitec">
+<meta name="twitter:description" content="Post text preview (first 200 chars)...">
+<meta name="twitter:image" content="https://happitec.com/media/{id}/image.png">
+<link rel="alternate" type="application/activity+json" href="https://happitec.com/users/randomforms/statuses/{statusId}">
 ```
 
-If the post has a media attachment, use the first image as `og:image`. Otherwise use the actor's avatar.
+If the post has a media attachment, use the first image as `og:image` and set `twitter:card` to `summary_large_image`. Otherwise use the actor's avatar and set `twitter:card` to `summary`.
+
+**Content warnings:** Posts with content warnings show the warning text prominently above the content. Since there is no JavaScript for toggle behavior, both CW and content are always visible.
 
 ### Content Negotiation
 
@@ -172,11 +200,13 @@ Update ActorHandler and ObjectHandler to check the `Accept` header:
 - If `Accept` includes `text/html` (and does NOT include `application/activity+json` or `application/ld+json`): return 302 redirect to the HTML page
 - Otherwise: serve JSON-LD as usual
 
-This means browsers visiting `https://happitec.com/users/randomforms` get redirected to `https://happitec.com/@randomforms`.
+**ActorHandler** redirects browsers visiting `https://happitec.com/users/randomforms` to `https://happitec.com/@randomforms`.
+
+**ObjectHandler** redirects browsers to `https://{serverDomain}/@{username}/{statusId}`, constructed from `event.pathParameters["username"]` and `event.pathParameters["id"]`. For example, `https://happitec.com/users/randomforms/statuses/abc123` redirects to `https://happitec.com/@randomforms/abc123`.
 
 ### Styling
 
-Use latex.css from CDN (`https://latex.now.sh/style.min.css`) with `latex-dark-auto` class on body for automatic dark mode.
+Self-host latex.css in the S3 media bucket at `/frontend/latex.min.css` (served via `https://happitec.com/media/frontend/latex.min.css`). Upload the file during deployment. Use `latex-dark-auto` class on body for automatic dark mode.
 
 Additional inline CSS (minimal, only what latex.css doesn't cover):
 - Avatar sizing and border-radius
@@ -186,7 +216,13 @@ Additional inline CSS (minimal, only what latex.css doesn't cover):
 
 Keep inline styles minimal — latex.css should do most of the work.
 
+### Error Pages
+
+404 and 500 error pages should also use Elementary + latex.css styling for consistency. Return a simple page with the error code, a brief message, and a link back to the profile root.
+
 ### Package.swift Changes
+
+> **Note:** Verify Elementary 0.7.x compiles cleanly with Swift 6.3 strict concurrency checking before starting implementation.
 
 Add Elementary dependency:
 ```swift
@@ -201,7 +237,11 @@ Add to ProfileHandler target:
 ### SAM Template Changes
 
 - Update ProfileHandler route from `/profile/{username}` to `/profile/{proxy+}`
-- No other infrastructure changes needed
+- ProfileHandler uses the `SERVER_DOMAIN` environment variable (set to `happitec.com` at runtime) for all URLs in OG tags and page content. This is correct since pages are served on happitec.com.
+
+### happitec.com CloudFront — `/profile/*` Cache Behavior
+
+A new `/profile/*` cache behavior must be added to the **happitec.com** CloudFront distribution, targeting `activityApiOrigin` (the activity.happitec.com API Gateway). This is a new infrastructure change in the happitec.com repo — not this repo. Without it, requests to `/profile/*` will fall through to the default S3 origin and return 404.
 
 ### CloudFront Caching
 
