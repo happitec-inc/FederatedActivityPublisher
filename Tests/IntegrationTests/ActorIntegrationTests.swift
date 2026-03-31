@@ -48,6 +48,21 @@ import FoundationNetworking
     }
 }
 
+/// Delegate that prevents URLSession from following redirects (returns the 302 directly).
+/// FoundationNetworking on Linux crashes when following certain redirects (CURLE_BAD_FUNCTION_ARGUMENT).
+final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        // Return nil to stop the redirect and return the 302 response as-is
+        completionHandler(nil)
+    }
+}
+
 @Test func actorContentNegotiationHTML() async throws {
     let baseURL = try #require(
         ProcessInfo.processInfo.environment["TEST_API_URL"],
@@ -55,12 +70,12 @@ import FoundationNetworking
     )
     var request = URLRequest(url: URL(string: "\(baseURL)/users/randomforms")!)
     request.setValue("text/html", forHTTPHeaderField: "Accept")
-    let (_, response) = try await URLSession.shared.data(for: request)
+    // Use a session that does NOT follow redirects to avoid FoundationNetworking crash on Linux
+    let session = URLSession(configuration: .default, delegate: NoRedirectDelegate(), delegateQueue: nil)
+    let (_, response) = try await session.data(for: request)
     let httpResponse = response as! HTTPURLResponse
     // Expect 302 redirect to /@randomforms
-    #expect(httpResponse.statusCode == 302 || httpResponse.statusCode == 200)
-    if httpResponse.statusCode == 302 {
-        let location = httpResponse.value(forHTTPHeaderField: "Location")
-        #expect(location?.contains("/@randomforms") == true)
-    }
+    #expect(httpResponse.statusCode == 302)
+    let location = httpResponse.value(forHTTPHeaderField: "Location")
+    #expect(location?.contains("/@randomforms") == true)
 }
