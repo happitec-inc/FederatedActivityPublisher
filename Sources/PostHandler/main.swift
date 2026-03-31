@@ -16,7 +16,7 @@ guard let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] el
     fatalError("HANDLE_DOMAIN environment variable is required")
 }
 let distributionId = ProcessInfo.processInfo.environment["CLOUDFRONT_DISTRIBUTION_ID"] ?? ""
-let happitecDistributionId = ProcessInfo.processInfo.environment["HAPPITEC_DISTRIBUTION_ID"] ?? ""
+let proxyDistributionId = ProcessInfo.processInfo.environment["PROXY_DISTRIBUTION_ID"] ?? ""
 let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "/activity/stage/keys/"
 let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw
 
@@ -300,7 +300,7 @@ let runtime = LambdaRuntime {
             ))
 
             // Also invalidate the happitec.com CloudFront distribution (proxies same paths)
-            if !happitecDistributionId.isEmpty {
+            if !proxyDistributionId.isEmpty {
                 let happitecPaths = [
                     "/users/\(username)/outbox*",
                     "/profile/\(username)*",
@@ -314,7 +314,7 @@ let runtime = LambdaRuntime {
                     )
                 )
                 _ = try? await cfClient.createInvalidation(input: CreateInvalidationInput(
-                    distributionId: happitecDistributionId,
+                    distributionId: proxyDistributionId,
                     invalidationBatch: happitecInvalidation
                 ))
             }

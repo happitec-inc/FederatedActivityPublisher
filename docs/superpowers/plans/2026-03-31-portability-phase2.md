@@ -180,15 +180,15 @@ With:
     Value: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
 ```
 
-### 2.5 Make `HappitecDistributionId` cross-invalidation conditional
+### 2.5 Make `ProxyDistributionId` cross-invalidation conditional
 
-- [ ] The `PostFunction` and `ProfileUpdateFunction` have IAM policies referencing `HappitecDistributionId`. When it is empty, the `arn:aws:cloudfront::...:distribution/` resource is invalid. Add a condition:
+- [ ] The `PostFunction` and `ProfileUpdateFunction` have IAM policies referencing `ProxyDistributionId`. When it is empty, the `arn:aws:cloudfront::...:distribution/` resource is invalid. Add a condition:
 
 ```yaml
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
   IsSimpleDns: !Equals [!Ref ServerDomain, !Ref HandleDomain]
-  HasCrossDistribution: !Not [!Equals [!Ref HappitecDistributionId, ""]]
+  HasCrossDistribution: !Not [!Equals [!Ref ProxyDistributionId, ""]]
 ```
 
 - [ ] For `PostFunction` policies (line 88-93), use `!If` at the **Resource** level inside the existing Statement to conditionally include the cross-distribution ARN. Wrapping entire `Statement` blocks in `!If` is not valid SAM/CloudFormation syntax for `Policies`. Instead, use `AWS::NoValue` to exclude the second ARN when not needed:
@@ -201,7 +201,7 @@ Conditions:
                 - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
                 - !If
                   - HasCrossDistribution
-                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProxyDistributionId}"
                   - !Ref AWS::NoValue
 ```
 
@@ -229,7 +229,7 @@ Conditions:
 
 - Deploying with `ServerDomain=example.com HandleDomain=example.com` (simple mode) should produce a working single-domain setup with no references to `activity.happitec.com`.
 - Deploying with `ServerDomain=activity.example.com HandleDomain=example.com` (split mode) should produce the current behavior.
-- The `HappitecDistributionId` conditional prevents IAM errors when the parameter is empty.
+- The `ProxyDistributionId` conditional prevents IAM errors when the parameter is empty.
 
 ---
 
@@ -578,7 +578,7 @@ function handler(event) {
 
 **Cross-distribution cache invalidation** (optional):
 
-If you set `HAPPITEC_DISTRIBUTION_ID` to the CloudFront distribution ID of your handle domain's CDN, the PostHandler and ProfileUpdateHandler will invalidate cached paths on that distribution when new content is published.
+If you set `PROXY_DISTRIBUTION_ID` to the CloudFront distribution ID of your handle domain's CDN, the PostHandler and ProfileUpdateHandler will invalidate cached paths on that distribution when new content is published.
 
 ### Diagram
 
@@ -671,7 +671,7 @@ Under **Settings > Secrets and variables > Actions > Variables**, add:
 | `SERVER_DOMAIN` | Your server domain (e.g. `example.com`) | Yes |
 | `HANDLE_DOMAIN` | Your handle domain (e.g. `example.com`) | Yes |
 | `RUNNER_LABELS_LINUX` | JSON array of runner labels (e.g. `["self-hosted", "linux"]`) | No (defaults to `ubuntu-latest`) |
-| `HAPPITEC_DISTRIBUTION_ID` | CloudFront distribution ID for cross-invalidation | No (only for split DNS) |
+| `PROXY_DISTRIBUTION_ID` | CloudFront distribution ID for cross-invalidation | No (only for split DNS) |
 
 For simple DNS mode (recommended), set `SERVER_DOMAIN` and `HANDLE_DOMAIN` to the same value.
 

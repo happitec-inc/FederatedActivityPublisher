@@ -11,7 +11,7 @@ guard let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] el
     fatalError("HANDLE_DOMAIN environment variable is required")
 }
 let distributionId = ProcessInfo.processInfo.environment["CLOUDFRONT_DISTRIBUTION_ID"] ?? ""
-let happitecDistributionId = ProcessInfo.processInfo.environment["HAPPITEC_DISTRIBUTION_ID"] ?? ""
+let proxyDistributionId = ProcessInfo.processInfo.environment["PROXY_DISTRIBUTION_ID"] ?? ""
 
 let store = try await DynamoDBStore()
 let sqsClient = try await SQSDeliveryClient()
@@ -999,50 +999,15 @@ func invalidateFollowersCache(username: String, context: LambdaContext) async {
 
 /// Invalidate CloudFront cache for a status page and the owner's profile so interaction counts update.
 func invalidateStatusCache(username: String, statusId: String, context: LambdaContext) async {
-    let activityPaths = [
-        "/users/\(username)/statuses/\(statusId)*",
-        "/profile/\(username)*"
-    ]
-    let happitecPaths = activityPaths + ["/@\(username)*"]
-    let ref = "interaction-\(UUID().uuidString)"
-
-    if !distributionId.isEmpty {
-        do {
-            let batch = CloudFrontClientTypes.InvalidationBatch(
-                callerReference: ref,
-                paths: CloudFrontClientTypes.Paths(
-                    items: activityPaths,
-                    quantity: Int(activityPaths.count)
-                )
-            )
-            _ = try await cfClient.createInvalidation(input: CreateInvalidationInput(
-                distributionId: distributionId,
-                invalidationBatch: batch
-            ))
-            context.logger.info("Invalidated activity CF cache for \(username)/\(statusId)")
-        } catch {
-            context.logger.error("Failed to invalidate activity CF cache: \(error)")
-        }
-    }
-
-    if !happitecDistributionId.isEmpty {
-        do {
-            let happitecBatch = CloudFrontClientTypes.InvalidationBatch(
-                callerReference: "\(ref)-h",
-                paths: CloudFrontClientTypes.Paths(
-                    items: happitecPaths,
-                    quantity: Int(happitecPaths.count)
-                )
-            )
-            _ = try await cfClient.createInvalidation(input: CreateInvalidationInput(
-                distributionId: happitecDistributionId,
-                invalidationBatch: happitecBatch
-            ))
-            context.logger.info("Invalidated happitec CF cache for \(username)/\(statusId)")
-        } catch {
-            context.logger.error("Failed to invalidate happitec CF cache: \(error)")
-        }
-    }
+    await invalidateCache(
+        paths: [
+            "/users/\(username)/statuses/\(statusId)*",
+            "/profile/\(username)*",
+            "/@\(username)*"
+        ],
+        callerReference: "interaction-\(UUID().uuidString)",
+        context: context
+    )
 }
 
 /// Invalidate arbitrary CloudFront cache paths on both distributions.
@@ -1067,7 +1032,7 @@ func invalidateCache(paths: [String], callerReference: String, context: LambdaCo
         }
     }
 
-    if !happitecDistributionId.isEmpty {
+    if !proxyDistributionId.isEmpty {
         do {
             let batch = CloudFrontClientTypes.InvalidationBatch(
                 callerReference: "\(callerReference)-h",
@@ -1077,7 +1042,7 @@ func invalidateCache(paths: [String], callerReference: String, context: LambdaCo
                 )
             )
             _ = try await cfClient.createInvalidation(input: CreateInvalidationInput(
-                distributionId: happitecDistributionId,
+                distributionId: proxyDistributionId,
                 invalidationBatch: batch
             ))
         } catch {
