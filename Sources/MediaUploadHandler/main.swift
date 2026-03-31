@@ -9,7 +9,9 @@ import Foundation
 import FoundationNetworking
 #endif
 
-let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] ?? "activity.happitec.com"
+guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] else {
+    fatalError("SERVER_DOMAIN environment variable is required")
+}
 let mediaBucketName = ProcessInfo.processInfo.environment["MEDIA_BUCKET_NAME"] ?? ""
 let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "/activity/stage/keys/"
 let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw

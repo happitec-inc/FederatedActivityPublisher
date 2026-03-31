@@ -2,7 +2,9 @@ import AWSLambdaEvents
 import AWSLambdaRuntime
 import Foundation
 
-let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] ?? "activity.happitec.com"
+guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] else {
+    fatalError("SERVER_DOMAIN environment variable is required")
+}
 
 let runtime = LambdaRuntime {
     (event: APIGatewayRequest, context: LambdaContext) -> APIGatewayResponse in
