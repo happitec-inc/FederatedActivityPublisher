@@ -26,7 +26,7 @@ jobs:
 
   build:
     if: vars.ENABLE_DOCC_DEPLOY == 'true' || github.repository == 'happitec-inc/FederatedActivityPublisher'
-    needs: []
+    needs: [generate-og-image]
     runs-on: ${{ vars.RUNNER_LABELS_MACOS && fromJSON(vars.RUNNER_LABELS_MACOS) || 'macos-26' }}
     env:
       PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
