@@ -176,6 +176,10 @@ Mastodon clients POST to `/oauth/token` with `grant_type=authorization_code` (or
 
 **Solution:** Proxy to Cognito's `/oauth2/revoke` endpoint. Straightforward.
 
+### Token Refresh
+
+Cognito issues refresh tokens alongside access tokens by default. The `OAuthTokenHandler` must also handle `grant_type=refresh_token` requests, which Mastodon clients send when the access token expires. This is a standard OAuth2 flow that Cognito supports natively -- the handler proxies the request to Cognito's `/oauth2/token` endpoint with the refresh token, and returns a new access token in Mastodon's response format.
+
 ### Authentication on Client API Endpoints
 
 **API Gateway Cognito Authorizer:**
@@ -239,6 +243,9 @@ All authenticated endpoints use this authorizer. The Lambda receives the decoded
 | GET | `/api/v1/lists` | ClientApiHandler | Returns `[]` |
 | GET | `/api/v1/followed_tags` | ClientApiHandler | Returns `[]` |
 | GET | `/api/v1/conversations` | ClientApiHandler | Returns `[]` |
+| GET | `/api/v1/push/subscription` | ClientApiHandler | Returns 404 (push notifications not implemented) |
+| GET | `/api/v1/instance/peers` | ClientApiHandler | Returns `[]` (no peer tracking) |
+| GET | `/api/v1/instance/activity` | ClientApiHandler | Returns `[]` (no activity stats) |
 | GET | `/api/v1/accounts/relationships` | ClientApiHandler | Returns `[]` (no local follow relationships to report). Ivory calls this early; returning an empty array is safe. |
 | GET | `/api/v1/accounts/lookup` | ClientApiHandler | Look up account by `acct` query param. Returns the Account entity if found. |
 | GET | `/api/v1/statuses/:id` | ClientApiHandler | Get a single status by ID |
@@ -784,7 +791,7 @@ OAuthTokenRequest:
   properties:
     grant_type:
       type: string
-      enum: [authorization_code, client_credentials]
+      enum: [authorization_code, client_credentials, refresh_token]
     code:
       type: string
     client_id:
@@ -793,6 +800,9 @@ OAuthTokenRequest:
       type: string
     redirect_uri:
       type: string
+    refresh_token:
+      type: string
+      description: Required when grant_type is refresh_token
     scope:
       type: string
 
