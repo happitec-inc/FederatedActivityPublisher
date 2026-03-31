@@ -42,11 +42,17 @@
 **Accept** (our response when approving):
 ```json
 {
-  "@context": "https://www.w3.org/ns/activitystreams",
+  "@context": [
+    "https://www.w3.org/ns/activitystreams",
+    {
+      "QuoteRequest": "https://w3id.org/fep/044f#QuoteRequest"
+    }
+  ],
   "id": "https://activity.happitec.com/users/logos#accepts/quote_requests/01JQFG5678",
   "type": "Accept",
   "actor": "https://activity.happitec.com/users/logos",
   "object": {
+    "id": "https://remote.server/users/alice#quote_requests/123",
     "type": "QuoteRequest",
     "actor": "https://remote.server/users/alice",
     "object": "https://activity.happitec.com/users/logos/statuses/01JQFG1234",
@@ -58,11 +64,17 @@
 **Reject** (our response when denying):
 ```json
 {
-  "@context": "https://www.w3.org/ns/activitystreams",
+  "@context": [
+    "https://www.w3.org/ns/activitystreams",
+    {
+      "QuoteRequest": "https://w3id.org/fep/044f#QuoteRequest"
+    }
+  ],
   "id": "https://activity.happitec.com/users/logos#rejects/quote_requests/01JQFG9012",
   "type": "Reject",
   "actor": "https://activity.happitec.com/users/logos",
   "object": {
+    "id": "https://remote.server/users/alice#quote_requests/123",
     "type": "QuoteRequest",
     "actor": "https://remote.server/users/alice",
     "object": "https://activity.happitec.com/users/logos/statuses/01JQFG1234",
@@ -108,7 +120,7 @@ The `Status` entity gains three new optional attributes:
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `quotedStatusUri` | String (S) | URI of the remote status being quoted (set on outbound quotes) |
-| `quoteApprovalState` | String (S) | `pending`, `accepted`, or `rejected` (set on outbound quotes of remote posts; local-to-local quotes are auto-accepted) |
+| `quoteApprovalState` | String (S) | `pending`, `accepted`, `rejected`, or `failed` (set on outbound quotes of remote posts; local-to-local quotes are auto-accepted; `failed` means we could not deliver the QuoteRequest) |
 | `quotesCount` | Number (N) | Count of accepted inbound quotes of this status |
 
 No new DynamoDB table, GSI, or index changes needed. These are sparse attributes on existing Status items.
@@ -173,7 +185,7 @@ In `Sources/ActivityPubCore/Models/Status.swift`, add three properties after `re
 ```swift
     /// URI of the remote status being quoted by this status, if any.
     public let quotedStatusUri: String?
-    /// Quote approval state for outbound quotes: `pending`, `accepted`, or `rejected`.
+    /// Quote approval state for outbound quotes: `pending`, `accepted`, `rejected`, or `failed`.
     public let quoteApprovalState: String?
     /// Number of accepted inbound quotes of this status.
     public let quotesCount: Int
@@ -359,8 +371,13 @@ Look up a status by its `uri` attribute. This is needed for inbound QuoteRequest
 
 ```swift
     /// Find a status by its ActivityPub URI.
-    /// Scans statuses for the given username and filters by URI.
+    /// Queries statuses for the given username and filters by URI.
     /// Returns nil if not found.
+    ///
+    /// Note: DynamoDB `Limit` limits items *evaluated*, not items *returned*.
+    /// With a `FilterExpression`, `limit: 1` would evaluate only one item and
+    /// return nothing if that item doesn't match the filter. We omit the limit
+    /// entirely and take the first matching result in code.
     public func findStatusByUri(username: String, uri: String) async throws -> Status? {
         let input = QueryInput(
             expressionAttributeNames: [
@@ -375,7 +392,6 @@ Look up a status by its `uri` attribute. This is needed for inbound QuoteRequest
             ],
             filterExpression: "#uri = :uri",
             keyConditionExpression: "#pk = :pk AND begins_with(#sk, :prefix)",
-            limit: 1,
             tableName: tableName
         )
         let output = try await client.query(input: input)
@@ -574,10 +590,12 @@ In `Sources/InboxHandler/main.swift`, add a new case in the `switch activityType
 
 ```swift
         case "QuoteRequest":
+            let activityId = json["id"] as? String
             return try await handleQuoteRequest(
                 json: json,
                 username: username,
                 actorUri: actorUri,
+                activityId: activityId,
                 context: context
             )
 ```
@@ -593,6 +611,7 @@ func handleQuoteRequest(
     json: [String: Any],
     username: String,
     actorUri: String,
+    activityId: String?,
     context: LambdaContext
 ) async throws -> APIGatewayResponse {
     context.logger.info("Processing QuoteRequest from \(actorUri) for \(username)")
@@ -670,17 +689,25 @@ func handleQuoteRequest(
     let fragmentPath = accepted ? "accepts" : "rejects"
     let responseId = "https://\(serverDomain)/users/\(username)#\(fragmentPath)/quote_requests/\(ulid)"
 
-    // Reconstruct the QuoteRequest as the object of our Accept/Reject.
-    // Include the original activity's fields so the remote server can correlate.
-    let quoteRequestObject: [String: Any] = [
+    // Echo the full original QuoteRequest (including its `id`) as the object
+    // of our Accept/Reject so the remote server can correlate this response.
+    var quoteRequestObject: [String: Any] = [
         "type": "QuoteRequest",
         "actor": actorUri,
         "object": quotedStatusUri,
         "instrument": quotingStatusUri,
     ]
+    if let activityId {
+        quoteRequestObject["id"] = activityId
+    }
 
+    // The @context must include the FEP-044f extension since the object body
+    // contains `"type": "QuoteRequest"`.
     let responseActivity: [String: Any] = [
-        "@context": "https://www.w3.org/ns/activitystreams",
+        "@context": [
+            "https://www.w3.org/ns/activitystreams",
+            ["QuoteRequest": "https://w3id.org/fep/044f#QuoteRequest"]
+        ] as [Any],
         "id": responseId,
         "type": responseType,
         "actor": "https://\(serverDomain)/users/\(username)",
@@ -692,10 +719,24 @@ func handleQuoteRequest(
         throw InboxError.encodingFailed
     }
 
-    // Resolve the remote actor's inbox for delivery
+    // Resolve the remote actor's inbox for delivery.
+    // First check our local cache, then try fetching the actor profile if not cached.
+    var targetInbox: String?
     let remoteActor = try await store.getRemoteActor(actorUri: actorUri)
-    guard let targetInbox = remoteActor?.inbox else {
-        context.logger.warning("Cannot resolve inbox for \(actorUri) to deliver \(responseType)")
+    targetInbox = remoteActor?.inbox
+
+    if targetInbox == nil {
+        // Actor not in cache -- try fetching their profile directly
+        do {
+            let actorObject = try await fetchRemoteObject(uri: actorUri)
+            targetInbox = actorObject["inbox"] as? String
+        } catch {
+            context.logger.error("Failed to fetch remote actor \(actorUri): \(error)")
+        }
+    }
+
+    guard let targetInbox else {
+        context.logger.error("Cannot resolve inbox for \(actorUri) to deliver \(responseType) -- response will not be delivered")
         return APIGatewayResponse(
             statusCode: .accepted,
             headers: ["content-type": "application/json"],
@@ -867,6 +908,36 @@ func handleAcceptQuoteRequest(
         state: "accepted"
     )
 
+    // Re-federate: send an Update activity for our quoting Note to all followers.
+    // The Note now includes `quoteUri` (which was withheld while the quote was pending).
+    if let updatedStatus = try await store.getStatus(username: parsed.username, id: parsed.statusId) {
+        let noteJSON = buildNoteJSON(status: updatedStatus, serverDomain: serverDomain)
+        let updateId = "https://\(serverDomain)/users/\(parsed.username)#updates/\(store.generateULID())"
+        let updateActivity: [String: Any] = [
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": updateId,
+            "type": "Update",
+            "actor": "https://\(serverDomain)/users/\(parsed.username)",
+            "object": noteJSON,
+        ]
+        let updateData = try JSONSerialization.data(withJSONObject: updateActivity)
+        if let updateJSON = String(data: updateData, encoding: .utf8) {
+            // Fan out Update to all followers so they see the quoteUri
+            let followers = try await store.getFollowers(username: parsed.username)
+            for follower in followers {
+                if let inbox = follower.inbox {
+                    let job = DeliveryJob(
+                        targetInbox: inbox,
+                        activityJSON: updateJSON,
+                        actorUsername: parsed.username
+                    )
+                    try await sqsClient.enqueue(job: job)
+                }
+            }
+            context.logger.info("Update activity for status \(parsed.statusId) enqueued to \(followers.count) followers")
+        }
+    }
+
     context.logger.info("Quote approval accepted for status \(parsed.statusId) by \(actorUri)")
 
     return APIGatewayResponse(
@@ -992,11 +1063,16 @@ Add this block after `var contentMapJSON = ""` / `if let lang = ...` block:
 ```swift
     // Quote URI -- only include when quote is accepted (or local-to-local)
     var quoteJSON = ""
-    if let quotedUri = status.quotedStatusUri,
-       status.quoteApprovalState == "accepted" || status.quoteApprovalState == nil {
-        // quoteApprovalState is nil for local-to-local quotes (always approved)
-        // Only emit for accepted or nil (local) states; omit for pending/rejected
-        if status.quoteApprovalState == "accepted" || status.quotedStatusUri?.contains(serverDomain) == true {
+    if let quotedUri = status.quotedStatusUri {
+        // Use a proper URL prefix check (not substring `contains`) to determine
+        // if the quoted status is local. A `contains` check is fragile -- the
+        // domain could appear as a substring in a remote URI.
+        let isLocalQuote = quotedUri.hasPrefix("https://\(serverDomain)/")
+
+        // Emit quoteUri when:
+        // - The quote is explicitly accepted (remote quote, approval received)
+        // - The quote is local-to-local (quoteApprovalState is nil, always approved)
+        if status.quoteApprovalState == "accepted" || (isLocalQuote && status.quoteApprovalState == nil) {
             quoteJSON = ",\"quoteUri\":\(jsonString(quotedUri)),\"_misskey_quote\":\(jsonString(quotedUri))"
         }
     }
@@ -1099,25 +1175,43 @@ In `Sources/PostHandler/main.swift`, after the media attachment lookup block (st
                 quotedStatusUri = quotedStatus.uri
                 // quoteApprovalState stays nil -- local quotes don't need approval tracking
             } else {
-                // The quotedStatusId might be a URI for a remote status.
-                // For now, treat it as a URI directly. In a full implementation,
-                // we would resolve it via HTTP fetch to get the actor's inbox.
+                // The quotedStatusId is a URI for a remote status.
                 // Store as pending -- QuoteRequest will be sent below.
                 quotedStatusUri = quotedId
                 quoteApprovalState = "pending"
 
-                // Attempt to extract the actor URI from the quoted status URI
-                // Format: https://remote.server/users/{username}/statuses/{id}
-                // The actor URI is: https://remote.server/users/{username}
-                if let url = URL(string: quotedId),
-                   let host = url.host {
-                    let pathComponents = url.pathComponents.filter { $0 != "/" }
-                    // Look for /users/{username} pattern
-                    if pathComponents.count >= 2 && pathComponents[0] == "users" {
-                        let remoteActorUri = "https://\(host)/users/\(pathComponents[1])"
-                        let remoteActor = try await store.getRemoteActor(actorUri: remoteActorUri)
-                        quotedActorInbox = remoteActor?.inbox
+                // Fetch the remote status object to discover the actor via `attributedTo`.
+                // We cannot guess the actor URI from the status URI path because different
+                // server software uses different formats:
+                //   Mastodon: /users/{name}/statuses/{id}
+                //   Misskey:  /users/{id}
+                //   GoToSocial: /@{name}/statuses/{id}
+                //   Lemmy:    /post/{id}
+                // Instead, dereference the status URI and read `attributedTo`.
+                do {
+                    let remoteStatusObject = try await fetchRemoteObject(uri: quotedId)
+                    if let attributedTo = remoteStatusObject["attributedTo"] as? String {
+                        // Try our local cache first
+                        let remoteActor = try await store.getRemoteActor(actorUri: attributedTo)
+                        if let actor = remoteActor {
+                            quotedActorInbox = actor.inbox
+                        } else {
+                            // Actor not in cache -- fetch their profile to get the inbox
+                            let actorObject = try await fetchRemoteObject(uri: attributedTo)
+                            if let inbox = actorObject["inbox"] as? String {
+                                quotedActorInbox = inbox
+                            }
+                        }
                     }
+                } catch {
+                    context.logger.error("Failed to fetch remote status \(quotedId) for QuoteRequest: \(error)")
+                }
+
+                // If we still don't have an inbox, the QuoteRequest cannot be delivered.
+                // Mark the quote as `failed` rather than leaving it silently `pending`.
+                if quotedActorInbox == nil {
+                    context.logger.error("Cannot determine inbox for quoted status \(quotedId) -- marking quote as failed")
+                    quoteApprovalState = "failed"
                 }
             }
         }
