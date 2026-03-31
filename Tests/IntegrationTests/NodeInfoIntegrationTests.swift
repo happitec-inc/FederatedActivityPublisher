@@ -5,10 +5,10 @@ import Foundation
 @testable import APIClient
 
 @Test func nodeInfoDiscovery() async throws {
-    guard let baseURL = ProcessInfo.processInfo.environment["TEST_API_URL"] else {
-        print("Skipping: TEST_API_URL not set")
-        return
-    }
+    let baseURL = try #require(
+        ProcessInfo.processInfo.environment["TEST_API_URL"],
+        "TEST_API_URL environment variable is required for integration tests"
+    )
     let client = Client(
         serverURL: URL(string: baseURL)!,
         transport: URLSessionTransport()
@@ -25,10 +25,10 @@ import Foundation
 }
 
 @Test func nodeInfo21() async throws {
-    guard let baseURL = ProcessInfo.processInfo.environment["TEST_API_URL"] else {
-        print("Skipping: TEST_API_URL not set")
-        return
-    }
+    let baseURL = try #require(
+        ProcessInfo.processInfo.environment["TEST_API_URL"],
+        "TEST_API_URL environment variable is required for integration tests"
+    )
     let client = Client(
         serverURL: URL(string: baseURL)!,
         transport: URLSessionTransport()
