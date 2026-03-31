@@ -11,6 +11,22 @@ Parameters:
     Default: activity.happitec.com
     Description: Base domain for the ActivityPub server
 
+  DnsMode:
+    Type: String
+    Default: simple
+    AllowedValues:
+      - simple
+      - split
+    Description: >
+      DNS architecture mode.
+      simple: ServerDomain and HandleDomain are the same. The hosted zone
+      is for this domain directly. Set your registrar NS records to Route 53.
+      split: ServerDomain is a subdomain of HandleDomain (e.g. activity.example.com
+      under example.com). Requires NS delegation from the parent zone.
+
+Conditions:
+  IsSplitDns: !Equals [!Ref DnsMode, split]
+
 Resources:
   HostedZone:
     DeletionPolicy: Retain
@@ -46,7 +62,9 @@ Outputs:
       Name: !Sub "${AWS::StackName}-CertificateArn"
 
   NameServers:
-    Description: NS records to add to the parent happitec.com zone
+    Description: >
+      NS records. In simple mode, set these as your domain registrar's
+      nameservers. In split mode, add these as NS records in the parent zone.
     Value: !Join
       - ", "
       - !GetAtt HostedZone.NameServers
