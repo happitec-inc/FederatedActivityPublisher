@@ -82,24 +82,42 @@ sam deploy \
   --parameter-overrides Stage=stage ...
 ```
 
-## CI/CD Configuration
+## Configuration
 
-Workflows support both self-hosted and GitHub-hosted runners. Set these repository variables to use self-hosted runners:
+### Required GitHub Secrets
 
-| Variable | Self-hosted | Default (GitHub-hosted) |
-|----------|-------------|------------------------|
-| `RUNNER_LABELS_LINUX` | `["self-hosted", "linux"]` | `ubuntu-latest` |
-| `RUNNER_LABELS_MACOS` | `["self-hosted", "macOS"]` | `macos-15` |
+These must be set for deployment workflows to succeed:
 
-Additional required variables and secrets:
+| Secret | Used by | Description |
+|--------|---------|-------------|
+| `AWS_ACCESS_KEY_ID` | app, bootstrap, environment | IAM access key for SAM deployments |
+| `AWS_SECRET_ACCESS_KEY` | app, bootstrap, environment | IAM secret key for SAM deployments |
 
-| Name | Type | Purpose |
-|------|------|---------|
-| `AWS_ACCESS_KEY_ID` | Secret | AWS credentials for deployment |
-| `AWS_SECRET_ACCESS_KEY` | Secret | AWS credentials for deployment |
-| `HAPPITEC_DISTRIBUTION_ID` | Variable | happitec.com CloudFront distribution ID (for cross-distribution cache invalidation) |
-| `ACTIVITY_API_DOMAIN` | Variable | API Gateway execute-api domain (set on happitec.com repo) |
-| `ACTIVITY_CDN_DOMAIN` | Variable | Activity CloudFront domain (set on happitec.com repo) |
+### Optional GitHub Secrets
+
+| Secret | Used by | Description |
+|--------|---------|-------------|
+| `HAPPITEC_READ_ONLY_PAT` | deploy-docc | PAT for private repo access (OG image generation) |
+
+### Repository Variables
+
+| Variable | Used by | Default | Description |
+|----------|---------|---------|-------------|
+| `RUNNER_LABELS_LINUX` | app, bootstrap, environment | `"ubuntu-latest"` | JSON array of runner labels, e.g. `["self-hosted", "linux"]` |
+| `RUNNER_LABELS_MACOS` | deploy-docc | `"macos-26"` | JSON array of runner labels for macOS jobs |
+| `HAPPITEC_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for cross-distribution cache invalidation; leave empty if not using a parent domain proxy |
+| `ENABLE_DOCC_DEPLOY` | deploy-docc | _(unset)_ | Set to `true` to enable private-repo DocC features (OG images, Mermaid diagrams) |
+
+### SAM Parameter Overrides
+
+Key parameters passed to `sam deploy` for the app stack:
+
+| Parameter | Stack | Description |
+|-----------|-------|-------------|
+| `ServerDomain` | app | The domain the ActivityPub server runs on (e.g. `activity.example.com`) |
+| `HandleDomain` | app | The domain used in ActivityPub handles (e.g. `example.com` for `@user@example.com`) |
+| `HappitecDistributionId` | app | Optional cross-distribution invalidation target; empty string to skip |
+| `Stage` | app, environment | `stage` or `prod` |
 
 ## License
 
