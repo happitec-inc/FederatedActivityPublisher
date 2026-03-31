@@ -4,8 +4,12 @@ import AWSCloudFront
 import ActivityPubCore
 import Foundation
 
-let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] ?? "activity.happitec.com"
-let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] ?? "happitec.com"
+guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] else {
+    fatalError("SERVER_DOMAIN environment variable is required")
+}
+guard let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] else {
+    fatalError("HANDLE_DOMAIN environment variable is required")
+}
 let distributionId = ProcessInfo.processInfo.environment["CLOUDFRONT_DISTRIBUTION_ID"] ?? ""
 
 let store = try await DynamoDBStore()

@@ -4,7 +4,9 @@ import ActivityPubCore
 import Elementary
 import Foundation
 
-let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] ?? "happitec.com"
+guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] else {
+    fatalError("SERVER_DOMAIN environment variable is required")
+}
 
 let store = try await DynamoDBStore()
 

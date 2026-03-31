@@ -10,8 +10,12 @@ import Foundation
 import FoundationNetworking
 #endif
 
-let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] ?? "activity.happitec.com"
-let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] ?? "happitec.com"
+guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] else {
+    fatalError("SERVER_DOMAIN environment variable is required")
+}
+guard let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] else {
+    fatalError("HANDLE_DOMAIN environment variable is required")
+}
 let mediaBucketName = ProcessInfo.processInfo.environment["MEDIA_BUCKET_NAME"] ?? ""
 let distributionId = ProcessInfo.processInfo.environment["CLOUDFRONT_DISTRIBUTION_ID"] ?? ""
 let happitecDistributionId = ProcessInfo.processInfo.environment["HAPPITEC_DISTRIBUTION_ID"] ?? ""
