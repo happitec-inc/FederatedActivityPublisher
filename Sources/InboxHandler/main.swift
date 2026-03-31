@@ -256,6 +256,16 @@ let runtime = LambdaRuntime {
                 context: context
             )
 
+        case "QuoteRequest":
+            let activityId = json["id"] as? String
+            return try await handleQuoteRequest(
+                json: json,
+                username: username,
+                actorUri: actorUri,
+                activityId: activityId,
+                context: context
+            )
+
         case "Accept", "Reject", "Block", "Move", "Add", "Remove", "Flag":
             let objectUri = extractObjectUri(from: json) ?? "unknown"
             context.logger.info("Stub handler: \(activityType) from \(actorUri), object=\(objectUri)")
@@ -971,6 +981,167 @@ func invalidateFollowersCache(username: String, context: LambdaContext) async {
     } catch {
         context.logger.error("Failed to invalidate followers cache: \(error)")
     }
+}
+
+// MARK: - QuoteRequest Handling
+
+func handleQuoteRequest(
+    json: [String: Any],
+    username: String,
+    actorUri: String,
+    activityId: String?,
+    context: LambdaContext
+) async throws -> APIGatewayResponse {
+    context.logger.info("Processing QuoteRequest from \(actorUri) for \(username)")
+
+    // Extract the quoted status URI from `object` field
+    let quotedStatusUri: String
+    if let objectStr = json["object"] as? String {
+        quotedStatusUri = objectStr
+    } else if let objectDict = json["object"] as? [String: Any],
+              let objectId = objectDict["id"] as? String {
+        quotedStatusUri = objectId
+    } else {
+        context.logger.warning("QuoteRequest missing object URI from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .badRequest,
+            headers: ["content-type": "application/json"],
+            body: #"{"error":"Missing object in QuoteRequest"}"#
+        )
+    }
+
+    // Extract the quoting status URI from `instrument` field
+    let quotingStatusUri: String
+    if let instrumentStr = json["instrument"] as? String {
+        quotingStatusUri = instrumentStr
+    } else if let instrumentDict = json["instrument"] as? [String: Any],
+              let instrumentId = instrumentDict["id"] as? String {
+        quotingStatusUri = instrumentId
+    } else {
+        context.logger.warning("QuoteRequest missing instrument URI from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .badRequest,
+            headers: ["content-type": "application/json"],
+            body: #"{"error":"Missing instrument in QuoteRequest"}"#
+        )
+    }
+
+    // Parse the quoted status URI to find our local status
+    guard let parsed = parseStatusUri(quotedStatusUri) else {
+        context.logger.info("QuoteRequest for non-local status \(quotedStatusUri) from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    // Verify the quoted status exists
+    guard let quotedStatus = try await store.getStatus(username: parsed.username, id: parsed.statusId) else {
+        context.logger.warning("QuoteRequest for non-existent status \(quotedStatusUri) from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    // Check follower status for policy evaluation
+    let follower = try await store.isFollower(username: parsed.username, actorUri: actorUri)
+
+    // Determine the actor's quote approval policy
+    // For now, hardcoded to "public" (matches ActorSerializer). When per-actor policy
+    // is stored in DynamoDB, read it from the actor profile here instead.
+    let quoteApprovalPolicy = "public"
+
+    // Evaluate policy
+    let accepted = shouldAcceptQuoteRequest(
+        quotedStatusVisibility: quotedStatus.visibility,
+        quoteApprovalPolicy: quoteApprovalPolicy,
+        isFollower: follower
+    )
+
+    // Build the response activity (Accept or Reject)
+    let ulid = store.generateULID()
+    let responseType = accepted ? "Accept" : "Reject"
+    let fragmentPath = accepted ? "accepts" : "rejects"
+    let responseId = "https://\(serverDomain)/users/\(username)#\(fragmentPath)/quote_requests/\(ulid)"
+
+    // Echo the full original QuoteRequest (including its `id`) as the object
+    // of our Accept/Reject so the remote server can correlate this response.
+    var quoteRequestObject: [String: Any] = [
+        "type": "QuoteRequest",
+        "actor": actorUri,
+        "object": quotedStatusUri,
+        "instrument": quotingStatusUri,
+    ]
+    if let activityId {
+        quoteRequestObject["id"] = activityId
+    }
+
+    // The @context must include the FEP-044f extension since the object body
+    // contains `"type": "QuoteRequest"`.
+    let responseActivity: [String: Any] = [
+        "@context": [
+            "https://www.w3.org/ns/activitystreams",
+            ["QuoteRequest": "https://w3id.org/fep/044f#QuoteRequest"]
+        ] as [Any],
+        "id": responseId,
+        "type": responseType,
+        "actor": "https://\(serverDomain)/users/\(username)",
+        "object": quoteRequestObject,
+    ]
+
+    let responseData = try JSONSerialization.data(withJSONObject: responseActivity)
+    guard let responseJSON = String(data: responseData, encoding: .utf8) else {
+        throw InboxError.encodingFailed
+    }
+
+    // Resolve the remote actor's inbox for delivery.
+    // First check our local cache, then try fetching the actor profile if not cached.
+    var targetInbox: String?
+    let remoteActor = try await store.getRemoteActor(actorUri: actorUri)
+    targetInbox = remoteActor?.inbox
+
+    if targetInbox == nil {
+        // Actor not in cache -- try fetching their profile directly
+        do {
+            let actorObject = try await fetchRemoteObject(uri: actorUri)
+            targetInbox = actorObject["inbox"] as? String
+        } catch {
+            context.logger.error("Failed to fetch remote actor \(actorUri): \(error)")
+        }
+    }
+
+    guard let targetInbox else {
+        context.logger.error("Cannot resolve inbox for \(actorUri) to deliver \(responseType) -- response will not be delivered")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    // Enqueue delivery
+    let job = DeliveryJob(
+        targetInbox: targetInbox,
+        activityJSON: responseJSON,
+        actorUsername: username
+    )
+    try await sqsClient.enqueue(job: job)
+
+    // If accepted, increment the quotes count on the quoted status
+    if accepted {
+        try await store.incrementQuotesCount(username: parsed.username, statusId: parsed.statusId)
+    }
+
+    context.logger.info("QuoteRequest \(accepted ? "accepted" : "rejected") from \(actorUri) for \(quotedStatusUri), \(responseType) enqueued to \(targetInbox)")
+
+    return APIGatewayResponse(
+        statusCode: .accepted,
+        headers: ["content-type": "application/json"],
+        body: #"{"status":"accepted"}"#
+    )
 }
 
 try await runtime.run()
