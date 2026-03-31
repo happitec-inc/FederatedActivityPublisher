@@ -83,8 +83,11 @@ public func buildNoteJSON(status: Status, serverDomain: String, username: String
         }
     }
 
+    // Interaction policy — allow public quoting by default
+    let interactionPolicyJSON = ",\"interactionPolicy\":{\"canQuote\":{\"automaticApproval\":[\"https://www.w3.org/ns/activitystreams#Public\"]}}"
+
     let json = """
-    {"@context":["https://www.w3.org/ns/activitystreams",{"Hashtag":"as:Hashtag","sensitive":"as:sensitive","blurhash":"toot:blurhash","focalPoint":{"@container":"@list","@id":"toot:focalPoint"},"toot":"http://joinmastodon.org/ns#","quoteUri":"toot:quoteUri"}],"id":"\(statusUrl)","type":"Note","attributedTo":"\(actorUrl)","content":\(jsonString(status.content)),"url":"\(escapeJSON(status.url))","published":"\(escapeJSON(status.published))","to":\(toJSON),"cc":\(ccJSON),"sensitive":\(status.sensitive)\(summaryJSON)\(contentMapJSON)\(quoteJSON)\(attachmentJSON)\(tagJSON)}
+    {"@context":["https://www.w3.org/ns/activitystreams",{"Hashtag":"as:Hashtag","sensitive":"as:sensitive","blurhash":"toot:blurhash","focalPoint":{"@container":"@list","@id":"toot:focalPoint"},"toot":"http://joinmastodon.org/ns#","quoteUri":"toot:quoteUri"}],"id":"\(statusUrl)","type":"Note","attributedTo":"\(actorUrl)","content":\(jsonString(status.content)),"url":"\(escapeJSON(status.url))","published":"\(escapeJSON(status.published))","to":\(toJSON),"cc":\(ccJSON),"sensitive":\(status.sensitive)\(summaryJSON)\(contentMapJSON)\(quoteJSON)\(attachmentJSON)\(tagJSON)\(interactionPolicyJSON)}
     """
     return json.trimmingCharacters(in: .whitespacesAndNewlines)
 }
