@@ -307,7 +307,7 @@ struct StatusEntry: HTML {
                 a(.href("https://\(domain)/@\(status.username)/\(status.id)")) {
                     time(.custom(name: "datetime", value: status.published)) { formatDate(status.published) }
                 }
-                " \u{00B7} \(status.likesCount) likes \u{00B7} \(status.boostsCount) boosts"
+                " \u{00B7} \(status.likesCount) likes \u{00B7} \(status.boostsCount) boosts \u{00B7} \(status.quotesCount) quotes"
             }
         }
     }
@@ -438,7 +438,7 @@ struct PostPage: HTMLDocument {
 
             // Interaction counts
             p(.class("post-meta")) {
-                "\(status.likesCount) likes \u{00B7} \(status.boostsCount) boosts \u{00B7} \(status.repliesCount) replies"
+                "\(status.likesCount) likes \u{00B7} \(status.boostsCount) boosts \u{00B7} \(status.quotesCount) quotes \u{00B7} \(status.repliesCount) replies"
             }
 
             hr()
