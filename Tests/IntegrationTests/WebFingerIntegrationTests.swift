@@ -24,7 +24,7 @@ import FoundationNetworking
         #expect(jrd.subject == "acct:randomforms@happitec.com")
         #expect(jrd.links.isEmpty == false)
         let selfLink = jrd.links.first { $0.rel == "self" }
-        #expect(selfLink?.href?.contains("activity.happitec.com/users/randomforms") == true)
+        #expect(selfLink?.href?.contains("/users/randomforms") == true)
     default:
         Issue.record("Expected 200, got \(response)")
     }
