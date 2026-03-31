@@ -138,6 +138,53 @@ let runtime = LambdaRuntime {
             }
         }
 
+        // 7.5. Resolve quoted status if quoting
+        var quotedStatusUri: String?
+        var quoteApprovalState: String?
+        var quotedActorInbox: String?
+
+        if let quotedId = request.quotedStatusId, !quotedId.isEmpty {
+            // Look up the quoted status -- could be local or remote
+            // First try as a local status ID
+            if let quotedStatus = try await store.getStatus(username: username, id: quotedId) {
+                // Local-to-local quote: auto-approved, no QuoteRequest needed
+                quotedStatusUri = quotedStatus.uri
+                // quoteApprovalState stays nil -- local quotes don't need approval tracking
+            } else {
+                // The quotedStatusId is a URI for a remote status.
+                // Store as pending -- QuoteRequest will be sent below.
+                quotedStatusUri = quotedId
+                quoteApprovalState = "pending"
+
+                // Fetch the remote status object to discover the actor via `attributedTo`.
+                do {
+                    let remoteStatusObject = try await fetchRemoteObject(uri: quotedId)
+                    if let attributedTo = remoteStatusObject["attributedTo"] as? String {
+                        // Try our local cache first
+                        let remoteActor = try await store.getRemoteActor(actorUri: attributedTo)
+                        if let actor = remoteActor {
+                            quotedActorInbox = actor.inbox
+                        } else {
+                            // Actor not in cache -- fetch their profile to get the inbox
+                            let actorObject = try await fetchRemoteObject(uri: attributedTo)
+                            if let inbox = actorObject["inbox"] as? String {
+                                quotedActorInbox = inbox
+                            }
+                        }
+                    }
+                } catch {
+                    context.logger.error("Failed to fetch remote status \(quotedId) for QuoteRequest: \(error)")
+                }
+
+                // If we still don't have an inbox, the QuoteRequest cannot be delivered.
+                // Mark the quote as `failed` rather than leaving it silently `pending`.
+                if quotedActorInbox == nil {
+                    context.logger.error("Cannot determine inbox for quoted status \(quotedId) -- marking quote as failed")
+                    quoteApprovalState = "failed"
+                }
+            }
+        }
+
         // 8. Build status
         let statusUrl = "https://\(serverDomain)/@\(username)/\(statusId)"
         let statusUri = "https://\(serverDomain)/users/\(username)/statuses/\(statusId)"
@@ -160,7 +207,9 @@ let runtime = LambdaRuntime {
             inReplyTo: request.inReplyToId,
             likesCount: 0,
             boostsCount: 0,
-            repliesCount: 0
+            repliesCount: 0,
+            quotedStatusUri: quotedStatusUri,
+            quoteApprovalState: quoteApprovalState
         )
 
         // 9. Store status in DynamoDB
@@ -197,6 +246,39 @@ let runtime = LambdaRuntime {
             try await sqsClient.enqueueBatch(jobs: jobs)
 
             context.logger.info("Enqueued \(jobs.count) delivery jobs for status \(statusId) (\(followers.count) followers)")
+        }
+
+        // 12.5. Send QuoteRequest if quoting a remote post
+        if let quotedUri = quotedStatusUri,
+           quoteApprovalState == "pending",
+           let targetInbox = quotedActorInbox {
+            // Build the QuoteRequest activity
+            let quoteRequestId = "https://\(serverDomain)/users/\(username)#quote_requests/\(statusId)"
+            let quoteRequest: [String: Any] = [
+                "@context": [
+                    "https://www.w3.org/ns/activitystreams",
+                    ["QuoteRequest": "https://w3id.org/fep/044f#QuoteRequest"]
+                ] as [Any],
+                "id": quoteRequestId,
+                "type": "QuoteRequest",
+                "actor": "https://\(serverDomain)/users/\(username)",
+                "object": quotedUri,
+                "instrument": statusUri,
+            ] as [String: Any]
+
+            let quoteRequestData = try JSONSerialization.data(withJSONObject: quoteRequest)
+            guard let quoteRequestJSON = String(data: quoteRequestData, encoding: .utf8) else {
+                throw PostError.encodingFailed
+            }
+
+            let quoteJob = DeliveryJob(
+                targetInbox: targetInbox,
+                activityJSON: quoteRequestJSON,
+                actorUsername: username
+            )
+            try await sqsClient.enqueue(job: quoteJob)
+
+            context.logger.info("QuoteRequest enqueued for \(quotedUri) to \(targetInbox)")
         }
 
         // 13. CloudFront invalidation for outbox + profile page
@@ -296,6 +378,10 @@ func mediaTypeFromContentType(_ contentType: String) -> String {
     if contentType.hasPrefix("video/") { return "video" }
     if contentType.hasPrefix("audio/") { return "audio" }
     return "unknown"
+}
+
+enum PostError: Error {
+    case encodingFailed
 }
 
 try await runtime.run()
