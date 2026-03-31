@@ -22,6 +22,7 @@ let package = Package(
         .executable(name: "PostHandler", targets: ["PostHandler"]),
         .executable(name: "MediaUploadHandler", targets: ["MediaUploadHandler"]),
         .executable(name: "ProfileUpdateHandler", targets: ["ProfileUpdateHandler"]),
+        .executable(name: "InstanceHandler", targets: ["InstanceHandler"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swift-server/swift-aws-lambda-runtime.git", from: "2.0.0"),
@@ -67,6 +68,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "NodeInfoHandler",
+            dependencies: [
+                .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
+                .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
+            ]
+        ),
+        .executableTarget(
+            name: "InstanceHandler",
             dependencies: [
                 .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
                 .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
