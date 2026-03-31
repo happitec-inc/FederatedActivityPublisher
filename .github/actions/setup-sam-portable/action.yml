@@ -1,0 +1,69 @@
+name: Setup AWS SAM CLI (Portable)
+description: |
+  Installs the AWS SAM CLI, portable across GitHub-hosted and self-hosted
+  macOS runners. Tries in order: existing install, brew, pip, then the
+  official setup-sam action (Linux-only installer).
+
+inputs:
+  use-installer:
+    description: Allow the setup-sam action's Linux installer as a fallback
+    required: false
+    default: 'true'
+  token:
+    description: GitHub token for setup-sam action
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check for existing SAM CLI
+      id: check
+      shell: bash
+      run: |
+        eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
+        if sam --version 2>/dev/null; then
+          echo "method=existing" >> "$GITHUB_OUTPUT"
+          echo "SAM CLI already installed: $(sam --version)"
+        elif command -v brew &>/dev/null; then
+          echo "method=brew" >> "$GITHUB_OUTPUT"
+          echo "Will install SAM CLI via Homebrew"
+        elif command -v pip3 &>/dev/null; then
+          echo "method=pip" >> "$GITHUB_OUTPUT"
+          echo "Will install SAM CLI via pip"
+        else
+          echo "method=action" >> "$GITHUB_OUTPUT"
+          echo "Will fall back to setup-sam action"
+        fi
+
+    - name: Install SAM CLI via Homebrew
+      if: steps.check.outputs.method == 'brew'
+      shell: bash
+      run: |
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+        brew install aws-sam-cli
+        echo "Installed: $(sam --version)"
+
+    - name: Install SAM CLI via pip
+      if: steps.check.outputs.method == 'pip'
+      shell: bash
+      run: |
+        pip3 install --break-system-packages aws-sam-cli 2>/dev/null \
+          || pip3 install aws-sam-cli
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        export PATH="$HOME/.local/bin:$PATH"
+        echo "Installed: $(sam --version)"
+
+    - name: Install SAM CLI via setup-sam action
+      if: steps.check.outputs.method == 'action' && inputs.use-installer == 'true'
+      uses: aws-actions/setup-sam@v2
+      with:
+        use-installer: true
+        token: ${{ inputs.token }}
+
+    - name: Verify SAM CLI
+      shell: bash
+      run: |
+        eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
+        export PATH="$HOME/.local/bin:$PATH"
+        sam --version
