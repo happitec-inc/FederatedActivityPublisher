@@ -7,3 +7,4 @@ stack_name = "activity-bootstrap"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 region = "us-east-1"
+parameter_overrides = "DnsMode=simple"

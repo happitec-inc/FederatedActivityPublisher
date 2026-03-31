@@ -5,6 +5,19 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      domain-name:
+        description: "Base domain for the ActivityPub server"
+        required: true
+        default: "activity.happitec.com"
+      dns-mode:
+        description: "DNS mode (simple = single domain, split = subdomain of parent)"
+        required: true
+        type: choice
+        options:
+          - simple
+          - split
+        default: simple
 
 jobs:
   deploy:
@@ -30,9 +43,14 @@ jobs:
         run: |
           sam deploy \
             --template-file .aws-sam/build/template.yaml \
-            --config-file ${{ github.workspace }}/activity-bootstrap/samconfig.toml \
+            --stack-name activity-bootstrap \
+            --capabilities CAPABILITY_IAM \
             --no-confirm-changeset \
-            --no-fail-on-empty-changeset
+            --no-fail-on-empty-changeset \
+            --region us-east-1 \
+            --parameter-overrides \
+              DomainName=${{ inputs.domain-name }} \
+              DnsMode=${{ inputs.dns-mode }}
 
       - name: Print stack outputs
         run: |
