@@ -62,6 +62,8 @@ See [AGENTS.md](AGENTS.md) for operating the server (provisioning accounts, post
 
 See [Sources/ActivityPubCore/Documentation.docc/DNSSetup.md](Sources/ActivityPubCore/Documentation.docc/DNSSetup.md) for DNS architecture options (simple vs. split domain).
 
+See [Sources/ActivityPubCore/Documentation.docc/DeployYourOwn.md](Sources/ActivityPubCore/Documentation.docc/DeployYourOwn.md) for a step-by-step guide to deploying your own instance.
+
 ## Building
 
 Requires Swift 6.3, Docker (for the AL2023 build image), and AWS SAM CLI.
