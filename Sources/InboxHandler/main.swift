@@ -1331,7 +1331,10 @@ func handleQuoteRequest(
 
     // The @context must include the FEP-044f extension since the object body
     // contains `"type": "QuoteRequest"`.
-    let responseActivity: [String: Any] = [
+    // Generate an approval URI that the remote server can reference
+    let approvalUri = "https://\(serverDomain)/users/\(username)/quote_authorizations/\(ulid)"
+
+    var responseActivity: [String: Any] = [
         "@context": [
             "https://www.w3.org/ns/activitystreams",
             ["QuoteRequest": "https://w3id.org/fep/044f#QuoteRequest"]
@@ -1341,6 +1344,11 @@ func handleQuoteRequest(
         "actor": "https://\(serverDomain)/users/\(username)",
         "object": quoteRequestObject,
     ]
+
+    // Mastodon requires a `result` field containing an approval URI
+    if accepted {
+        responseActivity["result"] = approvalUri
+    }
 
     let responseData = try JSONSerialization.data(withJSONObject: responseActivity)
     guard let responseJSON = String(data: responseData, encoding: .utf8) else {
