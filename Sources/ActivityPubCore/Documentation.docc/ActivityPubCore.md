@@ -34,15 +34,23 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 
 ## Topics
 
-### Guides
+### Getting Started
 
 - <doc:GettingStarted>
+- <doc:DeployYourOwn>
 - <doc:BuildingAndDeploying>
-- <doc:ProvisioningAccounts>
 - <doc:ArchitectureOverview>
-- <doc:HTMLRendering>
+- <doc:DNSSetup>
+
+### Operations
+
+- <doc:ProvisioningAccounts>
 - <doc:AWSPermissions>
 - <doc:CostEstimates>
+
+### HTML Rendering
+
+- <doc:HTMLRendering>
 
 ### Data Store
 
