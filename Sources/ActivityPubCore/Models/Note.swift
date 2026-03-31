@@ -67,8 +67,24 @@ public func buildNoteJSON(status: Status, serverDomain: String, username: String
         contentMapJSON = ",\"contentMap\":{\(jsonString(lang)):\(jsonString(status.content))}"
     }
 
+    // Quote URI -- only include when quote is accepted (or local-to-local)
+    var quoteJSON = ""
+    if let quotedUri = status.quotedStatusUri {
+        // Use a proper URL prefix check (not substring `contains`) to determine
+        // if the quoted status is local. A `contains` check is fragile -- the
+        // domain could appear as a substring in a remote URI.
+        let isLocalQuote = quotedUri.hasPrefix("https://\(serverDomain)/")
+
+        // Emit quoteUri when:
+        // - The quote is explicitly accepted (remote quote, approval received)
+        // - The quote is local-to-local (quoteApprovalState is nil, always approved)
+        if status.quoteApprovalState == "accepted" || (isLocalQuote && status.quoteApprovalState == nil) {
+            quoteJSON = ",\"quoteUri\":\(jsonString(quotedUri)),\"_misskey_quote\":\(jsonString(quotedUri))"
+        }
+    }
+
     let json = """
-    {"@context":["https://www.w3.org/ns/activitystreams",{"Hashtag":"as:Hashtag","sensitive":"as:sensitive","blurhash":"toot:blurhash","focalPoint":{"@container":"@list","@id":"toot:focalPoint"},"toot":"http://joinmastodon.org/ns#"}],"id":"\(statusUrl)","type":"Note","attributedTo":"\(actorUrl)","content":\(jsonString(status.content)),"url":"\(escapeJSON(status.url))","published":"\(escapeJSON(status.published))","to":\(toJSON),"cc":\(ccJSON),"sensitive":\(status.sensitive)\(summaryJSON)\(contentMapJSON)\(attachmentJSON)\(tagJSON)}
+    {"@context":["https://www.w3.org/ns/activitystreams",{"Hashtag":"as:Hashtag","sensitive":"as:sensitive","blurhash":"toot:blurhash","focalPoint":{"@container":"@list","@id":"toot:focalPoint"},"toot":"http://joinmastodon.org/ns#","quoteUri":"toot:quoteUri"}],"id":"\(statusUrl)","type":"Note","attributedTo":"\(actorUrl)","content":\(jsonString(status.content)),"url":"\(escapeJSON(status.url))","published":"\(escapeJSON(status.published))","to":\(toJSON),"cc":\(ccJSON),"sensitive":\(status.sensitive)\(summaryJSON)\(contentMapJSON)\(quoteJSON)\(attachmentJSON)\(tagJSON)}
     """
     return json.trimmingCharacters(in: .whitespacesAndNewlines)
 }
