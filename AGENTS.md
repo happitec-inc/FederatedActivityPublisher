@@ -63,7 +63,11 @@ open "https://happitec.com/@myapp"
 
 Use `PATCH /api/v1/accounts/update_credentials` on the client API. All fields are optional — only provided fields are updated.
 
-**API URL:** `https://REDACTED-API-ID.execute-api.us-east-1.amazonaws.com/prod`
+**API URL:** Check your deployed stack outputs for the API Gateway URL:
+```bash
+aws cloudformation describe-stacks --stack-name activity-app-{stage} \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text
+```
 
 ### Update display name and bio
 
@@ -226,10 +230,12 @@ Search for `@username@happitec.com` in any Mastodon client to find and follow th
 
 ## Environment
 
-| Environment | Client API URL | Stage |
-|---|---|---|
-| Production | `https://REDACTED-API-ID.execute-api.us-east-1.amazonaws.com/prod` | prod |
-| Stage | `https://REDACTED-API-ID.execute-api.us-east-1.amazonaws.com/stage` | stage |
+Check your deployed stack outputs for the API Gateway URL:
+```bash
+aws cloudformation describe-stacks --stack-name activity-app-{stage} \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text
+```
+Replace `{stage}` with `prod` or `stage` as appropriate.
 
 ## Limitations
 
