@@ -108,7 +108,7 @@ function handler(event) {
 
 **Cross-distribution cache invalidation** (optional):
 
-If you set `HAPPITEC_DISTRIBUTION_ID` to the CloudFront distribution ID of your handle domain's CDN, the PostHandler and ProfileUpdateHandler will invalidate cached paths on that distribution when new content is published.
+If you set `PROXY_DISTRIBUTION_ID` to the CloudFront distribution ID of your handle domain's CDN, the PostHandler and ProfileUpdateHandler will invalidate cached paths on that distribution when new content is published.
 
 ### Diagram
 

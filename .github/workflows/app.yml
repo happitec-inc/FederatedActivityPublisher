@@ -105,7 +105,7 @@ jobs:
               BootstrapStackName=activity-bootstrap \
               ServerDomain=${{ vars.SERVER_DOMAIN }} \
               HandleDomain=${{ vars.HANDLE_DOMAIN }} \
-              HappitecDistributionId=${{ vars.HAPPITEC_DISTRIBUTION_ID }} \
+              ProxyDistributionId=${{ vars.PROXY_DISTRIBUTION_ID }} \
               ActivityDistributionId=${{ vars.ACTIVITY_DISTRIBUTION_ID }}
 
       - name: Upload frontend assets

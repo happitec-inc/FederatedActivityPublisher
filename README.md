@@ -111,7 +111,7 @@ These must be set for deployment workflows to succeed:
 | `HANDLE_DOMAIN` | app, provision-actor | _(required)_ | Domain used in handles (`@user@example.com`). Permanent once federated. |
 | `RUNNER_LABELS_LINUX` | app, bootstrap, environment | `"ubuntu-latest"` | JSON array of runner labels, e.g. `["self-hosted", "linux"]` |
 | `RUNNER_LABELS_MACOS` | deploy-docc | `"macos-26"` | JSON array of runner labels for macOS jobs |
-| `HAPPITEC_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for cross-distribution cache invalidation; leave empty if not using a parent domain proxy |
+| `PROXY_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for cross-distribution cache invalidation; leave empty if not using a parent domain proxy |
 | `ENABLE_DOCC_DEPLOY` | deploy-docc | _(unset)_ | Set to `true` to enable private-repo DocC features (OG images, Mermaid diagrams) |
 
 ### SAM Parameter Overrides
@@ -122,7 +122,7 @@ Key parameters passed to `sam deploy` for the app stack:
 |-----------|-------|-------------|
 | `ServerDomain` | app | The domain the ActivityPub server runs on (e.g. `activity.example.com`) |
 | `HandleDomain` | app | The domain used in ActivityPub handles (e.g. `example.com` for `@user@example.com`) |
-| `HappitecDistributionId` | app | Optional cross-distribution invalidation target; empty string to skip |
+| `ProxyDistributionId` | app | Optional cross-distribution invalidation target; empty string to skip |
 | `Stage` | app, environment | `stage` or `prod` |
 
 ## License
