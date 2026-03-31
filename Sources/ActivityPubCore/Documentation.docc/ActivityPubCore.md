@@ -89,6 +89,7 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 ### Federation Serialization
 
 - <doc:FederationOverview>
+- <doc:QuoteSupport>
 - ``buildActorJSONLD(actor:serverDomain:handleDomain:)``
 - ``buildNoteJSON(status:serverDomain:username:)``
 - ``buildCreateActivityJSON(status:noteJSON:serverDomain:username:)``
