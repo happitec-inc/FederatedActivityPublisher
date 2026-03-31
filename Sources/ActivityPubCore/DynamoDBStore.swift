@@ -169,6 +169,21 @@ public struct DynamoDBStore: Sendable {
         }
     }
 
+    /// Check if a remote actor is a follower of the given local actor.
+    /// Uses a point read on the follower record -- no scan required.
+    public func isFollower(username: String, actorUri: String) async throws -> Bool {
+        let input = GetItemInput(
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("FOLLOWER#\(actorUri)"),
+            ],
+            projectionExpression: "PK",
+            tableName: tableName
+        )
+        let output = try await client.getItem(input: input)
+        return output.item != nil
+    }
+
     /// Atomically increment the follower count for an actor.
     public func incrementFollowerCount(username: String, by amount: Int = 1) async throws {
         let input = UpdateItemInput(
@@ -599,6 +614,70 @@ public struct DynamoDBStore: Sendable {
             updateExpression: "SET #sc = #sc + :val"
         )
         _ = try await client.updateItem(input: input)
+    }
+
+    /// Atomically update the quote approval state on a status.
+    /// Used when receiving Accept/Reject of our outbound QuoteRequest.
+    public func updateQuoteApprovalState(
+        username: String,
+        statusId: String,
+        state: String
+    ) async throws {
+        let input = UpdateItemInput(
+            expressionAttributeNames: ["#qa": "quoteApprovalState"],
+            expressionAttributeValues: [":state": .s(state)],
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("STATUS#\(statusId)"),
+            ],
+            tableName: tableName,
+            updateExpression: "SET #qa = :state"
+        )
+        _ = try await client.updateItem(input: input)
+    }
+
+    /// Atomically increment the quotes count for a status.
+    public func incrementQuotesCount(username: String, statusId: String, by amount: Int = 1) async throws {
+        let input = UpdateItemInput(
+            expressionAttributeNames: ["#qc": "quotesCount"],
+            expressionAttributeValues: [":val": .n(String(amount)), ":zero": .n("0")],
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("STATUS#\(statusId)"),
+            ],
+            tableName: tableName,
+            updateExpression: "SET #qc = if_not_exists(#qc, :zero) + :val"
+        )
+        _ = try await client.updateItem(input: input)
+    }
+
+    /// Find a status by its ActivityPub URI.
+    /// Queries statuses for the given username and filters by URI.
+    /// Returns nil if not found.
+    ///
+    /// Note: DynamoDB `Limit` limits items *evaluated*, not items *returned*.
+    /// With a `FilterExpression`, `limit: 1` would evaluate only one item and
+    /// return nothing if that item doesn't match the filter. We omit the limit
+    /// entirely and take the first matching result in code.
+    public func findStatusByUri(username: String, uri: String) async throws -> Status? {
+        let input = QueryInput(
+            expressionAttributeNames: [
+                "#pk": "PK",
+                "#sk": "SK",
+                "#uri": "uri",
+            ],
+            expressionAttributeValues: [
+                ":pk": .s("ACTOR#\(username)"),
+                ":prefix": .s("STATUS#"),
+                ":uri": .s(uri),
+            ],
+            filterExpression: "#uri = :uri",
+            keyConditionExpression: "#pk = :pk AND begins_with(#sk, :prefix)",
+            tableName: tableName
+        )
+        let output = try await client.query(input: input)
+        guard let items = output.items, let first = items.first else { return nil }
+        return Status.fromDynamoDB(first)
     }
 
     /// Fetch a single status by username and ID.
