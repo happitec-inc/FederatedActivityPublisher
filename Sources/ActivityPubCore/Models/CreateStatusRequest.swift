@@ -19,6 +19,8 @@ public struct CreateStatusRequest: Codable, Sendable {
     public let language: String?
     /// ID of the status being replied to, if this is a reply.
     public let inReplyToId: String?
+    /// ID of the status being quoted (Mastodon 4.5+ API).
+    public let quotedStatusId: String?
 
     enum CodingKeys: String, CodingKey {
         case status
@@ -28,12 +30,14 @@ public struct CreateStatusRequest: Codable, Sendable {
         case visibility
         case language
         case inReplyToId = "in_reply_to_id"
+        case quotedStatusId = "quoted_status_id"
     }
 
     public init(
         status: String, mediaIds: [String]? = nil, sensitive: Bool? = nil,
         spoilerText: String? = nil, visibility: String? = nil,
-        language: String? = nil, inReplyToId: String? = nil
+        language: String? = nil, inReplyToId: String? = nil,
+        quotedStatusId: String? = nil
     ) {
         self.status = status
         self.mediaIds = mediaIds
@@ -42,5 +46,6 @@ public struct CreateStatusRequest: Codable, Sendable {
         self.visibility = visibility
         self.language = language
         self.inReplyToId = inReplyToId
+        self.quotedStatusId = quotedStatusId
     }
 }
