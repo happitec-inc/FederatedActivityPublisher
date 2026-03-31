@@ -1,0 +1,118 @@
+name: Provision Actor
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: "Actor username (lowercase, no spaces, e.g. 'myapp')"
+        required: true
+        type: string
+      display-name:
+        description: "Display name (e.g. 'My App')"
+        required: true
+        type: string
+      summary:
+        description: "Bio / summary text"
+        required: false
+        type: string
+        default: ""
+      stage:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - stage
+          - prod
+        default: stage
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    steps:
+      - name: Clean workspace (self-hosted)
+        if: ${{ vars.RUNNER_LABELS_LINUX }}
+        run: |
+          sudo rm -rf .build/
+          sudo git clean -fdx -e .git || true
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Install Swift
+        run: |
+          if swift --version 2>/dev/null | grep -q "6.3"; then
+            echo "Swift 6.3 already installed"
+          else
+            ARCH=$(uname -m)
+            if [ "$ARCH" = "aarch64" ]; then
+              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404-aarch64/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04-aarch64.tar.gz"
+            else
+              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04.tar.gz"
+            fi
+            curl -fsSL "$SWIFT_URL" | sudo tar xz --strip-components=2 -C /usr/local
+          fi
+          swift --version
+
+      - name: Build ActivityProvisioner
+        run: swift build --product ActivityProvisioner
+
+      - name: Provision actor
+        run: |
+          swift run ActivityProvisioner \
+            --stage ${{ inputs.stage }} \
+            --username "${{ inputs.username }}" \
+            --display-name "${{ inputs.display-name }}" \
+            --summary "${{ inputs.summary }}" \
+            --server-domain "${{ vars.SERVER_DOMAIN }}" \
+            --handle-domain "${{ vars.HANDLE_DOMAIN }}"
+
+      - name: Generate bearer token
+        run: |
+          TOKEN=$(openssl rand -hex 32)
+          echo "::add-mask::$TOKEN"
+          aws ssm put-parameter \
+            --name "/activity/${{ inputs.stage }}/keys/client-token" \
+            --type SecureString \
+            --value "${{ inputs.username }}:$TOKEN" \
+            --overwrite \
+            --region us-east-1
+          echo "## Actor Provisioned" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Username:** ${{ inputs.username }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Stage:** ${{ inputs.stage }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Handle:** @${{ inputs.username }}@${{ vars.HANDLE_DOMAIN }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The bearer token has been stored in SSM at:" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`/activity/${{ inputs.stage }}/keys/client-token\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Retrieve it with:" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "aws ssm get-parameter --name /activity/${{ inputs.stage }}/keys/client-token --with-decryption --query Parameter.Value --output text" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Warning:** This overwrites the shared client-token parameter." >> "$GITHUB_STEP_SUMMARY"
+          echo "Only one account can post at a time per environment." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify actor
+        run: |
+          DOMAIN="${{ vars.SERVER_DOMAIN }}"
+          HANDLE_DOMAIN="${{ vars.HANDLE_DOMAIN }}"
+          echo "Waiting 10s for CloudFront propagation..."
+          sleep 10
+          echo "--- WebFinger ---"
+          curl -sf "https://$DOMAIN/.well-known/webfinger?resource=acct:${{ inputs.username }}@$HANDLE_DOMAIN" | jq . || echo "WebFinger not yet available (may take a few minutes for DNS/cache)"
+          echo ""
+          echo "--- Actor ---"
+          curl -sf -H "Accept: application/activity+json" "https://$DOMAIN/users/${{ inputs.username }}" | jq .id || echo "Actor not yet available"

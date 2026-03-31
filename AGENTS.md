@@ -29,6 +29,20 @@ This creates:
 - RSA private key in SSM at `/activity/prod/keys/myapp`
 - The actor is immediately discoverable at `@myapp@happitec.com`
 
+### Alternative: Provision via GitHub Actions
+
+Instead of running the CLI directly, use the **Provision Actor** workflow:
+
+1. Go to **Actions** > **Provision Actor**
+2. Click **Run workflow**
+3. Fill in username, display name, and optional summary
+4. Choose the target stage
+5. Run the workflow
+
+The workflow summary shows the SSM parameter path. Retrieve the token with the AWS CLI command shown in the summary.
+
+Note: this overwrites the shared client-token parameter. Only one account can post at a time per environment (see Limitations).
+
 ### 2. Create a bearer token for posting
 
 Store a bearer token in SSM. The format is `username:token` — the token can be any random string.
