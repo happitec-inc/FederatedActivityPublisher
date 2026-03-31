@@ -35,10 +35,20 @@ Parameters:
     Default: ""
     Description: CloudFront distribution ID for happitec.com (cross-invalidation)
 
+  ActivityDistributionId:
+    Type: String
+    Default: ""
+    Description: >-
+      CloudFront distribution ID for activity.happitec.com, passed as a
+      workflow parameter (not !Ref) to avoid circular dependency with the
+      implicit ServerlessRestApi used by InboxFunction.
+
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
 
   HasCrossDistribution: !Not [!Equals [!Ref HappitecDistributionId, ""]]
+
+  HasActivityDistribution: !Not [!Equals [!Ref ActivityDistributionId, ""]]
 
 Globals:
   Function:
@@ -378,12 +388,32 @@ Resources:
       FunctionName: !Sub "activity-app-inbox-${Stage}"
       CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/InboxHandler/InboxHandler.zip
       ReservedConcurrentExecutions: 25
+      Environment:
+        Variables:
+          CLOUDFRONT_DISTRIBUTION_ID: !Ref ActivityDistributionId
+          HAPPITEC_DISTRIBUTION_ID: !Ref HappitecDistributionId
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !ImportValue
               Fn::Sub: "${EnvironmentStackName}-TableName"
         - SQSSendMessagePolicy:
             QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
+        - !If
+          - HasActivityDistribution
+          - Statement:
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource:
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ActivityDistributionId}"
+          - !Ref AWS::NoValue
+        - !If
+          - HasCrossDistribution
+          - Statement:
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource:
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
+          - !Ref AWS::NoValue
       Events:
         PostInbox:
           Type: Api
