@@ -21,8 +21,14 @@ let runtime = LambdaRuntime {
           "description": "A serverless ActivityPub server for happitec-inc brand accounts.",
           "usage": {"users": {"active_month": 4}},
           "thumbnail": null,
+          "icon": [],
           "languages": ["en"],
           "configuration": {
+            "urls": {},
+            "accounts": {
+              "max_featured_tags": 10,
+              "max_pinned_statuses": 0
+            },
             "statuses": {
               "max_characters": 5000,
               "max_media_attachments": 4,
@@ -31,9 +37,25 @@ let runtime = LambdaRuntime {
             "media_attachments": {
               "supported_mime_types": ["image/jpeg", "image/png", "image/gif"],
               "image_size_limit": 6291456
+            },
+            "polls": {
+              "max_options": 0,
+              "max_characters_per_option": 0,
+              "min_expiration": 0,
+              "max_expiration": 0
+            },
+            "translation": {
+              "enabled": false
             }
           },
-          "registrations": {"enabled": false},
+          "registrations": {
+            "enabled": false,
+            "approval_required": false,
+            "reason_required": false,
+            "message": null,
+            "url": null,
+            "min_age": null
+          },
           "api_versions": {"mastodon": 7},
           "contact": {"email": "", "account": null},
           "rules": []
@@ -68,6 +90,9 @@ let runtime = LambdaRuntime {
           "approval_required": false,
           "invites_enabled": false,
           "configuration": {
+            "accounts": {
+              "max_featured_tags": 10
+            },
             "statuses": {
               "max_characters": 5000,
               "max_media_attachments": 4,
@@ -77,6 +102,12 @@ let runtime = LambdaRuntime {
               "supported_mime_types": ["image/jpeg", "image/png", "image/gif"],
               "image_size_limit": 6291456,
               "image_matrix_limit": 33177600
+            },
+            "polls": {
+              "max_options": 0,
+              "max_characters_per_option": 0,
+              "min_expiration": 0,
+              "max_expiration": 0
             }
           },
           "contact_account": null,
