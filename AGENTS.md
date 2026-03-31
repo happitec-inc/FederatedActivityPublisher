@@ -43,6 +43,31 @@ The workflow summary shows the SSM parameter path. Retrieve the token with the A
 
 Note: this overwrites the shared client-token parameter. Only one account can post at a time per environment (see Limitations).
 
+### Running locally with AWS credentials
+
+If you do not have a self-hosted runner, you can run ActivityProvisioner on any machine with Swift 6.3 and AWS credentials:
+
+```bash
+# Using an AWS profile
+AWS_PROFILE=myprofile swift run ActivityProvisioner \
+  --stage prod \
+  --username myapp \
+  --display-name "My App" \
+  --server-domain example.com \
+  --handle-domain example.com
+
+# Using environment variables
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_DEFAULT_REGION=us-east-1 \
+  swift run ActivityProvisioner \
+  --stage prod \
+  --username myapp \
+  --display-name "My App" \
+  --server-domain example.com \
+  --handle-domain example.com
+```
+
+Requirements: Swift 6.3 (macOS or Linux), network access to AWS APIs.
+
 ### 2. Create a bearer token for posting
 
 Store a bearer token in SSM. The format is `username:token` — the token can be any random string.
