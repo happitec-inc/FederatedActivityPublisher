@@ -367,9 +367,11 @@ func buildStatusResponse(status: Status, serverDomain: String) -> String {
     let cw = status.contentWarning.map { "\"\(escapeJSON($0))\"" } ?? "null"
     let lang = status.language.map { "\"\(escapeJSON($0))\"" } ?? "null"
     let replyTo = status.inReplyTo.map { "\"\(escapeJSON($0))\"" } ?? "null"
+    let quotedUri = status.quotedStatusUri.map { "\"\(escapeJSON($0))\"" } ?? "null"
+    let quoteState = status.quoteApprovalState.map { "\"\(escapeJSON($0))\"" } ?? "null"
 
     return """
-    {"id":"\(status.id)","created_at":"\(escapeJSON(status.published))","visibility":"\(status.visibility)","sensitive":\(status.sensitive),"spoiler_text":\(cw),"content":"\(escapeJSON(status.content))","url":"\(escapeJSON(status.url))","uri":"\(escapeJSON(status.uri))","language":\(lang),"in_reply_to_id":\(replyTo),"favourites_count":\(status.likesCount),"reblogs_count":\(status.boostsCount),"replies_count":\(status.repliesCount),"media_attachments":\(mediaAttachments)}
+    {"id":"\(status.id)","created_at":"\(escapeJSON(status.published))","visibility":"\(status.visibility)","sensitive":\(status.sensitive),"spoiler_text":\(cw),"content":"\(escapeJSON(status.content))","url":"\(escapeJSON(status.url))","uri":"\(escapeJSON(status.uri))","language":\(lang),"in_reply_to_id":\(replyTo),"favourites_count":\(status.likesCount),"reblogs_count":\(status.boostsCount),"replies_count":\(status.repliesCount),"quotes_count":\(status.quotesCount),"quoted_status_uri":\(quotedUri),"quote_approval_state":\(quoteState),"media_attachments":\(mediaAttachments)}
     """
 }
 
