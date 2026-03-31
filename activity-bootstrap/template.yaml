@@ -24,8 +24,6 @@ Parameters:
       split: ServerDomain is a subdomain of HandleDomain (e.g. activity.example.com
       under example.com). Requires NS delegation from the parent zone.
 
-Conditions:
-  IsSplitDns: !Equals [!Ref DnsMode, split]
 
 Resources:
   HostedZone:
@@ -60,6 +58,12 @@ Outputs:
     Value: !Ref WildcardCertificate
     Export:
       Name: !Sub "${AWS::StackName}-CertificateArn"
+
+  DomainName:
+    Description: The base domain for this ActivityPub server infrastructure
+    Value: !Ref DomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-DomainName"
 
   NameServers:
     Description: >
