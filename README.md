@@ -60,6 +60,8 @@ Full DocC documentation at [docs.happitec.com/FederatedActivityPublisher](https:
 
 See [AGENTS.md](AGENTS.md) for operating the server (provisioning accounts, posting, profile management).
 
+See [Sources/ActivityPubCore/Documentation.docc/DNSSetup.md](Sources/ActivityPubCore/Documentation.docc/DNSSetup.md) for DNS architecture options (simple vs. split domain).
+
 ## Building
 
 Requires Swift 6.3, Docker (for the AL2023 build image), and AWS SAM CLI.
