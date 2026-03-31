@@ -183,4 +183,5 @@ jobs:
       - name: Run integration tests
         env:
           TEST_API_URL: ${{ needs.deploy.outputs.api_url }}
+          LD_LIBRARY_PATH: /usr/local/lib/swift/linux
         run: swift test --filter IntegrationTests
