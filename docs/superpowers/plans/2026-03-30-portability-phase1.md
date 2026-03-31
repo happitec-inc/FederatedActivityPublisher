@@ -4,17 +4,101 @@
 
 **Goal:** Remove all private-repo dependencies from deploy workflows, make optional workflows fail gracefully, update misleading fallback defaults in Swift source, and document every required secret/variable so an external deployer can fork and deploy without access to `happitec-inc` private repos.
 
-**Estimated time:** ~1.5 hours
+**Estimated time:** ~2 hours
 
 **Audit reference:** [Issue #99 -- Portability Audit](https://github.com/happitec-inc/FederatedActivityPublisher/issues/99)
 
+**What changed since the original plan (2026-03-30):**
+
+- PR #98 merged: all workflows now use flexible runners via `RUNNER_LABELS_LINUX` / `RUNNER_LABELS_MACOS` repository variables with fallback defaults. No work needed for runner flexibility itself.
+- PR #100 review feedback: macOS fallback must be `macos-26` (Swift 6.3 requires it), and the `setup-sam-portable` action should be **copied** into this repo rather than inlined.
+- The `.env` file pattern for macOS runner PATH is already established.
+- DocC workflow already uses `vars.RUNNER_LABELS_MACOS` for flexible runners.
+
 ---
 
-## Task 1: Inline SAM CLI installation in all deploy workflows
+## Task 1: Copy `setup-sam-portable` action into this repo
 
-Replace the private `happitec-inc/happitec-logo-generator/.github/actions/setup-sam-portable@main` composite action with inline `pip install` steps. This is the only **required** blocker -- without SAM CLI, nothing deploys.
+The private `happitec-inc/happitec-logo-generator/.github/actions/setup-sam-portable@main` composite action is the only **required** blocker -- without SAM CLI, nothing deploys. Per PR #100 feedback, copy the action into this repo rather than inlining it.
 
-### 1.1 Replace SAM CLI step in `app.yml`
+### 1.1 Create `.github/actions/setup-sam-portable/action.yml`
+
+- [ ] Create the directory `.github/actions/setup-sam-portable/`
+- [ ] Copy the composite action from `happitec-logo-generator` into `.github/actions/setup-sam-portable/action.yml`. The action content is:
+
+  ```yaml
+  name: Setup AWS SAM CLI (Portable)
+  description: |
+    Installs the AWS SAM CLI, portable across GitHub-hosted and self-hosted
+    macOS runners. Tries in order: existing install, brew, pip, then the
+    official setup-sam action (Linux-only installer).
+
+  inputs:
+    use-installer:
+      description: Allow the setup-sam action's Linux installer as a fallback
+      required: false
+      default: 'true'
+    token:
+      description: GitHub token for setup-sam action
+      required: false
+      default: ${{ github.token }}
+
+  runs:
+    using: composite
+    steps:
+      - name: Check for existing SAM CLI
+        id: check
+        shell: bash
+        run: |
+          eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
+          if sam --version 2>/dev/null; then
+            echo "method=existing" >> "$GITHUB_OUTPUT"
+            echo "SAM CLI already installed: $(sam --version)"
+          elif command -v brew &>/dev/null; then
+            echo "method=brew" >> "$GITHUB_OUTPUT"
+            echo "Will install SAM CLI via Homebrew"
+          elif command -v pip3 &>/dev/null; then
+            echo "method=pip" >> "$GITHUB_OUTPUT"
+            echo "Will install SAM CLI via pip"
+          else
+            echo "method=action" >> "$GITHUB_OUTPUT"
+            echo "Will fall back to setup-sam action"
+          fi
+
+      - name: Install SAM CLI via Homebrew
+        if: steps.check.outputs.method == 'brew'
+        shell: bash
+        run: |
+          eval "$(/opt/homebrew/bin/brew shellenv)"
+          brew install aws-sam-cli
+          echo "Installed: $(sam --version)"
+
+      - name: Install SAM CLI via pip
+        if: steps.check.outputs.method == 'pip'
+        shell: bash
+        run: |
+          pip3 install --break-system-packages aws-sam-cli 2>/dev/null \
+            || pip3 install aws-sam-cli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "Installed: $(sam --version)"
+
+      - name: Install SAM CLI via setup-sam action
+        if: steps.check.outputs.method == 'action' && inputs.use-installer == 'true'
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+          token: ${{ inputs.token }}
+
+      - name: Verify SAM CLI
+        shell: bash
+        run: |
+          eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
+          export PATH="$HOME/.local/bin:$PATH"
+          sam --version
+  ```
+
+### 1.2 Update `app.yml` to use local action
 
 - [ ] In `.github/workflows/app.yml`, replace lines 46-49:
   ```yaml
@@ -26,32 +110,65 @@ Replace the private `happitec-inc/happitec-logo-generator/.github/actions/setup-
   with:
   ```yaml
   - name: Install SAM CLI
-    run: |
-      pip install --quiet aws-sam-cli
-      sam --version
+    uses: ./.github/actions/setup-sam-portable
   ```
 
-### 1.2 Replace SAM CLI step in `bootstrap.yml`
+### 1.3 Update `bootstrap.yml` to use local action
 
-- [ ] In `.github/workflows/bootstrap.yml`, replace lines 16-19 with the same inline `pip install` step
+- [ ] In `.github/workflows/bootstrap.yml`, replace lines 16-19 with:
+  ```yaml
+  - name: Install SAM CLI
+    uses: ./.github/actions/setup-sam-portable
+  ```
 
-### 1.3 Replace SAM CLI step in `environment.yml`
+### 1.4 Update `environment.yml` to use local action
 
-- [ ] In `.github/workflows/environment.yml`, replace lines 25-28 with the same inline `pip install` step
+- [ ] In `.github/workflows/environment.yml`, replace lines 25-28 with:
+  ```yaml
+  - name: Install SAM CLI
+    uses: ./.github/actions/setup-sam-portable
+  ```
 
-### 1.4 Verify on self-hosted runner
+### 1.5 Verify on self-hosted runner
 
 - [ ] Trigger a manual `workflow_dispatch` of `bootstrap.yml` (it is idempotent with `--no-fail-on-empty-changeset`) to confirm SAM CLI installs and runs correctly on the self-hosted Linux runner
 
-**Files:** `.github/workflows/app.yml`, `.github/workflows/bootstrap.yml`, `.github/workflows/environment.yml`
+**Files:** `.github/actions/setup-sam-portable/action.yml`, `.github/workflows/app.yml`, `.github/workflows/bootstrap.yml`, `.github/workflows/environment.yml`
 
 ---
 
-## Task 2: Make DocC workflow optional and fork-friendly
+## Task 2: Update macOS fallback to `macos-26`
 
-The `deploy-docc.yml` workflow depends on four private-repo resources. Make each one skip gracefully so the workflow still produces standard DocC output when run from a fork.
+Swift 6.3 requires macOS 26. All macOS runner fallbacks currently say `macos-15`. Update them to `macos-26`.
 
-### 2.1 Make OG image generation conditional
+### 2.1 Update `deploy-docc.yml` build job
+
+- [ ] In `.github/workflows/deploy-docc.yml` line 28, change:
+  ```yaml
+  runs-on: ${{ vars.RUNNER_LABELS_MACOS && fromJSON(vars.RUNNER_LABELS_MACOS) || 'macos-15' }}
+  ```
+  to:
+  ```yaml
+  runs-on: ${{ vars.RUNNER_LABELS_MACOS && fromJSON(vars.RUNNER_LABELS_MACOS) || 'macos-26' }}
+  ```
+
+### 2.2 Update `deploy-docc.yml` deploy job
+
+- [ ] In `.github/workflows/deploy-docc.yml` line 102, apply the same change from `macos-15` to `macos-26`
+
+### 2.3 Verify no other macOS fallbacks remain
+
+- [ ] Search all workflow files for `macos-1` to confirm no other occurrences exist
+
+**Files:** `.github/workflows/deploy-docc.yml`
+
+---
+
+## Task 3: Make DocC workflow optional and fork-friendly
+
+The `deploy-docc.yml` workflow depends on four private-repo resources. The flexible runners are already handled (PR #98). The remaining work is making private-repo features skip gracefully.
+
+### 3.1 Make OG image generation conditional
 
 - [ ] Wrap the `generate-og-image` job in a condition that checks for the PAT:
   ```yaml
@@ -61,7 +178,7 @@ The `deploy-docc.yml` workflow depends on four private-repo resources. Make each
   ```
 - [ ] Note: reusable workflow calls cannot use `secrets.*` in `if:` conditions, so use a repository variable `vars.ENABLE_DOCC_DEPLOY` as the gate
 
-### 2.2 Make the build job work without OG image
+### 3.2 Make the build job work without OG image
 
 - [ ] Change `needs: [generate-og-image]` to `needs: []` (remove the dependency)
 - [ ] Make the "Download OG image" step conditional:
@@ -71,7 +188,7 @@ The `deploy-docc.yml` workflow depends on four private-repo resources. Make each
     uses: actions/download-artifact@v6
   ```
 
-### 2.3 Fall back to upstream swift-docc-render
+### 3.3 Fall back to upstream swift-docc-render
 
 - [ ] Make the private fork checkout conditional, and add a fallback:
   ```yaml
@@ -91,39 +208,40 @@ The `deploy-docc.yml` workflow depends on four private-repo resources. Make each
       path: swift-docc-render-fork
   ```
 
-### 2.4 Make OG post-processing conditional
+### 3.4 Make OG post-processing conditional
 
 - [ ] Wrap the `docc-og-postprocess` action step in `if: vars.ENABLE_DOCC_DEPLOY == 'true'`
 
-### 2.5 Gate the entire workflow
+### 3.5 Gate the entire workflow for forks
 
-- [ ] Add a top-level condition on the `build` and `deploy` jobs so the entire workflow is skippable:
+- [ ] Add a top-level condition on the `build` and `deploy` jobs so the workflow is always active for the upstream repo but forks can opt in:
   ```yaml
   build:
     if: vars.ENABLE_DOCC_DEPLOY == 'true' || github.repository == 'happitec-inc/FederatedActivityPublisher'
   ```
-  This ensures it always runs for the upstream repo but forks can opt in via the variable.
 
 **Files:** `.github/workflows/deploy-docc.yml`
 
 ---
 
-## Task 3: Make Claude code review workflows optional
+## Task 4: Make Claude code review workflows optional
 
 Both `claude.yml` and `claude-code-review.yml` require `secrets.CLAUDE_CODE_OAUTH_TOKEN`. They should skip gracefully when the secret is absent.
 
-### 3.1 Guard `claude.yml`
+### 4.1 Guard `claude.yml`
 
-- [ ] Add a secret presence check. GitHub does not expose secret names in `if:` conditions, but the action itself will fail if the token is empty. Add a job-level condition:
+- [ ] Add a repository check to the existing `if:` condition:
   ```yaml
   claude:
     if: |
       github.repository == 'happitec-inc/FederatedActivityPublisher' &&
-      ((github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) || ...)
+      ((github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))))
   ```
-  Alternatively, check if the token is non-empty in a preliminary step and skip the rest.
 
-### 3.2 Guard `claude-code-review.yml`
+### 4.2 Guard `claude-code-review.yml`
 
 - [ ] Add `if: github.repository == 'happitec-inc/FederatedActivityPublisher'` to the `claude-review` job, so forks do not attempt to run it without the required secret
 
@@ -131,11 +249,11 @@ Both `claude.yml` and `claude-code-review.yml` require `secrets.CLAUDE_CODE_OAUT
 
 ---
 
-## Task 4: Update fallback defaults in Swift source
+## Task 5: Update fallback defaults in Swift source
 
 20 Lambda handler files have `?? "activity.happitec.com"` or `?? "happitec.com"` fallbacks. These are always overridden by environment variables in production, but they are misleading for someone reading the code. Replace with `fatalError` calls that clearly indicate misconfiguration.
 
-### 4.1 Replace `serverDomain` fallbacks
+### 5.1 Replace `serverDomain` fallbacks
 
 - [ ] In all 17 handler files that have `ProcessInfo.processInfo.environment["SERVER_DOMAIN"] ?? "activity.happitec.com"` or `?? "happitec.com"`, replace with:
   ```swift
@@ -161,7 +279,7 @@ Both `claude.yml` and `claude-code-review.yml` require `secrets.CLAUDE_CODE_OAUT
   - `Sources/DeliverHandler/main.swift`
   - `Sources/ProfileHandler/main.swift`
 
-### 4.2 Replace `handleDomain` fallbacks
+### 5.2 Replace `handleDomain` fallbacks
 
 - [ ] In the 5 handlers that also have `HANDLE_DOMAIN` fallbacks, apply the same `guard`/`fatalError` pattern:
   ```swift
@@ -177,7 +295,7 @@ Both `claude.yml` and `claude-code-review.yml` require `secrets.CLAUDE_CODE_OAUT
   - `Sources/ActorHandler/main.swift`
   - `Sources/ProfileUpdateHandler/main.swift`
 
-### 4.3 Build on Linux VM
+### 5.3 Build on Linux VM
 
 - [ ] SSH to the Linux runner VM and build to verify all handlers compile:
   ```bash
@@ -188,11 +306,11 @@ Both `claude.yml` and `claude-code-review.yml` require `secrets.CLAUDE_CODE_OAUT
 
 ---
 
-## Task 5: Document all required secrets and variables
+## Task 6: Document all required secrets and variables
 
 Add a comprehensive configuration reference to `README.md` so external deployers know exactly what to set up before running any workflow.
 
-### 5.1 Add secrets and variables table to README
+### 6.1 Add secrets and variables table to README
 
 - [ ] Add a new `## Configuration` section to `README.md` (after the "Architecture" section) with the following content:
 
@@ -215,11 +333,11 @@ Add a comprehensive configuration reference to `README.md` so external deployers
   | Variable | Used by | Default | Description |
   |----------|---------|---------|-------------|
   | `RUNNER_LABELS_LINUX` | app, bootstrap, environment | `"ubuntu-latest"` | JSON array of runner labels, e.g. `["self-hosted", "linux"]` |
-  | `RUNNER_LABELS_MACOS` | deploy-docc | `"macos-15"` | JSON array of runner labels for macOS jobs |
+  | `RUNNER_LABELS_MACOS` | deploy-docc | `"macos-26"` | JSON array of runner labels for macOS jobs |
   | `HAPPITEC_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for cross-distribution cache invalidation; leave empty if not using a parent domain proxy |
   | `ENABLE_DOCC_DEPLOY` | deploy-docc | _(unset)_ | Set to `true` to enable private-repo DocC features (OG images, Mermaid diagrams) |
 
-### 5.2 Add SAM parameter overrides reference
+### 6.2 Add SAM parameter overrides reference
 
 - [ ] In the same `## Configuration` section, add a sub-section documenting the key SAM parameter overrides:
 
@@ -230,7 +348,7 @@ Add a comprehensive configuration reference to `README.md` so external deployers
   | `HappitecDistributionId` | app | Optional cross-distribution invalidation target; empty string to skip |
   | `Stage` | app, environment | `stage` or `prod` |
 
-### 5.3 Remove hardcoded API Gateway URLs from AGENTS.md
+### 6.3 Remove hardcoded API Gateway URLs from AGENTS.md
 
 - [ ] In `AGENTS.md`, replace the hardcoded API Gateway URLs (`https://REDACTED-API-ID.execute-api...` and `https://REDACTED-API-ID.execute-api...`) with a note directing readers to check stack outputs:
   ```
@@ -247,9 +365,19 @@ Add a comprehensive configuration reference to `README.md` so external deployers
 
 After all tasks are complete:
 
-- [ ] Trigger `bootstrap.yml` via `workflow_dispatch` -- should install SAM CLI via pip and succeed
+- [ ] Trigger `bootstrap.yml` via `workflow_dispatch` -- should install SAM CLI via local action and succeed
 - [ ] Trigger `environment.yml` via `workflow_dispatch` with stage `stage` -- should succeed
 - [ ] Push to `main` to trigger `app.yml` -- should succeed (or trigger manually)
 - [ ] Confirm `deploy-docc.yml` runs without errors when `ENABLE_DOCC_DEPLOY` is unset (fork scenario)
 - [ ] Confirm `claude.yml` and `claude-code-review.yml` skip cleanly on a fork
 - [ ] Confirm Swift build passes on Linux after fallback removal
+
+---
+
+## Already completed (PR #98)
+
+The following items from the original audit are done and do not need further work:
+
+- **Flexible runners**: All workflows use `RUNNER_LABELS_LINUX` / `RUNNER_LABELS_MACOS` repository variables with GitHub-hosted fallbacks
+- **Self-hosted runner cleanup**: Conditional cleanup steps gated on `vars.RUNNER_LABELS_LINUX`
+- **PATH workaround for macOS**: `.env` file pattern established for self-hosted macOS runners
