@@ -212,8 +212,8 @@ Conditions:
 - [ ] Edit `.github/workflows/app.yml` to make `ServerDomain` and `HandleDomain` configurable via repository variables. Replace lines 103-104:
 
 ```yaml
-              ServerDomain=${{ vars.SERVER_DOMAIN || 'happitec.com' }} \
-              HandleDomain=${{ vars.HANDLE_DOMAIN || 'happitec.com' }} \
+              ServerDomain=${{ vars.SERVER_DOMAIN }} \
+              HandleDomain=${{ vars.HANDLE_DOMAIN }} \
 ```
 
 > **Critical -- happitec-inc deployment:** The `happitec-inc` repo uses split DNS where the CloudFront alias is `activity.happitec.com`, not `happitec.com`. After this change, `happitec-inc` **must** set the repository variable `SERVER_DOMAIN=activity.happitec.com` (and `HANDLE_DOMAIN=happitec.com`). Without this, the CloudFront alias would resolve to `happitec.com`, which is the handle domain -- not the server domain -- breaking the deployment. Add this as a migration step in the PR description.
@@ -321,8 +321,8 @@ jobs:
             --username "${{ inputs.username }}" \
             --display-name "${{ inputs.display-name }}" \
             --summary "${{ inputs.summary }}" \
-            --server-domain "${{ vars.SERVER_DOMAIN || 'happitec.com' }}" \
-            --handle-domain "${{ vars.HANDLE_DOMAIN || 'happitec.com' }}"
+            --server-domain "${{ vars.SERVER_DOMAIN }}" \
+            --handle-domain "${{ vars.HANDLE_DOMAIN }}"
 
       - name: Generate bearer token
         run: |
@@ -338,7 +338,7 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Username:** ${{ inputs.username }}" >> "$GITHUB_STEP_SUMMARY"
           echo "**Stage:** ${{ inputs.stage }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Handle:** @${{ inputs.username }}@${{ vars.HANDLE_DOMAIN || 'happitec.com' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Handle:** @${{ inputs.username }}@${{ vars.HANDLE_DOMAIN }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "The bearer token has been stored in SSM at:" >> "$GITHUB_STEP_SUMMARY"
           echo "\`/activity/${{ inputs.stage }}/keys/client-token\`" >> "$GITHUB_STEP_SUMMARY"
@@ -353,8 +353,8 @@ jobs:
 
       - name: Verify actor
         run: |
-          DOMAIN="${{ vars.SERVER_DOMAIN || 'happitec.com' }}"
-          HANDLE_DOMAIN="${{ vars.HANDLE_DOMAIN || 'happitec.com' }}"
+          DOMAIN="${{ vars.SERVER_DOMAIN }}"
+          HANDLE_DOMAIN="${{ vars.HANDLE_DOMAIN }}"
           echo "Waiting 10s for CloudFront propagation..."
           sleep 10
           echo "--- WebFinger ---"
@@ -459,13 +459,13 @@ jobs:
 
 ## Task 5: DNS setup documentation
 
-**File:** `docs/DNS-SETUP.md` (new file)
+**File:** `Sources/ActivityPubCore/Documentation.docc/DNSSetup.md` (new file)
 
 A standalone markdown document covering both DNS modes. Referenced from the "Deploy Your Own" guide (Task 6) and from `README.md`.
 
 ### 5.1 Create the document
 
-- [ ] Create `docs/DNS-SETUP.md` with the following content:
+- [ ] Create `Sources/ActivityPubCore/Documentation.docc/DNSSetup.md` with the following content:
 
 ```markdown
 # DNS Setup
@@ -611,7 +611,7 @@ Choose carefully. Simple mode with your primary domain is the safest default.
 - [ ] Add a link in the README.md "Documentation" section:
 
 ```markdown
-See [docs/DNS-SETUP.md](docs/DNS-SETUP.md) for DNS architecture options (simple vs. split domain).
+See [Sources/ActivityPubCore/Documentation.docc/DNSSetup.md](Sources/ActivityPubCore/Documentation.docc/DNSSetup.md) for DNS architecture options (simple vs. split domain).
 ```
 
 ### Verification
@@ -623,13 +623,13 @@ See [docs/DNS-SETUP.md](docs/DNS-SETUP.md) for DNS architecture options (simple 
 
 ## Task 6: "Deploy Your Own" guide
 
-**File:** `docs/DEPLOY.md` (new file)
+**File:** `Sources/ActivityPubCore/Documentation.docc/DeployYourOwn.md` (new file)
 
 End-to-end walkthrough for an external deployer. References the DNS setup doc (Task 5) rather than duplicating it.
 
 ### 6.1 Create the guide
 
-- [ ] Create `docs/DEPLOY.md` with the following content:
+- [ ] Create `Sources/ActivityPubCore/Documentation.docc/DeployYourOwn.md` with the following content:
 
 ```markdown
 # Deploy Your Own ActivityPub Server
@@ -675,7 +675,7 @@ Under **Settings > Secrets and variables > Actions > Variables**, add:
 
 For simple DNS mode (recommended), set `SERVER_DOMAIN` and `HANDLE_DOMAIN` to the same value.
 
-See [DNS-SETUP.md](DNS-SETUP.md) for help choosing between simple and split DNS.
+See <doc:DNSSetup> for help choosing between simple and split DNS.
 
 ## Step 4: Deploy the bootstrap stack
 
@@ -846,7 +846,7 @@ The certificate validates via DNS records in the hosted zone created by the same
 - [ ] Add a line in the README.md after the "Documentation" section, or within it:
 
 ```markdown
-See [docs/DEPLOY.md](docs/DEPLOY.md) for a step-by-step guide to deploying your own instance.
+See [Sources/ActivityPubCore/Documentation.docc/DeployYourOwn.md](Sources/ActivityPubCore/Documentation.docc/DeployYourOwn.md) for a step-by-step guide to deploying your own instance.
 ```
 
 ### Verification
@@ -919,8 +919,8 @@ Tasks should be implemented in this order due to dependencies:
 | `.github/workflows/app.yml` | Use `SERVER_DOMAIN`/`HANDLE_DOMAIN` variables |
 | `.github/workflows/provision-actor.yml` | New file |
 | `.github/workflows/test.yml` | New file |
-| `docs/DNS-SETUP.md` | New file |
-| `docs/DEPLOY.md` | New file |
+| `Sources/ActivityPubCore/Documentation.docc/DNSSetup.md` | New file |
+| `Sources/ActivityPubCore/Documentation.docc/DeployYourOwn.md` | New file |
 | `AGENTS.md` | Add GitHub Actions and local provisioning sections |
 | `README.md` | Add links to new docs, new repository variables |
 
