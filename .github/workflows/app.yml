@@ -27,6 +27,9 @@ jobs:
       github.event_name != 'release' ||
       (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
     runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    outputs:
+      api_url: ${{ steps.stack-outputs.outputs.api_url }}
+      stage: ${{ steps.stack-outputs.outputs.stage }}
     env:
       STAGE: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
     steps:
@@ -120,6 +123,7 @@ jobs:
           fi
 
       - name: Print stack outputs
+        id: stack-outputs
         run: |
           OUTPUTS=$(aws cloudformation describe-stacks \
             --stack-name "activity-app-${{ env.STAGE }}" \
@@ -130,3 +134,53 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "$OUTPUTS" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name "activity-app-${{ env.STAGE }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+            --output text --region us-east-1)
+          echo "api_url=$API_URL" >> "$GITHUB_OUTPUT"
+          echo "stage=${{ env.STAGE }}" >> "$GITHUB_OUTPUT"
+
+  integration-tests:
+    needs: deploy
+    if: github.event_name == 'push'
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    steps:
+      - name: Clean workspace (self-hosted)
+        if: ${{ vars.RUNNER_LABELS_LINUX }}
+        run: |
+          sudo rm -rf .build/
+          sudo git clean -fdx -e .git || true
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Install Swift
+        run: |
+          if swift --version 2>/dev/null | grep -q "6.3"; then
+            echo "Swift 6.3 already installed"
+          else
+            ARCH=$(uname -m)
+            if [ "$ARCH" = "aarch64" ]; then
+              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404-aarch64/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04-aarch64.tar.gz"
+            else
+              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04.tar.gz"
+            fi
+            curl -fsSL "$SWIFT_URL" | sudo tar xz --strip-components=2 -C /usr/local
+          fi
+          swift --version
+
+      - name: Run integration tests
+        env:
+          TEST_API_URL: ${{ needs.deploy.outputs.api_url }}
+        run: swift test --filter IntegrationTests
