@@ -4,7 +4,7 @@ Build Lambda binaries with Docker, deploy with SAM, and manage CI/CD pipelines.
 
 ## Overview
 
-The project builds Swift Lambda binaries targeting Amazon Linux 2023 (ARM64). A custom Docker image handles cross-compilation, and SAM CLI manages packaging and CloudFormation deployment. Six GitHub Actions workflows automate the full lifecycle from code review through production deployment.
+The project builds Swift Lambda binaries targeting Amazon Linux 2023 (ARM64). A custom Docker image handles cross-compilation, and SAM CLI manages packaging and CloudFormation deployment. Four GitHub Actions workflows automate the full lifecycle from deployment through documentation publishing.
 
 ## GitHub Actions Workflows
 
@@ -102,37 +102,6 @@ Creates per-stage persistent resources that the app stack depends on.
 **Required secrets:**
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
-
-### Claude Code (`claude.yml`)
-
-Enables interactive AI assistance on issues and pull requests by mentioning `@claude`.
-
-**Triggers:**
-- Issue comment containing `@claude`
-- Pull request review comment containing `@claude`
-- Pull request review containing `@claude`
-- Issue opened or assigned with `@claude` in the title or body
-
-**Required secrets:**
-- `CLAUDE_CODE_OAUTH_TOKEN`
-
-**Permissions:** `contents: read`, `pull-requests: read`, `issues: read`, `id-token: write`, `actions: read`
-
-This workflow runs on GitHub-hosted runners (`ubuntu-latest`) and does not deploy any infrastructure.
-
-### Claude Code Review (`claude-code-review.yml`)
-
-Automated code review on every pull request using the Claude code review plugin.
-
-**Triggers:**
-- Pull request opened, synchronized, ready for review, or reopened
-
-**Required secrets:**
-- `CLAUDE_CODE_OAUTH_TOKEN`
-
-**Permissions:** `contents: read`, `pull-requests: read`, `issues: read`, `id-token: write`
-
-This workflow runs on GitHub-hosted runners (`ubuntu-latest`) and does not deploy any infrastructure.
 
 ## Deployment Order
 
