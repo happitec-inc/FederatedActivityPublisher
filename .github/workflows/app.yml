@@ -44,9 +44,7 @@ jobs:
           clean: false
 
       - name: Install SAM CLI
-        uses: happitec-inc/happitec-logo-generator/.github/actions/setup-sam-portable@main
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        uses: ./.github/actions/setup-sam-portable
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
