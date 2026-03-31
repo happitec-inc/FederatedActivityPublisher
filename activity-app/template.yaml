@@ -226,6 +226,23 @@ Resources:
             Path: /users/{username}
             Method: GET
 
+  InstanceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-instance-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/InstanceHandler/InstanceHandler.zip
+      Events:
+        InstanceV1:
+          Type: Api
+          Properties:
+            Path: /api/v1/instance
+            Method: GET
+        InstanceV2:
+          Type: Api
+          Properties:
+            Path: /api/v2/instance
+            Method: GET
+
   NodeInfoFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -590,6 +607,18 @@ Resources:
           OriginRequestPolicyId: !Ref InboxOriginRequestPolicy
           AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
         CacheBehaviors:
+          - PathPattern: /api/v1/instance
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /api/v2/instance
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
           - PathPattern: /.well-known/nodeinfo
             TargetOriginId: ApiGateway
             ViewerProtocolPolicy: redirect-to-https
