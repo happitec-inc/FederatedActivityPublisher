@@ -36,6 +36,8 @@ Parameters:
 
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
+  IsSimpleDns: !Equals [!Ref ServerDomain, !Ref HandleDomain]
+  HasCrossDistribution: !Not [!Equals [!Ref HappitecDistributionId, ""]]
 
 Globals:
   Function:
@@ -90,7 +92,10 @@ Resources:
               Action: cloudfront:CreateInvalidation
               Resource:
                 - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
-                - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
+                - !If
+                  - HasCrossDistribution
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
+                  - !Ref AWS::NoValue
         - SSMParameterReadPolicy:
             ParameterName: !Sub "activity/${Stage}/*"
         - Statement:
@@ -176,7 +181,10 @@ Resources:
               Action: cloudfront:CreateInvalidation
               Resource:
                 - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
-                - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
+                - !If
+                  - HasCrossDistribution
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
+                  - !Ref AWS::NoValue
       Events:
         UpdateCredentials:
           Type: Api
@@ -545,7 +553,7 @@ Resources:
         Enabled: true
         Comment: !Sub "activity-app-${Stage}"
         Aliases:
-          - !If [IsProd, "activity.happitec.com", !Sub "${Stage}.activity.happitec.com"]
+          - !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
         ViewerCertificate:
           AcmCertificateArn: !ImportValue
             Fn::Sub: "${BootstrapStackName}-CertificateArn"
@@ -655,7 +663,7 @@ Resources:
     Properties:
       HostedZoneId: !ImportValue
         Fn::Sub: "${BootstrapStackName}-HostedZoneId"
-      Name: !If [IsProd, "activity.happitec.com", !Sub "${Stage}.activity.happitec.com"]
+      Name: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
       Type: A
       AliasTarget:
         DNSName: !GetAtt CloudFrontDistribution.DomainName
@@ -675,7 +683,7 @@ Outputs:
     Value: !GetAtt CloudFrontDistribution.DomainName
   ServerDomainOutput:
     Description: Public domain for the federation API
-    Value: !If [IsProd, "activity.happitec.com", !Sub "${Stage}.activity.happitec.com"]
+    Value: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
     Export:
       Name: !Sub "${AWS::StackName}-ServerDomain"
   ClientApiUrl:
