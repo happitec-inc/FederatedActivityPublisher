@@ -103,6 +103,8 @@ These must be set for deployment workflows to succeed:
 
 | Variable | Used by | Default | Description |
 |----------|---------|---------|-------------|
+| `SERVER_DOMAIN` | app, provision-actor | _(required)_ | Domain where the ActivityPub server runs. In simple mode, same as handle domain. In split mode, the subdomain (e.g. `activity.example.com`). |
+| `HANDLE_DOMAIN` | app, provision-actor | _(required)_ | Domain used in handles (`@user@example.com`). Permanent once federated. |
 | `RUNNER_LABELS_LINUX` | app, bootstrap, environment | `"ubuntu-latest"` | JSON array of runner labels, e.g. `["self-hosted", "linux"]` |
 | `RUNNER_LABELS_MACOS` | deploy-docc | `"macos-26"` | JSON array of runner labels for macOS jobs |
 | `HAPPITEC_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for cross-distribution cache invalidation; leave empty if not using a parent domain proxy |

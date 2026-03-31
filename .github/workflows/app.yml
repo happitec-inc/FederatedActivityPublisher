@@ -100,8 +100,8 @@ jobs:
               Stage=${{ env.STAGE }} \
               EnvironmentStackName=activity-environment-${{ env.STAGE }} \
               BootstrapStackName=activity-bootstrap \
-              ServerDomain=happitec.com \
-              HandleDomain=happitec.com \
+              ServerDomain=${{ vars.SERVER_DOMAIN }} \
+              HandleDomain=${{ vars.HANDLE_DOMAIN }} \
               HappitecDistributionId=${{ vars.HAPPITEC_DISTRIBUTION_ID }}
 
       - name: Upload frontend assets
