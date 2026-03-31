@@ -37,7 +37,7 @@ Under **Settings > Secrets and variables > Actions > Variables**, add:
 | `SERVER_DOMAIN` | Your server domain (e.g. `example.com`) | Yes |
 | `HANDLE_DOMAIN` | Your handle domain (e.g. `example.com`) | Yes |
 | `RUNNER_LABELS_LINUX` | JSON array of runner labels (e.g. `["self-hosted", "linux"]`) | No (defaults to `ubuntu-latest`) |
-| `HAPPITEC_DISTRIBUTION_ID` | CloudFront distribution ID for cross-invalidation | No (only for split DNS) |
+| `PROXY_DISTRIBUTION_ID` | CloudFront distribution ID for cross-invalidation | No (only for split DNS) |
 
 For simple DNS mode (recommended), set `SERVER_DOMAIN` and `HANDLE_DOMAIN` to the same value.
 

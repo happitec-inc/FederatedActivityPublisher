@@ -31,7 +31,7 @@ The primary deployment workflow. Builds all Swift Lambda handlers inside a Docke
 - `AWS_SECRET_ACCESS_KEY` -- IAM secret key for deployment
 
 **Required repository variables:**
-- `HAPPITEC_DISTRIBUTION_ID` -- CloudFront distribution ID for the parent `happitec.com` site (used for cross-invalidation)
+- `PROXY_DISTRIBUTION_ID` -- CloudFront distribution ID for a parent-domain proxy (used for cross-invalidation)
 
 **Key steps:**
 1. Clean workspace (self-hosted runners only)
@@ -152,7 +152,7 @@ sam deploy \
     BootstrapStackName=activity-bootstrap \
     ServerDomain=happitec.com \
     HandleDomain=happitec.com \
-    HappitecDistributionId=YOUR_DISTRIBUTION_ID
+    ProxyDistributionId=YOUR_DISTRIBUTION_ID
 ```
 
 After the first manual deploy, pushes to `main` automatically deploy to stage via the `app.yml` workflow.
@@ -178,7 +178,7 @@ Set these repository variables so the CI/CD workflows can reference them:
 
 | Variable | Purpose | Example |
 |---|---|---|
-| `HAPPITEC_DISTRIBUTION_ID` | CloudFront distribution ID for `happitec.com` (cross-invalidation) | `E1234567890ABC` |
+| `PROXY_DISTRIBUTION_ID` | CloudFront distribution ID for parent-domain proxy (cross-invalidation) | `E1234567890ABC` |
 
 The `ACTIVITY_API_DOMAIN` and `ACTIVITY_CDN_DOMAIN` values are derived from stack outputs automatically.
 

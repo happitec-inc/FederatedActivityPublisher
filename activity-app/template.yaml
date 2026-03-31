@@ -30,10 +30,10 @@ Parameters:
     Description: Domain used in handles (@user@happitec.com)
 
 
-  HappitecDistributionId:
+  ProxyDistributionId:
     Type: String
     Default: ""
-    Description: CloudFront distribution ID for happitec.com (cross-invalidation)
+    Description: CloudFront distribution ID for a parent-domain proxy (cross-invalidation)
 
   ActivityDistributionId:
     Type: String
@@ -46,7 +46,7 @@ Parameters:
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
 
-  HasCrossDistribution: !Not [!Equals [!Ref HappitecDistributionId, ""]]
+  HasCrossDistribution: !Not [!Equals [!Ref ProxyDistributionId, ""]]
 
   HasActivityDistribution: !Not [!Equals [!Ref ActivityDistributionId, ""]]
 
@@ -91,7 +91,7 @@ Resources:
       Environment:
         Variables:
           CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistribution
-          HAPPITEC_DISTRIBUTION_ID: !Ref HappitecDistributionId
+          PROXY_DISTRIBUTION_ID: !Ref ProxyDistributionId
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !ImportValue
@@ -105,7 +105,7 @@ Resources:
                 - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
                 - !If
                   - HasCrossDistribution
-                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProxyDistributionId}"
                   - !Ref AWS::NoValue
         - SSMParameterReadPolicy:
             ParameterName: !Sub "activity/${Stage}/*"
@@ -165,7 +165,7 @@ Resources:
       Environment:
         Variables:
           CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistribution
-          HAPPITEC_DISTRIBUTION_ID: !Ref HappitecDistributionId
+          PROXY_DISTRIBUTION_ID: !Ref ProxyDistributionId
           MEDIA_BUCKET_NAME: !ImportValue
             Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
       Policies:
@@ -194,7 +194,7 @@ Resources:
                 - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
                 - !If
                   - HasCrossDistribution
-                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProxyDistributionId}"
                   - !Ref AWS::NoValue
       Events:
         UpdateCredentials:
@@ -391,7 +391,7 @@ Resources:
       Environment:
         Variables:
           CLOUDFRONT_DISTRIBUTION_ID: !Ref ActivityDistributionId
-          HAPPITEC_DISTRIBUTION_ID: !Ref HappitecDistributionId
+          PROXY_DISTRIBUTION_ID: !Ref ProxyDistributionId
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !ImportValue
@@ -412,7 +412,7 @@ Resources:
               - Effect: Allow
                 Action: cloudfront:CreateInvalidation
                 Resource:
-                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProxyDistributionId}"
           - !Ref AWS::NoValue
       Events:
         PostInbox:
