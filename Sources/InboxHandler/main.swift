@@ -1073,6 +1073,23 @@ func handleAcceptQuoteRequest(
         )
     }
 
+    // Verify the sender is the author of the quoted post (origin check).
+    // Without this, any authenticated actor could send a forged Accept to flip
+    // our pending quotes to "accepted".
+    if let existingStatus = try await store.getStatus(username: parsed.username, id: parsed.statusId),
+       let quotedUri = existingStatus.quotedStatusUri {
+        let actorOrigin = URL(string: actorUri).flatMap { "\($0.scheme ?? "")://\($0.host ?? "")" }
+        let quotedOrigin = URL(string: quotedUri).flatMap { "\($0.scheme ?? "")://\($0.host ?? "")" }
+        guard actorOrigin != nil && actorOrigin == quotedOrigin else {
+            context.logger.warning("Accept QuoteRequest origin mismatch: actor=\(actorUri), quotedStatus=\(quotedUri)")
+            return APIGatewayResponse(
+                statusCode: .accepted,
+                headers: ["content-type": "application/json"],
+                body: #"{"status":"accepted"}"#
+            )
+        }
+    }
+
     // Update the quote approval state to accepted
     try await store.updateQuoteApprovalState(
         username: parsed.username,
@@ -1082,31 +1099,31 @@ func handleAcceptQuoteRequest(
 
     // Re-federate: send an Update activity for our quoting Note to all followers.
     // The Note now includes `quoteUri` (which was withheld while the quote was pending).
-    if let updatedStatus = try await store.getStatus(username: parsed.username, id: parsed.statusId) {
+    // Use consistentRead to ensure we see the updated quoteApprovalState.
+    if let updatedStatus = try await store.getStatus(username: parsed.username, id: parsed.statusId, consistentRead: true) {
         let noteJSON = buildNoteJSON(status: updatedStatus, serverDomain: serverDomain, username: parsed.username)
+        let actorUrl = "https://\(serverDomain)/users/\(parsed.username)"
         let updateId = "https://\(serverDomain)/users/\(parsed.username)#updates/\(store.generateULID())"
-        let updateActivity: [String: Any] = [
-            "@context": "https://www.w3.org/ns/activitystreams",
-            "id": updateId,
-            "type": "Update",
-            "actor": "https://\(serverDomain)/users/\(parsed.username)",
-            "object": noteJSON,
-        ]
-        let updateData = try JSONSerialization.data(withJSONObject: updateActivity)
-        if let updateJSON = String(data: updateData, encoding: .utf8) {
-            // Fan out Update to all followers so they see the quoteUri
-            let followers = try await store.listAllFollowers(username: parsed.username)
-            for follower in followers {
-                let inbox = follower.sharedInboxUrl ?? follower.inboxUrl
-                let job = DeliveryJob(
-                    targetInbox: inbox,
-                    activityJSON: updateJSON,
-                    actorUsername: parsed.username
-                )
-                try await sqsClient.enqueue(job: job)
-            }
-            context.logger.info("Update activity for status \(parsed.statusId) enqueued to \(followers.count) followers")
+        let toJSON = jsonArray(updatedStatus.to)
+        let ccJSON = jsonArray(updatedStatus.cc)
+        // Build Update activity via string interpolation (not JSONSerialization)
+        // to avoid double-encoding the Note JSON string.
+        let updateJSON = """
+        {"@context":"https://www.w3.org/ns/activitystreams","id":"\(updateId)","type":"Update","actor":"\(actorUrl)","published":"\(escapeJSON(updatedStatus.published))","to":\(toJSON),"cc":\(ccJSON),"object":\(noteJSON)}
+        """.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Fan out Update to all followers so they see the quoteUri
+        let followers = try await store.listAllFollowers(username: parsed.username)
+        for follower in followers {
+            let inbox = follower.sharedInboxUrl ?? follower.inboxUrl
+            let job = DeliveryJob(
+                targetInbox: inbox,
+                activityJSON: updateJSON,
+                actorUsername: parsed.username
+            )
+            try await sqsClient.enqueue(job: job)
         }
+        context.logger.info("Update activity for status \(parsed.statusId) enqueued to \(followers.count) followers")
     }
 
     context.logger.info("Quote approval accepted for status \(parsed.statusId) by \(actorUri)")
@@ -1184,6 +1201,21 @@ func handleRejectQuoteRequest(
             headers: ["content-type": "application/json"],
             body: #"{"status":"accepted"}"#
         )
+    }
+
+    // Verify the sender is the author of the quoted post (origin check).
+    if let existingStatus = try await store.getStatus(username: parsed.username, id: parsed.statusId),
+       let quotedUri = existingStatus.quotedStatusUri {
+        let actorOrigin = URL(string: actorUri).flatMap { "\($0.scheme ?? "")://\($0.host ?? "")" }
+        let quotedOrigin = URL(string: quotedUri).flatMap { "\($0.scheme ?? "")://\($0.host ?? "")" }
+        guard actorOrigin != nil && actorOrigin == quotedOrigin else {
+            context.logger.warning("Reject QuoteRequest origin mismatch: actor=\(actorUri), quotedStatus=\(quotedUri)")
+            return APIGatewayResponse(
+                statusCode: .accepted,
+                headers: ["content-type": "application/json"],
+                body: #"{"status":"accepted"}"#
+            )
+        }
     }
 
     try await store.updateQuoteApprovalState(

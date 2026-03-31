@@ -681,8 +681,14 @@ public struct DynamoDBStore: Sendable {
     }
 
     /// Fetch a single status by username and ID.
-    public func getStatus(username: String, id: String) async throws -> Status? {
+    /// - Parameters:
+    ///   - username: The local actor username.
+    ///   - id: The status ULID.
+    ///   - consistentRead: Use strongly consistent read (default: false). Set to true
+    ///     when reading immediately after a write and the latest value is required.
+    public func getStatus(username: String, id: String, consistentRead: Bool = false) async throws -> Status? {
         let input = GetItemInput(
+            consistentRead: consistentRead,
             key: [
                 "PK": .s("ACTOR#\(username)"),
                 "SK": .s("STATUS#\(id)"),
