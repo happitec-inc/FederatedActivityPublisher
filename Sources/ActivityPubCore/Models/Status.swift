@@ -42,6 +42,12 @@ public struct Status: Codable, Sendable {
     public let boostsCount: Int
     /// Number of replies received from remote actors.
     public let repliesCount: Int
+    /// URI of the remote status being quoted by this status, if any.
+    public let quotedStatusUri: String?
+    /// Quote approval state for outbound quotes: `pending`, `accepted`, `rejected`, or `failed`.
+    public let quoteApprovalState: String?
+    /// Number of accepted inbound quotes of this status.
+    public let quotesCount: Int
 
     public init(
         id: String, username: String, content: String, contentWarning: String?,
@@ -49,7 +55,9 @@ public struct Status: Codable, Sendable {
         published: String, url: String, uri: String,
         to: [String], cc: [String], tags: [Tag]?,
         attachments: [MediaAttachmentRef]?, inReplyTo: String?,
-        likesCount: Int = 0, boostsCount: Int = 0, repliesCount: Int = 0
+        likesCount: Int = 0, boostsCount: Int = 0, repliesCount: Int = 0,
+        quotedStatusUri: String? = nil, quoteApprovalState: String? = nil,
+        quotesCount: Int = 0
     ) {
         self.id = id
         self.username = username
@@ -69,6 +77,9 @@ public struct Status: Codable, Sendable {
         self.likesCount = likesCount
         self.boostsCount = boostsCount
         self.repliesCount = repliesCount
+        self.quotedStatusUri = quotedStatusUri
+        self.quoteApprovalState = quoteApprovalState
+        self.quotesCount = quotesCount
     }
 
     /// Convert a DynamoDB attribute map to a Status, returning nil if required fields are missing.
@@ -125,13 +136,28 @@ public struct Status: Codable, Sendable {
         var repliesCount = 0
         if case .n(let n) = attributes["repliesCount"], let v = Int(n) { repliesCount = v }
 
+        var quotedStatusUri: String?
+        if case .s(let qs) = attributes["quotedStatusUri"] {
+            quotedStatusUri = qs
+        }
+
+        var quoteApprovalState: String?
+        if case .s(let qa) = attributes["quoteApprovalState"] {
+            quoteApprovalState = qa
+        }
+
+        var quotesCount = 0
+        if case .n(let n) = attributes["quotesCount"], let v = Int(n) { quotesCount = v }
+
         return Status(
             id: id, username: username, content: content, contentWarning: contentWarning,
             visibility: visibility, sensitive: sensitive, language: language,
             published: published, url: url, uri: uri,
             to: to, cc: cc, tags: tags,
             attachments: attachments, inReplyTo: inReplyTo,
-            likesCount: likesCount, boostsCount: boostsCount, repliesCount: repliesCount
+            likesCount: likesCount, boostsCount: boostsCount, repliesCount: repliesCount,
+            quotedStatusUri: quotedStatusUri, quoteApprovalState: quoteApprovalState,
+            quotesCount: quotesCount
         )
     }
 
@@ -173,6 +199,15 @@ public struct Status: Codable, Sendable {
         }
         if let attachments, let data = try? encoder.encode(attachments) {
             item["attachments"] = .s(String(data: data, encoding: .utf8) ?? "[]")
+        }
+        if let quotedStatusUri {
+            item["quotedStatusUri"] = .s(quotedStatusUri)
+        }
+        if let quoteApprovalState {
+            item["quoteApprovalState"] = .s(quoteApprovalState)
+        }
+        if quotesCount > 0 {
+            item["quotesCount"] = .n(String(quotesCount))
         }
 
         return item
