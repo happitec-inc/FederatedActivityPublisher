@@ -34,7 +34,7 @@ let runtime = LambdaRuntime {
             }
           },
           "registrations": {"enabled": false},
-          "api_versions": {"mastodon": 2},
+          "api_versions": {"mastodon": 7},
           "contact": {"email": "", "account": null},
           "rules": []
         }
