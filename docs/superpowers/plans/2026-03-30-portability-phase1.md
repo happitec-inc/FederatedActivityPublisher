@@ -224,28 +224,19 @@ The `deploy-docc.yml` workflow depends on four private-repo resources. The flexi
 
 ---
 
-## Task 4: Make Claude code review workflows optional
+## Task 4: Remove Claude code review workflows
 
-Both `claude.yml` and `claude-code-review.yml` require `secrets.CLAUDE_CODE_OAUTH_TOKEN`. They should skip gracefully when the secret is absent.
+The `claude.yml` and `claude-code-review.yml` workflows are org-specific (require `CLAUDE_CODE_OAUTH_TOKEN`) and not needed in CI — code reviews are triggered manually via Claude Code. Remove them entirely.
 
-### 4.1 Guard `claude.yml`
+### 4.1 Delete workflow files
 
-- [ ] Add a repository check to the existing `if:` condition:
-  ```yaml
-  claude:
-    if: |
-      github.repository == 'happitec-inc/FederatedActivityPublisher' &&
-      ((github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))))
-  ```
+- [ ] `git rm .github/workflows/claude.yml .github/workflows/claude-code-review.yml`
 
-### 4.2 Guard `claude-code-review.yml`
+### 4.2 Commit
 
-- [ ] Add `if: github.repository == 'happitec-inc/FederatedActivityPublisher'` to the `claude-review` job, so forks do not attempt to run it without the required secret
+- [ ] `git commit -m "Remove automated Claude review workflows (manually triggered instead)"`
 
-**Files:** `.github/workflows/claude.yml`, `.github/workflows/claude-code-review.yml`
+**Files:** `.github/workflows/claude.yml`, `.github/workflows/claude-code-review.yml` (deleted)
 
 ---
 
@@ -326,7 +317,7 @@ Add a comprehensive configuration reference to `README.md` so external deployers
   | Secret | Used by | Description |
   |--------|---------|-------------|
   | `HAPPITEC_READ_ONLY_PAT` | deploy-docc | PAT for private repo access (OG image generation) |
-  | `CLAUDE_CODE_OAUTH_TOKEN` | claude, claude-code-review | OAuth token for Claude AI code review |
+  | `CLAUDE_CODE_OAUTH_TOKEN` | _(removed)_ | Automated Claude reviews removed; trigger manually via Claude Code |
 
   **Repository Variables:**
 
