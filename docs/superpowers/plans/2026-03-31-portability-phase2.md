@@ -94,7 +94,7 @@ on:
         default: simple
 ```
 
-- [ ] Pass both parameters to `sam deploy`:
+- [ ] Replace the existing `sam deploy` step. The current workflow uses `--config-file` to reference `samconfig.toml`. Remove `--config-file` entirely and use explicit CLI flags and `--parameter-overrides` instead (the workflow inputs are the source of truth, not the config file):
 
 ```yaml
       - name: SAM deploy
@@ -110,6 +110,8 @@ on:
               DomainName=${{ inputs.domain-name }} \
               DnsMode=${{ inputs.dns-mode }}
 ```
+
+> **Note:** This intentionally drops `--config-file`. The `samconfig.toml` is retained for local `sam deploy` convenience, but the CI workflow should use explicit parameters from workflow inputs so there is a single source of truth per invocation.
 
 ### Verification
 
@@ -189,22 +191,18 @@ Conditions:
   HasCrossDistribution: !Not [!Equals [!Ref HappitecDistributionId, ""]]
 ```
 
-- [ ] For `PostFunction` policies (line 88-93), wrap the cross-distribution invalidation in `!If`:
+- [ ] For `PostFunction` policies (line 88-93), use `!If` at the **Resource** level inside the existing Statement to conditionally include the cross-distribution ARN. Wrapping entire `Statement` blocks in `!If` is not valid SAM/CloudFormation syntax for `Policies`. Instead, use `AWS::NoValue` to exclude the second ARN when not needed:
 
 ```yaml
-        - !If
-          - HasCrossDistribution
-          - Statement:
-              - Effect: Allow
-                Action: cloudfront:CreateInvalidation
-                Resource:
-                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+        - Statement:
+            - Effect: Allow
+              Action: cloudfront:CreateInvalidation
+              Resource:
+                - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+                - !If
+                  - HasCrossDistribution
                   - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${HappitecDistributionId}"
-          - Statement:
-              - Effect: Allow
-                Action: cloudfront:CreateInvalidation
-                Resource:
-                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+                  - !Ref AWS::NoValue
 ```
 
 - [ ] Apply the same pattern to `ProfileUpdateFunction` policies (line 174-179).
@@ -218,11 +216,13 @@ Conditions:
               HandleDomain=${{ vars.HANDLE_DOMAIN || 'happitec.com' }} \
 ```
 
+> **Critical -- happitec-inc deployment:** The `happitec-inc` repo uses split DNS where the CloudFront alias is `activity.happitec.com`, not `happitec.com`. After this change, `happitec-inc` **must** set the repository variable `SERVER_DOMAIN=activity.happitec.com` (and `HANDLE_DOMAIN=happitec.com`). Without this, the CloudFront alias would resolve to `happitec.com`, which is the handle domain -- not the server domain -- breaking the deployment. Add this as a migration step in the PR description.
+
 - [ ] Document these new repository variables in `README.md` under the "Repository Variables" table:
 
 | Variable | Used by | Default | Description |
 |----------|---------|---------|-------------|
-| `SERVER_DOMAIN` | app | `happitec.com` | Domain where the ActivityPub server runs. In simple mode, same as handle domain. In split mode, the subdomain (e.g. `activity.example.com`). |
+| `SERVER_DOMAIN` | app | `happitec.com` | Domain where the ActivityPub server runs. For happitec-inc, set to `activity.happitec.com`. In simple mode, same as handle domain. In split mode, the subdomain (e.g. `activity.example.com`). |
 | `HANDLE_DOMAIN` | app | `happitec.com` | Domain used in handles (`@user@example.com`). Permanent once federated. |
 
 ### Verification
@@ -327,6 +327,7 @@ jobs:
       - name: Generate bearer token
         run: |
           TOKEN=$(openssl rand -hex 32)
+          echo "::add-mask::$TOKEN"
           aws ssm put-parameter \
             --name "/activity/${{ inputs.stage }}/keys/client-token" \
             --type SecureString \
@@ -339,9 +340,13 @@ jobs:
           echo "**Stage:** ${{ inputs.stage }}" >> "$GITHUB_STEP_SUMMARY"
           echo "**Handle:** @${{ inputs.username }}@${{ vars.HANDLE_DOMAIN || 'happitec.com' }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Bearer token:** \`$TOKEN\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "The bearer token has been stored in SSM at:" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`/activity/${{ inputs.stage }}/keys/client-token\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Save this token -- it will not be shown again." >> "$GITHUB_STEP_SUMMARY"
+          echo "Retrieve it with:" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "aws ssm get-parameter --name /activity/${{ inputs.stage }}/keys/client-token --with-decryption --query Parameter.Value --output text" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Warning:** This overwrites the shared client-token parameter." >> "$GITHUB_STEP_SUMMARY"
           echo "Only one account can post at a time per environment." >> "$GITHUB_STEP_SUMMARY"
@@ -374,7 +379,7 @@ Instead of running the CLI directly, use the **Provision Actor** workflow:
 4. Choose the target stage
 5. Run the workflow
 
-The workflow output includes the bearer token. Save it immediately -- it will not be shown again.
+The workflow summary shows the SSM parameter path. Retrieve the token with the AWS CLI command shown in the summary.
 
 Note: this overwrites the shared client-token parameter. Only one account can post at a time per environment (see Limitations).
 ```
@@ -382,7 +387,7 @@ Note: this overwrites the shared client-token parameter. Only one account can po
 ### Verification
 
 - Run the workflow with `stage` environment, a test username, and verify the actor appears in WebFinger and the actor endpoint.
-- The bearer token should be printed in the workflow summary.
+- The workflow summary should show the SSM parameter path and retrieval command (the token itself is masked from logs).
 
 ---
 
@@ -531,8 +536,8 @@ function handler(event) {
     var request = event.request;
     if (request.uri === '/.well-known/webfinger') {
         return {
-            statusCode: 301,
-            statusDescription: 'Moved Permanently',
+            statusCode: 302,
+            statusDescription: 'Found',
             headers: {
                 'location': {
                     value: 'https://activity.example.com/.well-known/webfinger?' +
@@ -558,8 +563,8 @@ function handler(event) {
     var match = request.uri.match(/^\/@([a-zA-Z0-9_]+)$/);
     if (match) {
         return {
-            statusCode: 301,
-            statusDescription: 'Moved Permanently',
+            statusCode: 302,
+            statusDescription: 'Found',
             headers: {
                 'location': {
                     value: 'https://activity.example.com/profile/' + match[1]
@@ -582,8 +587,8 @@ Browser/Fediverse
     |
     +---> example.com (handle domain)
     |         |
-    |         +-- /.well-known/webfinger -> 301 -> activity.example.com
-    |         +-- /@user -> 301 -> activity.example.com/profile/user
+    |         +-- /.well-known/webfinger -> 302 -> activity.example.com
+    |         +-- /@user -> 302 -> activity.example.com/profile/user
     |
     +---> activity.example.com (server domain)
               |
@@ -742,7 +747,7 @@ If these return valid JSON, the server is running.
 3. Enter username, display name, and optional summary
 4. Choose the stage
 5. Run the workflow
-6. **Save the bearer token** from the workflow summary -- it will not be shown again
+6. **Retrieve the bearer token** using the AWS CLI command shown in the workflow summary
 
 ### Option B: CLI on a machine with Swift and AWS credentials
 
