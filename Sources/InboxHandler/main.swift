@@ -266,7 +266,23 @@ let runtime = LambdaRuntime {
                 context: context
             )
 
-        case "Accept", "Reject", "Block", "Move", "Add", "Remove", "Flag":
+        case "Accept":
+            return try await handleAcceptActivity(
+                json: json,
+                username: username,
+                actorUri: actorUri,
+                context: context
+            )
+
+        case "Reject":
+            return try await handleRejectActivity(
+                json: json,
+                username: username,
+                actorUri: actorUri,
+                context: context
+            )
+
+        case "Block", "Move", "Add", "Remove", "Flag":
             let objectUri = extractObjectUri(from: json) ?? "unknown"
             context.logger.info("Stub handler: \(activityType) from \(actorUri), object=\(objectUri)")
             return APIGatewayResponse(
@@ -981,6 +997,208 @@ func invalidateFollowersCache(username: String, context: LambdaContext) async {
     } catch {
         context.logger.error("Failed to invalidate followers cache: \(error)")
     }
+}
+
+// MARK: - Accept Handling
+
+func handleAcceptActivity(
+    json: [String: Any],
+    username: String,
+    actorUri: String,
+    context: LambdaContext
+) async throws -> APIGatewayResponse {
+    // Extract the inner object to determine what is being accepted
+    guard let objectDict = json["object"] as? [String: Any],
+          let objectType = objectDict["type"] as? String else {
+        // Object might be a bare URI (e.g., Accept of Follow) -- log and accept
+        let objectUri = extractObjectUri(from: json) ?? "unknown"
+        context.logger.info("Accept (non-inline object) from \(actorUri), object=\(objectUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    if objectType == "QuoteRequest" {
+        return try await handleAcceptQuoteRequest(
+            objectDict: objectDict,
+            username: username,
+            actorUri: actorUri,
+            context: context
+        )
+    }
+
+    // Other Accept types (e.g., Accept of Follow -- already handled by Follow flow)
+    context.logger.info("Accept of \(objectType) from \(actorUri)")
+    return APIGatewayResponse(
+        statusCode: .accepted,
+        headers: ["content-type": "application/json"],
+        body: #"{"status":"accepted"}"#
+    )
+}
+
+func handleAcceptQuoteRequest(
+    objectDict: [String: Any],
+    username: String,
+    actorUri: String,
+    context: LambdaContext
+) async throws -> APIGatewayResponse {
+    context.logger.info("Processing Accept of QuoteRequest from \(actorUri) for \(username)")
+
+    // The `instrument` in the QuoteRequest is our quoting status URI.
+    // Extract it to find which of our statuses to update.
+    let quotingStatusUri: String
+    if let instrumentStr = objectDict["instrument"] as? String {
+        quotingStatusUri = instrumentStr
+    } else if let instrumentDict = objectDict["instrument"] as? [String: Any],
+              let instrumentId = instrumentDict["id"] as? String {
+        quotingStatusUri = instrumentId
+    } else {
+        context.logger.warning("Accept QuoteRequest missing instrument from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    // Parse our status URI from the instrument
+    guard let parsed = parseStatusUri(quotingStatusUri) else {
+        context.logger.warning("Accept QuoteRequest instrument is not our status: \(quotingStatusUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    // Update the quote approval state to accepted
+    try await store.updateQuoteApprovalState(
+        username: parsed.username,
+        statusId: parsed.statusId,
+        state: "accepted"
+    )
+
+    // Re-federate: send an Update activity for our quoting Note to all followers.
+    // The Note now includes `quoteUri` (which was withheld while the quote was pending).
+    if let updatedStatus = try await store.getStatus(username: parsed.username, id: parsed.statusId) {
+        let noteJSON = buildNoteJSON(status: updatedStatus, serverDomain: serverDomain, username: parsed.username)
+        let updateId = "https://\(serverDomain)/users/\(parsed.username)#updates/\(store.generateULID())"
+        let updateActivity: [String: Any] = [
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": updateId,
+            "type": "Update",
+            "actor": "https://\(serverDomain)/users/\(parsed.username)",
+            "object": noteJSON,
+        ]
+        let updateData = try JSONSerialization.data(withJSONObject: updateActivity)
+        if let updateJSON = String(data: updateData, encoding: .utf8) {
+            // Fan out Update to all followers so they see the quoteUri
+            let followers = try await store.listAllFollowers(username: parsed.username)
+            for follower in followers {
+                let inbox = follower.sharedInboxUrl ?? follower.inboxUrl
+                let job = DeliveryJob(
+                    targetInbox: inbox,
+                    activityJSON: updateJSON,
+                    actorUsername: parsed.username
+                )
+                try await sqsClient.enqueue(job: job)
+            }
+            context.logger.info("Update activity for status \(parsed.statusId) enqueued to \(followers.count) followers")
+        }
+    }
+
+    context.logger.info("Quote approval accepted for status \(parsed.statusId) by \(actorUri)")
+
+    return APIGatewayResponse(
+        statusCode: .accepted,
+        headers: ["content-type": "application/json"],
+        body: #"{"status":"accepted"}"#
+    )
+}
+
+// MARK: - Reject Handling
+
+func handleRejectActivity(
+    json: [String: Any],
+    username: String,
+    actorUri: String,
+    context: LambdaContext
+) async throws -> APIGatewayResponse {
+    guard let objectDict = json["object"] as? [String: Any],
+          let objectType = objectDict["type"] as? String else {
+        let objectUri = extractObjectUri(from: json) ?? "unknown"
+        context.logger.info("Reject (non-inline object) from \(actorUri), object=\(objectUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    if objectType == "QuoteRequest" {
+        return try await handleRejectQuoteRequest(
+            objectDict: objectDict,
+            username: username,
+            actorUri: actorUri,
+            context: context
+        )
+    }
+
+    context.logger.info("Reject of \(objectType) from \(actorUri)")
+    return APIGatewayResponse(
+        statusCode: .accepted,
+        headers: ["content-type": "application/json"],
+        body: #"{"status":"accepted"}"#
+    )
+}
+
+func handleRejectQuoteRequest(
+    objectDict: [String: Any],
+    username: String,
+    actorUri: String,
+    context: LambdaContext
+) async throws -> APIGatewayResponse {
+    context.logger.info("Processing Reject of QuoteRequest from \(actorUri) for \(username)")
+
+    let quotingStatusUri: String
+    if let instrumentStr = objectDict["instrument"] as? String {
+        quotingStatusUri = instrumentStr
+    } else if let instrumentDict = objectDict["instrument"] as? [String: Any],
+              let instrumentId = instrumentDict["id"] as? String {
+        quotingStatusUri = instrumentId
+    } else {
+        context.logger.warning("Reject QuoteRequest missing instrument from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    guard let parsed = parseStatusUri(quotingStatusUri) else {
+        context.logger.warning("Reject QuoteRequest instrument is not our status: \(quotingStatusUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+
+    try await store.updateQuoteApprovalState(
+        username: parsed.username,
+        statusId: parsed.statusId,
+        state: "rejected"
+    )
+
+    context.logger.info("Quote approval rejected for status \(parsed.statusId) by \(actorUri)")
+
+    return APIGatewayResponse(
+        statusCode: .accepted,
+        headers: ["content-type": "application/json"],
+        body: #"{"status":"accepted"}"#
+    )
 }
 
 // MARK: - QuoteRequest Handling
