@@ -8,10 +8,10 @@ import FoundationNetworking
 @testable import APIClient
 
 @Test func webFingerKnownActor() async throws {
-    guard let baseURL = ProcessInfo.processInfo.environment["TEST_API_URL"] else {
-        print("Skipping: TEST_API_URL not set")
-        return
-    }
+    let baseURL = try #require(
+        ProcessInfo.processInfo.environment["TEST_API_URL"],
+        "TEST_API_URL environment variable is required for integration tests"
+    )
     let client = Client(
         serverURL: URL(string: baseURL)!,
         transport: URLSessionTransport()
@@ -31,10 +31,10 @@ import FoundationNetworking
 }
 
 @Test func webFingerUnknownActor() async throws {
-    guard let baseURL = ProcessInfo.processInfo.environment["TEST_API_URL"] else {
-        print("Skipping: TEST_API_URL not set")
-        return
-    }
+    let baseURL = try #require(
+        ProcessInfo.processInfo.environment["TEST_API_URL"],
+        "TEST_API_URL environment variable is required for integration tests"
+    )
     let client = Client(
         serverURL: URL(string: baseURL)!,
         transport: URLSessionTransport()
@@ -50,10 +50,10 @@ import FoundationNetworking
 }
 
 @Test func webFingerMissingResource() async throws {
-    guard let baseURL = ProcessInfo.processInfo.environment["TEST_API_URL"] else {
-        print("Skipping: TEST_API_URL not set")
-        return
-    }
+    let baseURL = try #require(
+        ProcessInfo.processInfo.environment["TEST_API_URL"],
+        "TEST_API_URL environment variable is required for integration tests"
+    )
     let url = URL(string: "\(baseURL)/.well-known/webfinger")! // no resource param
     let (_, response) = try await URLSession.shared.data(from: url)
     let httpResponse = response as! HTTPURLResponse
