@@ -47,7 +47,7 @@ Browser (operator)
       |     -> POST /api/internal/auth/challenge
       |     -> WebAuthn navigator.credentials.get()
       |     -> POST /api/internal/auth/verify
-      |     <- Set-Cookie: session=<JWT> (HttpOnly, Secure, SameSite=Strict)
+      |     <- Set-Cookie: session=<JWT> (HttpOnly, Secure, SameSite=Lax)
       |
       |  3. GET /compose  (session cookie required)
       |     -> POST /api/v2/media   (via fetch, session cookie)
@@ -104,9 +104,14 @@ Browser (operator)
    - Calls `POST /api/internal/passkeys/register-challenge` to get a WebAuthn creation challenge
    - Triggers `navigator.credentials.create()` with the challenge
    - Sends the attestation response to `POST /api/internal/passkeys/register`
+   - Server verifies:
+     - `clientDataJSON.type` equals `"webauthn.create"`
+     - `clientDataJSON.origin` equals `https://happitec.com` (from `SERVER_DOMAIN` env var)
+     - Challenge matches the stored challenge
    - Server extracts the public key and credential ID from the CBOR-encoded attestation
    - Stores the credential in DynamoDB (`PASSKEY#{credentialId}`)
-   - Deletes the one-time token
+   - Atomically deletes the one-time token using DynamoDB conditional delete (`attribute_exists(PK)`) to prevent race conditions with concurrent tabs
+   - Deletes the challenge (`PASSKEY_CHALLENGE#{challengeId}`) to prevent replay within the 5-minute TTL window
    - Shows a success message and a link to `/auth/login`
 5. Multiple passkeys can be registered per account (different devices).
 
@@ -146,6 +151,8 @@ Response:
 
 The challenge is stored in DynamoDB (`PASSKEY_CHALLENGE#{challengeId}`) with a 5-minute TTL.
 
+**RP ID configuration:** The `rp.id` value (`happitec.com`) is derived from the `SERVER_DOMAIN` environment variable, not hardcoded. This ensures the staging environment (`stage.activity.happitec.com`) uses the correct RP ID. The `origin` validation during verification also uses this environment variable (`https://{SERVER_DOMAIN}`).
+
 **`POST /api/internal/passkeys/register`**
 
 Request:
@@ -183,11 +190,14 @@ Response:
 5. JavaScript sends the assertion response to `POST /api/internal/auth/verify`.
 6. Server:
    - Looks up the credential ID in DynamoDB (`PASSKEY#{credentialId}`)
+   - Verifies `clientDataJSON.type` equals `"webauthn.get"`
+   - Verifies `clientDataJSON.origin` equals `https://happitec.com` (derived from `SERVER_DOMAIN` env var, not hardcoded)
    - Verifies the signature against the stored public key
-   - Verifies the challenge matches
-   - Updates `lastUsedAt` on the passkey record
+   - Verifies the challenge matches the stored challenge
+   - Deletes the challenge (`PASSKEY_CHALLENGE#{challengeId}`) after successful verification
+   - Updates `lastUsedAt` and `signCount` on the passkey record
    - Issues a JWT session token
-7. Response sets `Set-Cookie: session=<JWT>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400`.
+7. Response sets `Set-Cookie: session=<JWT>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=86400`.
 8. Browser redirects to `/compose`.
 
 ### Authentication Endpoints
@@ -258,25 +268,69 @@ The existing `authenticateBearer` function gains an overload or extended signatu
 ### New Function: `authenticateRequest`
 
 ```swift
+/// The method used for authentication, so callers can vary response format.
+public enum AuthMethod: Sendable {
+    case bearer   // API client -- errors should be 401 JSON
+    case session  // Browser session -- errors should be 302 redirect to /auth/login
+}
+
+/// Extended auth result that includes the method used.
+public struct RequestAuthResult: Sendable {
+    public let username: String
+    public let method: AuthMethod
+}
+
 public func authenticateRequest(
     authHeader: String,
     cookies: String?,
     ssmKeyPrefix: String,
     ssmClient: SSMClient
-) async throws -> BearerAuthResult
+) async throws -> RequestAuthResult
 ```
 
 Logic:
-1. If `authHeader` starts with `Bearer `, use the existing SSM token lookup (unchanged).
+1. If `authHeader` starts with `Bearer `, use the existing SSM token lookup (unchanged). Return `.bearer` method.
 2. Else if `cookies` contains a `session=` value, decode and verify the JWT:
-   - Fetch the signing key from SSM (`{ssmKeyPrefix}/session-signing-key`)
+   - Fetch the signing key from SSM (`{ssmKeyPrefix}/session-signing-key`), **cached in the Lambda execution context** (module-level variable initialized once, same pattern as `ssmClient`/`store` in PostHandler)
    - Verify HMAC-SHA256 signature
    - Check `exp` claim is in the future
    - Check `iss` matches expected domain
-   - Return `BearerAuthResult(username: jwt.sub)`
-3. Else throw `BearerAuthError.missingHeader`.
+   - Return `RequestAuthResult(username: jwt.sub, method: .session)`
+3. If a cookie IS present but the JWT is expired or invalid, throw `BearerAuthError.sessionExpired` (not `missingHeader`).
+4. If neither auth method is present, throw `BearerAuthError.missingHeader`.
+
+**Error response format depends on the auth method attempted:**
+- Bearer token errors (no token, invalid token): return 401 JSON `{"error": "..."}` -- same as today.
+- Session cookie errors (expired, invalid JWT): return 302 redirect to `/auth/login`. Callers check the `Accept` header as a secondary signal: if `Accept` contains `text/html`, prefer redirect; otherwise return JSON.
+- No auth at all: return 401 JSON for API callers, 302 for requests with `Accept: text/html`.
 
 The existing `authenticateBearer` function remains unchanged for backward compatibility. PostHandler and MediaUploadHandler switch to calling `authenticateRequest`, passing both the Authorization header and the Cookie header from the request.
+
+### SSM Signing Key Caching
+
+Every JWT verification requires the signing key from SSM. To avoid an SSM `GetParameter` call on every request, the signing key is cached in the Lambda execution context using a module-level variable:
+
+```swift
+/// Cached signing key -- initialized once per Lambda cold start.
+/// SSM calls are expensive relative to JWT verification; this avoids
+/// one SSM call per page load and per API call from the compose page.
+var cachedSigningKey: String?
+
+func getSigningKey(ssmKeyPrefix: String, ssmClient: SSMClient) async throws -> String {
+    if let key = cachedSigningKey { return key }
+    let output = try await ssmClient.getParameter(input: .init(
+        name: "\(ssmKeyPrefix)/session-signing-key",
+        withDecryption: true
+    ))
+    guard let key = output.parameter?.value else {
+        throw BearerAuthError.serverConfigError("Session signing key not configured")
+    }
+    cachedSigningKey = key
+    return key
+}
+```
+
+**Key rotation note:** Rotating the signing key in SSM invalidates all active sessions immediately (operators must re-authenticate). This is acceptable for a single-operator system. Cold-starting a new Lambda instance picks up the new key automatically; warm instances continue using the cached (old) key until they are recycled.
 
 ---
 
@@ -304,6 +358,10 @@ Server-rendered by ComposeHandler using Elementary + latex.css.
 4. On success, show confirmation with link to the new post.
 5. On error, show error message inline.
 
+**API Gateway payload limit:** The SAM `Api` (REST API) has a 6MB payload limit for request bodies. The existing `MediaUploadHandler` already operates within this constraint (binary media types are configured on `ClientApi`). The compose page should enforce a client-side file size check (reject files > 5.5MB before upload) and show a clear error message. The `InstanceHandler` already advertises `image_size_limit: 6291456` (6MB).
+
+**Character count:** The compose page should display a character count indicator. The existing `POST /api/v1/statuses` and `InstanceHandler` both reference a 5000-character limit (`max_characters: 5000`). Show remaining characters and disable the Post button when over the limit.
+
 **JavaScript requirements (vanilla, no framework):**
 - WebAuthn API calls (only on login/register pages, not compose)
 - File selection + drag-and-drop handling
@@ -316,7 +374,7 @@ Server-rendered by ComposeHandler using Elementary + latex.css.
 
 The compose page includes a CSRF token as a `<meta>` tag in the HTML head. JavaScript reads this token and includes it as an `X-CSRF-Token` header on fetch requests. The server validates the token on POST endpoints accessed via the session cookie.
 
-The CSRF token is derived from the session JWT using HMAC: `HMAC-SHA256(session_jwt, "csrf")`, truncated to 32 hex characters. This avoids storing CSRF tokens server-side while binding them to the session.
+The CSRF token is derived from the session JWT using HMAC: `HMAC-SHA256(key: signing_key, message: jwt_payload)`, truncated to 32 hex characters. The signing key (from SSM) is the HMAC key; the JWT payload (the `sub` + `iat` claims concatenated) is the message. This avoids storing CSRF tokens server-side while binding them to the session. The token does not change for the lifetime of the session, which is acceptable since `SameSite=Lax` provides the primary CSRF defense and the token is a defense-in-depth measure.
 
 ---
 
@@ -404,16 +462,16 @@ All new entities use the existing single-table design.
 | username | S | Actor username this token is for |
 | TTL | N | Unix timestamp, 15 minutes from creation |
 
-### GSI for Passkey-by-Username Lookup
+### GSI for Passkey-by-Username Lookup -- DEFERRED
 
-To list all passkeys for a username (needed during authentication when the credential ID is not yet known):
+During authentication, the browser sends the credential ID as part of the assertion response, so the server performs a direct `PASSKEY#{credentialId}` point read. No GSI is needed for the authentication flow.
+
+A GSI would only be needed for passkey management (listing all passkeys for a user, revoking specific passkeys). This is deferred until a passkey management UI is built. When needed:
 
 - **GSI name:** `username-passkey-index`
 - **Partition key:** `username`
 - **Sort key:** `PK` (filtered to `PASSKEY#` prefix)
 - **Projected attributes:** ALL
-
-Alternatively, store a `USER_PASSKEYS#{username}` / `META` entity that contains a list of credential IDs. This avoids a GSI but requires maintaining a secondary index manually. The GSI approach is cleaner if the table does not already have a suitable GSI.
 
 ---
 
@@ -575,11 +633,13 @@ The WebAuthn server-side verification requires:
 
 | Library | Status | Notes |
 |---------|--------|-------|
-| [swift-webauthn-server](https://github.com/nicklockwood/swift-webauthn) | Unknown maturity | Needs evaluation for Linux/Lambda compatibility |
+| [webauthn-swift](https://github.com/swift-server/webauthn-swift) | Swift Server Workgroup | Actively maintained; depends on swift-crypto (already in our tree). **Preferred option.** |
 | Roll our own with swift-crypto | Known-good dependency | swift-crypto already in `Package.swift`; need CBOR parsing |
 | [SwiftCBOR](https://github.com/unrelentingtech/SwiftCBOR) + swift-crypto | Two dependencies | SwiftCBOR for CBOR decoding, swift-crypto for signature verification |
 
-**Recommendation:** Start with swift-crypto (already a dependency) and a minimal CBOR decoder. The WebAuthn attestation and assertion formats are well-documented, and the CBOR structures involved are simple (maps, byte strings, integers). A purpose-built 200-line CBOR decoder is preferable to pulling in a full CBOR library for a narrow use case.
+**Recommendation:** Evaluate `swift-server/webauthn-swift` first. It is under the Swift Server Workgroup umbrella, actively maintained, targets server-side Swift on Linux, and depends on swift-crypto which is already in our dependency tree. If it compiles on Linux with Swift 6.3 and covers our use case (registration + authentication with `attestation: "none"`), adopt it and skip the hand-rolled CBOR decoder.
+
+**Fallback:** If `webauthn-swift` proves unsuitable (API mismatch, missing Linux support, excessive transitive dependencies), fall back to swift-crypto + a minimal CBOR decoder. This should be validated against real attestation objects from Safari (Touch ID) and Chrome before committing -- treat this as a hard gate per Open Question 1.
 
 ### Implementation Modules
 
@@ -601,7 +661,7 @@ The WebAuthn server-side verification requires:
 ### Passkey Registration
 
 - Registration is gated by a one-time token with a 15-minute TTL.
-- The token is deleted after successful registration (single use).
+- The token is consumed atomically during `POST /api/internal/passkeys/register` using a DynamoDB conditional delete (`conditionExpression: "attribute_exists(PK)"`). If two browser tabs race to complete registration with the same token, only one succeeds. The initial page load and `register-challenge` endpoint validate the token non-destructively (read-only check); consumption happens only on successful credential storage.
 - Only the CLI operator (who has AWS credentials) can generate tokens.
 - The registration page validates the token server-side before showing the WebAuthn prompt.
 
@@ -609,14 +669,14 @@ The WebAuthn server-side verification requires:
 
 - JWT stored as `HttpOnly` cookie (not accessible to JavaScript).
 - `Secure` flag ensures transmission only over HTTPS.
-- `SameSite=Strict` prevents the cookie from being sent in cross-origin requests.
+- `SameSite=Lax` prevents the cookie from being sent in cross-origin POST requests while still allowing it on top-level GET navigations (e.g., clicking a bookmark or email link to `/compose`). This avoids the usability issue where `SameSite=Strict` would effectively log out the user when navigating from an external link.
 - 24-hour expiry limits the window if a session is compromised.
 - No refresh tokens -- re-authentication requires the passkey.
 
 ### CSRF Protection
 
 - All state-changing requests from the compose page include an `X-CSRF-Token` header.
-- The token is derived from the session JWT (`HMAC-SHA256(jwt, "csrf")`), so it is bound to the session and cannot be forged without the signing key.
+- The token is derived deterministically: `HMAC-SHA256(key: signing_key, message: sub + iat)`, so it is bound to the session and cannot be forged without the signing key.
 - The server verifies the CSRF token on all POST requests that use cookie authentication.
 - Bearer token requests (from scripts/CLI) are exempt from CSRF checks since they do not use cookies.
 
@@ -624,7 +684,7 @@ The WebAuthn server-side verification requires:
 
 - API Gateway throttling on `/api/internal/*` endpoints (10 requests/second per IP).
 - Challenge endpoints are stateless-ish (stored in DynamoDB with TTL) so replaying old challenges does not work.
-- Failed authentication attempts are logged but not currently rate-limited beyond API Gateway throttling. Consider adding exponential backoff in a future iteration.
+- Failed authentication attempts are logged but not currently rate-limited beyond API Gateway throttling. Future hardening: add AWS WAF rate-based rules on `/api/internal/auth/*` endpoints (e.g., 5 failed attempts per minute per IP triggers a temporary block).
 
 ### Clone Detection
 
@@ -644,22 +704,85 @@ The WebAuthn server-side verification requires:
 
 ---
 
-## Testing
+## Testing Plan
 
-### Unit Tests
+### Step 0: OpenAPI Spec Updates (prerequisite for integration tests)
 
-- `JWTSession` -- sign and verify round-trip, expired token rejection, tampered token rejection
-- `CBORDecoder` -- decode known attestation objects, edge cases (empty maps, nested structures)
-- `WebAuthnRegistration` -- extract credential ID and public key from a known attestation object
-- `WebAuthnAuthentication` -- verify a known assertion signature, reject bad signatures, reject replayed challenges
-- CSRF token generation and verification
+Before writing integration tests, update `openapi.yaml` with the new endpoints so the generated `APIClient` can be used:
 
-### Integration Tests
+**New auth endpoints:**
+- `POST /api/internal/auth/challenge` -- `operationId: createAuthChallenge`
+- `POST /api/internal/auth/verify` -- `operationId: verifyAuth`
+- `POST /api/internal/passkeys/register-challenge` -- `operationId: createRegistrationChallenge`
+- `POST /api/internal/passkeys/register` -- `operationId: registerPasskey`
 
-- Register passkey -> login -> post flow (requires browser automation or manual testing)
-- Dual auth: verify that bearer token access and session cookie access both work on the same endpoint
-- Expired session: verify redirect to `/auth/login`
-- Invalid CSRF token: verify 403 response
+**New compose endpoint:**
+- `GET /compose` -- `operationId: getComposePage` (returns `text/html`)
+
+**New security scheme:**
+- `cookieAuth` -- cookie-based JWT session (in addition to existing `bearerAuth`)
+
+The generated `APIClient` target will be used for all integration tests, following the existing pattern in `Sources/APIClient/` and `Tests/IntegrationTests/`.
+
+### Unit Tests (`Tests/ActivityPubCoreTests/`)
+
+**JWT signing and verification:**
+- `JWTSessionTests.swift`:
+  - Sign and verify round-trip with known key and payload
+  - Reject expired tokens (`exp` in the past)
+  - Reject tampered tokens (modified payload, original signature)
+  - Reject tokens with wrong issuer
+  - Reject tokens signed with a different key
+
+**WebAuthn challenge generation:**
+- `WebAuthnChallengeTests.swift`:
+  - Challenge bytes are cryptographically random (no two calls produce the same value)
+  - Challenge ID is a valid UUID
+  - Registration challenge includes correct RP ID and user info
+  - Authentication challenge includes correct RP ID
+
+**CSRF token validation:**
+- `CSRFTokenTests.swift`:
+  - Token derivation is deterministic for the same session
+  - Token changes when session changes (different `sub` or `iat`)
+  - Verification accepts valid token
+  - Verification rejects tampered token
+  - Verification rejects token from a different session
+
+**WebAuthn verification (if hand-rolling):**
+- `CBORDecoderTests.swift` -- decode known attestation objects, edge cases
+- `WebAuthnRegistrationTests.swift` -- extract credential ID and public key from known attestation
+- `WebAuthnAuthenticationTests.swift` -- verify known assertion signature, reject bad signatures
+
+### Integration Tests (`Tests/IntegrationTests/`)
+
+Uses the generated `APIClient` and follows the existing `run-integration-tests.yml` workflow pattern (`TEST_API_URL` env var pointing at deployed stack).
+
+**Auth challenge flow:**
+- `AuthChallengeTests.swift`:
+  - `POST /api/internal/auth/challenge` returns valid challenge JSON with `challengeId`, `challenge`, `rpId`
+  - Challenge has correct `rpId` matching the deployed domain
+  - Two consecutive challenge requests return different challenges
+
+**Registration flow:**
+- `RegistrationTests.swift`:
+  - `POST /api/internal/passkeys/register-challenge` with valid token returns creation options
+  - `POST /api/internal/passkeys/register-challenge` with invalid/expired token returns 401
+  - `POST /api/internal/passkeys/register-challenge` with already-consumed token returns 401
+
+**Compose page:**
+- `ComposePageTests.swift`:
+  - `GET /compose` without session cookie returns 302 redirect to `/auth/login`
+  - `GET /compose` with expired JWT returns 302 redirect to `/auth/login`
+
+**Dual auth (cookie + bearer):**
+- `DualAuthTests.swift`:
+  - `POST /api/v1/statuses` with bearer token continues to work (existing behavior)
+  - `POST /api/v1/statuses` with valid session cookie + CSRF token works
+  - `POST /api/v1/statuses` with valid session cookie but missing CSRF token returns 403
+  - `POST /api/v1/statuses` with neither auth method returns 401
+
+**Note:** Full WebAuthn registration and authentication flows cannot be tested via HTTP integration tests because they require browser-side `navigator.credentials` API calls. These are covered by manual testing.
 
 ### Manual Testing Checklist
 
@@ -670,9 +793,12 @@ The WebAuthn server-side verification requires:
 - [ ] Compose and post with image + alt text
 - [ ] Compose and post with content warning
 - [ ] Verify visibility options work (public, unlisted, followers-only)
+- [ ] Verify character count indicator works (shows remaining, disables Post at limit)
+- [ ] Verify file size check rejects images > 5.5MB before upload
 - [ ] Verify post appears in profile and is federated
 - [ ] Verify session expires after 24 hours
 - [ ] Verify bearer token API still works from CLI
+- [ ] Verify navigating to `/compose` from an external bookmark works (SameSite=Lax test)
 
 ---
 
@@ -700,6 +826,6 @@ The WebAuthn server-side verification requires:
 
 4. **How does passkey registration work for existing seeded actors?** The CLI `register-passkey` command works for any actor that already exists in DynamoDB. It generates a one-time token keyed to that actor's username. The actor's existing bearer token continues to work; passkey auth is additive.
 
-5. **GSI vs. secondary entity for passkey-by-username lookup?** During authentication, the browser sends a credential ID, so we can do a direct `PASSKEY#{credentialId}` lookup. A GSI is only needed if we want to list all passkeys for a user (for a management UI). Defer the GSI and add it when we build passkey management.
+5. **GSI vs. secondary entity for passkey-by-username lookup?** **RESOLVED: Deferred.** During authentication, the browser sends a credential ID, so we do a direct `PASSKEY#{credentialId}` point read. No GSI is needed for Phase 6. The GSI will be added when we build passkey management (listing/revoking passkeys).
 
 6. **Should the `/api/internal/*` routes be on the ClientApi or the federation API Gateway?** They need to be on the same origin as the compose page (for cookie SameSite to work). Since `happitec.com` routes through the federation CloudFront, these routes should be on the federation API Gateway (ServerlessRestApi), not the ClientApi.
