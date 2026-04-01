@@ -30,13 +30,14 @@ permissions:
 
 jobs:
   provision:
-    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    # runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
-      - name: Clean workspace (self-hosted)
-        if: ${{ vars.RUNNER_LABELS_LINUX }}
-        run: |
-          sudo rm -rf .build/
-          sudo git clean -fdx -e .git || true
+      # - name: Clean workspace (self-hosted)
+      #   if: ${{ vars.RUNNER_LABELS_LINUX }}
+      #   run: |
+      #     sudo rm -rf .build/
+      #     sudo git clean -fdx -e .git || true
 
       - name: Checkout
         uses: actions/checkout@v6
