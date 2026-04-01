@@ -34,8 +34,8 @@ jobs:
     env:
       STAGE: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
     steps:
-      - name: Clean workspace (self-hosted)
-        if: ${{ vars.RUNNER_LABELS_LINUX }}
+      - name: Clean workspace (self-hosted, prod only)
+        if: ${{ vars.RUNNER_LABELS_LINUX && env.STAGE == 'prod' }}
         run: |
           sudo rm -rf .build/ || true
           sudo git clean -fdx -e .git || true
