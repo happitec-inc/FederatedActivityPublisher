@@ -18,7 +18,7 @@ on:
 jobs:
   deploy:
     # runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
-    runs-on: ubuntu-latest
+    runs-on: linux_large
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
