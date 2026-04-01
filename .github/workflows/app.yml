@@ -204,5 +204,6 @@ jobs:
           TEST_API_URL: ${{ needs.deploy.outputs.api_url }}
           TEST_CLIENT_API_URL: ${{ needs.deploy.outputs.client_api_url }}
           TEST_BEARER_TOKEN: ${{ steps.token.outputs.bearer }}
+          TEST_HANDLE_DOMAIN: ${{ needs.deploy.outputs.stage == 'prod' && vars.HANDLE_DOMAIN || format('{0}.{1}', needs.deploy.outputs.stage, vars.HANDLE_DOMAIN) }}
           LD_LIBRARY_PATH: /usr/local/lib/swift/linux
         run: swift test --filter IntegrationTests
