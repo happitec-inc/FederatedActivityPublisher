@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     # runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
-    runs-on: ubuntu-latest
+    runs-on: linux_large
     steps:
       # - name: Clean workspace (self-hosted)
       #   if: ${{ vars.RUNNER_LABELS_LINUX }}
