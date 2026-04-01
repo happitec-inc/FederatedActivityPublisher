@@ -8,6 +8,7 @@ import Foundation
 guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] else {
     fatalError("SERVER_DOMAIN environment variable is required")
 }
+let clientApiUrl = ProcessInfo.processInfo.environment["CLIENT_API_URL"] ?? ""
 let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "/activity/stage/keys/"
 let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw
 
@@ -140,12 +141,12 @@ struct ComposePage: HTMLDocument {
         article(.class("compose-container")) {
             header(.class("compose-header")) {
                 h1 { "Compose" }
-                span(.class("user-info")) {
-                    "Signed in as "
-                    strong { username }
-                    " "
-                    a(.href("/auth/login")) { "(sign out)" }
-                }
+            }
+            p(.class("user-info")) {
+                "Signed in as "
+                strong { username }
+                " "
+                a(.href("/auth/login")) { "(sign out)" }
             }
 
             HTMLRaw(#"<form id="compose-form" onsubmit="return false">"#)
@@ -201,6 +202,7 @@ struct ComposePage: HTMLDocument {
         HTMLRaw("""
         <script>
         (function() {
+            const CLIENT_API = '\(escapeJSON(clientApiUrl))';
             const csrf = document.querySelector('meta[name="csrf-token"]').content;
             const textarea = document.getElementById('status-text');
             const charCount = document.getElementById('char-count');
@@ -298,7 +300,7 @@ struct ComposePage: HTMLDocument {
                         const altText = document.getElementById('alt-text').value;
                         if (altText) formData.append('description', altText);
 
-                        const mediaResp = await fetch('/api/v2/media', {
+                        const mediaResp = await fetch(CLIENT_API + '/api/v2/media', {
                             method: 'POST',
                             headers: { 'X-CSRF-Token': csrf },
                             body: formData,
@@ -321,7 +323,7 @@ struct ComposePage: HTMLDocument {
                     if (mediaId) body.media_ids = [mediaId];
                     if (spoilerText) { body.spoiler_text = spoilerText; body.sensitive = true; }
 
-                    const postResp = await fetch('/api/v1/statuses', {
+                    const postResp = await fetch(CLIENT_API + '/api/v1/statuses', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
                         body: JSON.stringify(body),
