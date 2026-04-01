@@ -181,8 +181,21 @@ jobs:
           fi
           swift --version
 
+      - name: Get bearer token from SSM
+        id: token
+        run: |
+          TOKEN_VALUE=$(aws ssm get-parameter \
+            --name "/activity/${{ needs.deploy.outputs.stage }}/keys/client-token" \
+            --with-decryption --query "Parameter.Value" --output text --region us-east-1 2>/dev/null || echo "")
+          if [ -n "$TOKEN_VALUE" ]; then
+            # Format is "username:token" — extract just the token
+            BEARER=$(echo "$TOKEN_VALUE" | cut -d: -f2)
+            echo "bearer=$BEARER" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run integration tests
         env:
           TEST_API_URL: ${{ needs.deploy.outputs.api_url }}
+          TEST_BEARER_TOKEN: ${{ steps.token.outputs.bearer }}
           LD_LIBRARY_PATH: /usr/local/lib/swift/linux
         run: swift test --filter IntegrationTests
