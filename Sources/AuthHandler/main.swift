@@ -904,6 +904,7 @@ struct LoginPage: HTMLDocument {
 
         HTMLRaw("""
         <script>
+        const BASE = window.location.pathname.replace(/\\/auth\\/login.*/, '');
         document.getElementById('login-btn').addEventListener('click', async () => {
             const status = document.getElementById('status');
             const btn = document.getElementById('login-btn');
@@ -911,7 +912,7 @@ struct LoginPage: HTMLDocument {
             status.textContent = 'Starting authentication...';
             status.className = 'auth-status';
             try {
-                const challengeResp = await fetch('/api/internal/auth/challenge', { method: 'POST' });
+                const challengeResp = await fetch(BASE + '/api/internal/auth/challenge', { method: 'POST' });
                 if (!challengeResp.ok) throw new Error('Failed to get challenge');
                 const challengeData = await challengeResp.json();
 
@@ -926,7 +927,7 @@ struct LoginPage: HTMLDocument {
                     }
                 });
 
-                const verifyResp = await fetch('/api/internal/auth/verify', {
+                const verifyResp = await fetch(BASE + '/api/internal/auth/verify', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1010,6 +1011,8 @@ struct RegisterPage: HTMLDocument {
         HTMLRaw("""
         <script>
         const TOKEN = '\(escapeJSON(token))';
+        // Detect API base path (handles /Prod prefix on API Gateway direct access)
+        const BASE = window.location.pathname.replace(/\\/auth\\/register.*/, '');
         document.getElementById('register-btn').addEventListener('click', async () => {
             const status = document.getElementById('status');
             const btn = document.getElementById('register-btn');
@@ -1017,7 +1020,7 @@ struct RegisterPage: HTMLDocument {
             status.textContent = 'Starting registration...';
             status.className = 'auth-status';
             try {
-                const challengeResp = await fetch('/api/internal/passkeys/register-challenge', {
+                const challengeResp = await fetch(BASE + '/api/internal/passkeys/register-challenge', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ token: TOKEN })
@@ -1043,7 +1046,7 @@ struct RegisterPage: HTMLDocument {
                     }
                 });
 
-                const regResp = await fetch('/api/internal/passkeys/register', {
+                const regResp = await fetch(BASE + '/api/internal/passkeys/register', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
