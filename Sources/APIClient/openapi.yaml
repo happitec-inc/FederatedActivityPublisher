@@ -439,6 +439,111 @@ paths:
         "422":
           description: Unsupported media type
 
+  # ── Auth (passkey WebAuthn) ──────────────────────────
+
+  /api/internal/auth/challenge:
+    post:
+      operationId: createAuthChallenge
+      summary: Generate WebAuthn assertion challenge
+      tags: [auth]
+      description: |
+        Returns a random challenge for WebAuthn authentication.
+        The challenge is stored in DynamoDB with a 5-minute TTL.
+      responses:
+        "200":
+          description: Authentication challenge
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthChallenge"
+
+  /api/internal/auth/verify:
+    post:
+      operationId: verifyAuth
+      summary: Verify WebAuthn assertion and issue session
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthVerifyRequest"
+      responses:
+        "200":
+          description: Authentication successful (Set-Cookie header included)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthVerifyResponse"
+        "401":
+          description: Invalid credential or challenge
+
+  /api/internal/passkeys/register-challenge:
+    post:
+      operationId: createRegistrationChallenge
+      summary: Generate WebAuthn creation challenge
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+      responses:
+        "200":
+          description: Registration challenge (WebAuthn creation options)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistrationChallenge"
+        "401":
+          description: Invalid or expired registration token
+
+  /api/internal/passkeys/register:
+    post:
+      operationId: registerPasskey
+      summary: Store new passkey credential
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterPasskeyRequest"
+      responses:
+        "200":
+          description: Passkey registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        "401":
+          description: Invalid token, challenge, or credential
+
+  /compose:
+    get:
+      operationId: getComposePage
+      summary: Compose page (requires session)
+      tags: [web]
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Compose page HTML
+          content:
+            text/html:
+              schema:
+                type: string
+        "302":
+          description: Redirect to /auth/login (no valid session)
+
 components:
   securitySchemes:
     bearerAuth:
@@ -447,6 +552,11 @@ components:
       description: |
         Bearer token. MVP uses per-actor shared secret stored in
         SSM Parameter Store. OAuth2 planned for Phase 6.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session
+      description: JWT session token issued after passkey authentication
 
   parameters:
     username:
@@ -1250,3 +1360,107 @@ components:
               href:
                 type: string
                 format: uri
+
+    # ── Auth / Passkey entities ───────────────────────
+
+    AuthChallenge:
+      type: object
+      required: [challengeId, challenge, rpId, timeout, userVerification]
+      properties:
+        challengeId:
+          type: string
+        challenge:
+          type: string
+          description: Base64url-encoded random bytes
+        rpId:
+          type: string
+        timeout:
+          type: integer
+        userVerification:
+          type: string
+
+    AuthVerifyRequest:
+      type: object
+      required: [challengeId, credential]
+      properties:
+        challengeId:
+          type: string
+        credential:
+          $ref: "#/components/schemas/WebAuthnCredential"
+
+    AuthVerifyResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        username:
+          type: string
+
+    RegistrationChallenge:
+      type: object
+      required: [challenge, rp, user, pubKeyCredParams, timeout, attestation, authenticatorSelection]
+      properties:
+        challenge:
+          type: string
+        rp:
+          type: object
+          properties:
+            name:
+              type: string
+            id:
+              type: string
+        user:
+          type: object
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+            displayName:
+              type: string
+        pubKeyCredParams:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+              alg:
+                type: integer
+        timeout:
+          type: integer
+        attestation:
+          type: string
+        authenticatorSelection:
+          type: object
+          properties:
+            residentKey:
+              type: string
+            userVerification:
+              type: string
+
+    RegisterPasskeyRequest:
+      type: object
+      required: [token, challengeId, credential]
+      properties:
+        token:
+          type: string
+        challengeId:
+          type: string
+        credential:
+          $ref: "#/components/schemas/WebAuthnCredential"
+
+    WebAuthnCredential:
+      type: object
+      required: [id, rawId, type, response]
+      properties:
+        id:
+          type: string
+        rawId:
+          type: string
+        type:
+          type: string
+        response:
+          type: object
+          description: AttestationResponse or AssertionResponse depending on context
+          additionalProperties: true
