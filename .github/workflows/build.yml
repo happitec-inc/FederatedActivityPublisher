@@ -1,0 +1,103 @@
+name: Build App
+run-name: "Build App (${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }})"
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Deployment stage"
+        required: true
+        type: choice
+        options:
+          - stage
+          - prod
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: >-
+      github.event_name != 'release' ||
+      (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    env:
+      STAGE: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
+    steps:
+      - name: Clean workspace (self-hosted, prod only)
+        if: ${{ vars.RUNNER_LABELS_LINUX && env.STAGE == 'prod' }}
+        run: |
+          sudo rm -rf .build/ || true
+          sudo git clean -fdx -e .git || true
+          docker container prune -f || true
+          docker builder prune -af --filter "until=24h" || true
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - name: Install Swift
+        run: |
+          if swift --version 2>/dev/null | grep -q "6.3"; then
+            echo "Swift 6.3 already installed"
+          else
+            ARCH=$(uname -m)
+            if [ "$ARCH" = "aarch64" ]; then
+              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404-aarch64/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04-aarch64.tar.gz"
+            else
+              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04.tar.gz"
+            fi
+            curl -fsSL "$SWIFT_URL" | sudo tar xz --strip-components=2 -C /usr/local
+          fi
+          swift --version
+
+      - name: Install zip
+        run: which zip || sudo apt-get install -y zip
+
+      - name: Build AL2023 Swift Docker image (cached)
+        run: |
+          HASH=$(sha256sum docker/Dockerfile.al2023-swift | cut -c1-12)
+          if docker image inspect "swift-al2023:cache-$HASH" >/dev/null 2>&1; then
+            echo "Using cached image (Dockerfile hash: $HASH)"
+            docker tag "swift-al2023:cache-$HASH" swift-al2023:6.3
+          else
+            echo "Building image (Dockerfile hash: $HASH)"
+            docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
+            docker tag swift-al2023:6.3 "swift-al2023:cache-$HASH"
+          fi
+
+      - name: Build Lambda zip
+        run: swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3 --disable-docker-image-update
+
+      - name: Package with SAM
+        run: |
+          pip3 install --break-system-packages aws-sam-cli 2>/dev/null || pip3 install aws-sam-cli
+          export PATH="$HOME/.local/bin:$PATH"
+          sam package \
+            --template-file activity-app/template.yaml \
+            --output-template-file packaged.yaml \
+            --resolve-s3 \
+            --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Upload packaged template
+        uses: actions/upload-artifact@v4
+        with:
+          name: sam-package-${{ env.STAGE }}
+          path: packaged.yaml
+          retention-days: 7
+
+      - name: Upload frontend assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-${{ env.STAGE }}
+          path: frontend/
+          retention-days: 7
