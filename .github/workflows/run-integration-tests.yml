@@ -36,15 +36,28 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
-      - name: Get API URL
+      - name: Get API URLs and bearer token
         id: api
         run: |
           API_URL=$(aws cloudformation describe-stacks \
             --stack-name "activity-app-${{ inputs.environment }}" \
             --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
             --output text --region us-east-1)
+          CLIENT_API_URL=$(aws cloudformation describe-stacks \
+            --stack-name "activity-app-${{ inputs.environment }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ClientApiUrl'].OutputValue" \
+            --output text --region us-east-1)
           echo "url=$API_URL" >> "$GITHUB_OUTPUT"
-          echo "Testing against: $API_URL"
+          echo "client_url=$CLIENT_API_URL" >> "$GITHUB_OUTPUT"
+          echo "Testing against: $API_URL (federation) + $CLIENT_API_URL (client)"
+
+          TOKEN_VALUE=$(aws ssm get-parameter \
+            --name "/activity/${{ inputs.environment }}/keys/client-token" \
+            --with-decryption --query "Parameter.Value" --output text --region us-east-1 2>/dev/null || echo "")
+          if [ -n "$TOKEN_VALUE" ]; then
+            BEARER=$(echo "$TOKEN_VALUE" | cut -d: -f2)
+            echo "bearer=$BEARER" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install Swift
         run: |
@@ -64,5 +77,7 @@ jobs:
       - name: Run integration tests
         env:
           TEST_API_URL: ${{ steps.api.outputs.url }}
+          TEST_CLIENT_API_URL: ${{ steps.api.outputs.client_url }}
+          TEST_BEARER_TOKEN: ${{ steps.api.outputs.bearer }}
           LD_LIBRARY_PATH: /usr/local/lib/swift/linux
         run: swift test --filter IntegrationTests
