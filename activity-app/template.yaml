@@ -747,15 +747,18 @@ Resources:
             CustomOriginConfig:
               HTTPSPort: 443
               OriginProtocolPolicy: https-only
-          - !If
-            - HasClientApiDomain
-            - Id: ClientApiGateway
-              DomainName: !Ref ClientApiDomain
-              OriginPath: !Sub "/${Stage}"
-              CustomOriginConfig:
-                HTTPSPort: 443
-                OriginProtocolPolicy: https-only
-            - !Ref AWS::NoValue
+          - Id: ClientApiGateway
+            DomainName: !If
+              - HasClientApiDomain
+              - !Ref ClientApiDomain
+              - !Sub "${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com"
+            OriginPath: !If
+              - HasClientApiDomain
+              - !Sub "/${Stage}"
+              - /Prod
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
           - Id: S3Media
             DomainName: !Sub
               - "${BucketName}.s3.${AWS::Region}.amazonaws.com"
@@ -792,36 +795,27 @@ Resources:
             OriginRequestPolicyId: !Ref SessionOriginRequestPolicy
             AllowedMethods: [GET, HEAD]
             Compress: true
-          - !If
-            - HasClientApiDomain
-            - PathPattern: /api/v1/statuses
-              TargetOriginId: ClientApiGateway
-              ViewerProtocolPolicy: redirect-to-https
-              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
-              OriginRequestPolicyId: !Ref ClientApiOriginRequestPolicy
-              AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
-              Compress: true
-            - !Ref AWS::NoValue
-          - !If
-            - HasClientApiDomain
-            - PathPattern: /api/v2/media
-              TargetOriginId: ClientApiGateway
-              ViewerProtocolPolicy: redirect-to-https
-              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
-              OriginRequestPolicyId: !Ref ClientApiOriginRequestPolicy
-              AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
-              Compress: true
-            - !Ref AWS::NoValue
-          - !If
-            - HasClientApiDomain
-            - PathPattern: /api/v1/accounts/update_credentials
-              TargetOriginId: ClientApiGateway
-              ViewerProtocolPolicy: redirect-to-https
-              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
-              OriginRequestPolicyId: !Ref ClientApiOriginRequestPolicy
-              AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
-              Compress: true
-            - !Ref AWS::NoValue
+          - PathPattern: /api/v1/statuses
+            TargetOriginId: ClientApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref ClientApiOriginRequestPolicy
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            Compress: true
+          - PathPattern: /api/v2/media
+            TargetOriginId: ClientApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref ClientApiOriginRequestPolicy
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            Compress: true
+          - PathPattern: /api/v1/accounts/update_credentials
+            TargetOriginId: ClientApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref ClientApiOriginRequestPolicy
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            Compress: true
           - PathPattern: /api/v1/instance
             TargetOriginId: ApiGateway
             ViewerProtocolPolicy: redirect-to-https
