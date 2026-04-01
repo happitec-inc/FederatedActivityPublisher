@@ -24,7 +24,7 @@ func getSigningKey() async throws -> String {
         name: "\(ssmKeyPrefix)/session-signing-key",
         withDecryption: true
     ))
-    guard let key = output.parameter?.value else {
+    guard let key = output.parameter?.value, !key.isEmpty else {
         fatalError("Session signing key not configured at \(ssmKeyPrefix)/session-signing-key")
     }
     cachedSigningKey = key
@@ -285,7 +285,7 @@ func handleRegisterChallenge(event: APIGatewayRequest) async throws -> APIGatewa
     let userId = base64urlEncode(Data(regToken.username.utf8))
 
     let json2 = """
-    {"challengeId":"\(challengeId)","challenge":"\(challenge)","rp":{"name":"Happitec","id":"\(serverDomain)"},"user":{"id":"\(userId)","name":"\(escapeJSON(regToken.username))","displayName":"\(escapeJSON(regToken.username))"},"pubKeyCredParams":[{"type":"public-key","alg":-7},{"type":"public-key","alg":-257}],"timeout":300000,"attestation":"none","authenticatorSelection":{"residentKey":"preferred","userVerification":"preferred"}}
+    {"challengeId":"\(challengeId)","challenge":"\(challenge)","rp":{"name":"Happitec","id":"\(serverDomain)"},"user":{"id":"\(userId)","name":"\(escapeJSON(regToken.username))","displayName":"\(escapeJSON(regToken.username))"},"pubKeyCredParams":[{"type":"public-key","alg":-7}],"timeout":300000,"attestation":"none","authenticatorSelection":{"residentKey":"preferred","userVerification":"preferred"}}
     """
 
     return APIGatewayResponse(
@@ -1066,7 +1066,12 @@ struct RegisterPage: HTMLDocument {
                     throw new Error(err.error || 'Registration failed');
                 }
 
-                status.innerHTML = 'Passkey registered! <a href="/auth/login">Sign in now</a>';
+                status.textContent = '';
+                status.appendChild(document.createTextNode('Passkey registered! '));
+                const link = document.createElement('a');
+                link.href = '/auth/login';
+                link.textContent = 'Sign in now';
+                status.appendChild(link);
                 status.className = 'auth-status success';
             } catch (e) {
                 status.textContent = e.message || 'Registration failed';

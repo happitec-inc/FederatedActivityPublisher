@@ -25,6 +25,22 @@ let sqsClient = try await SQSDeliveryClient()
 let ssmClient = try await SSMClient()
 let cfClient = try await CloudFrontClient()
 
+/// Cached signing key -- initialized once per Lambda cold start.
+nonisolated(unsafe) var cachedSigningKey: String?
+
+func getSigningKey() async throws -> String {
+    if let key = cachedSigningKey { return key }
+    let output = try await ssmClient.getParameter(input: .init(
+        name: "\(ssmKeyPrefix)/session-signing-key",
+        withDecryption: true
+    ))
+    guard let key = output.parameter?.value, !key.isEmpty else {
+        fatalError("Session signing key not configured at \(ssmKeyPrefix)/session-signing-key")
+    }
+    cachedSigningKey = key
+    return key
+}
+
 let runtime = LambdaRuntime {
     (event: APIGatewayRequest, context: LambdaContext) -> APIGatewayResponse in
 
@@ -33,17 +49,8 @@ let runtime = LambdaRuntime {
         let authHeader = event.headers["authorization"] ?? event.headers["Authorization"] ?? ""
         let cookies = event.headers["cookie"] ?? event.headers["Cookie"]
 
-        // Lazy-load signing key for session auth
-        let signingKey: String
-        do {
-            let signingKeyOutput = try await ssmClient.getParameter(input: .init(
-                name: "\(ssmKeyPrefix)/session-signing-key",
-                withDecryption: true
-            ))
-            signingKey = signingKeyOutput.parameter?.value ?? ""
-        } catch {
-            signingKey = ""  // Session auth unavailable, bearer-only
-        }
+        // Use cached signing key for session auth
+        let signingKey = try await getSigningKey()
 
         let authResult: RequestAuthResult
         do {
@@ -108,16 +115,30 @@ let runtime = LambdaRuntime {
                     body: #"{"error":"Missing CSRF token"}"#
                 )
             }
-            // We need the JWT claims to verify CSRF
-            if let sessionJWT = cookies.flatMap({ extractCookie(name: "session", from: $0) }),
-               let claims = try? JWTSession.verify(jwt: sessionJWT, key: signingKey, expectedIssuer: serverDomain) {
-                guard JWTSession.verifyCSRF(token: csrfHeader, signingKey: signingKey, sub: claims.sub, iat: claims.iat) else {
-                    return APIGatewayResponse(
-                        statusCode: .forbidden,
-                        headers: ["content-type": "application/json"],
-                        body: #"{"error":"Invalid CSRF token"}"#
-                    )
-                }
+            // CSRF verification MUST succeed for session-based auth
+            guard let sessionJWT = cookies.flatMap({ extractCookie(name: "session", from: $0) }) else {
+                return APIGatewayResponse(
+                    statusCode: .forbidden,
+                    headers: ["content-type": "application/json"],
+                    body: #"{"error":"Missing session cookie for CSRF validation"}"#
+                )
+            }
+            let claims: JWTSession.Claims
+            do {
+                claims = try JWTSession.verify(jwt: sessionJWT, key: signingKey, expectedIssuer: serverDomain)
+            } catch {
+                return APIGatewayResponse(
+                    statusCode: .forbidden,
+                    headers: ["content-type": "application/json"],
+                    body: #"{"error":"Invalid session for CSRF validation"}"#
+                )
+            }
+            guard JWTSession.verifyCSRF(token: csrfHeader, signingKey: signingKey, sub: claims.sub, iat: claims.iat) else {
+                return APIGatewayResponse(
+                    statusCode: .forbidden,
+                    headers: ["content-type": "application/json"],
+                    body: #"{"error":"Invalid CSRF token"}"#
+                )
             }
         }
 

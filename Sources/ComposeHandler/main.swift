@@ -22,8 +22,8 @@ func getSigningKey() async throws -> String {
         name: "\(ssmKeyPrefix)/session-signing-key",
         withDecryption: true
     ))
-    guard let key = output.parameter?.value else {
-        fatalError("Session signing key not configured")
+    guard let key = output.parameter?.value, !key.isEmpty else {
+        fatalError("Session signing key not configured at \(ssmKeyPrefix)/session-signing-key")
     }
     cachedSigningKey = key
     return key
@@ -251,15 +251,27 @@ struct ComposePage: HTMLDocument {
                 }
                 selectedFile = file;
                 const url = URL.createObjectURL(file);
-                previewContainer.innerHTML = '<div class="image-preview-container"><img src="' + url + '" class="image-preview"><button class="remove-image" type="button">&times;</button></div>';
-                previewContainer.querySelector('.remove-image').addEventListener('click', removeImage);
+                previewContainer.textContent = '';
+                const wrapper = document.createElement('div');
+                wrapper.className = 'image-preview-container';
+                const img = document.createElement('img');
+                img.src = url;
+                img.className = 'image-preview';
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'remove-image';
+                removeBtn.type = 'button';
+                removeBtn.textContent = '\u00d7';
+                removeBtn.addEventListener('click', removeImage);
+                wrapper.appendChild(img);
+                wrapper.appendChild(removeBtn);
+                previewContainer.appendChild(wrapper);
                 altTextContainer.style.display = 'block';
                 fileDrop.style.display = 'none';
             }
 
             function removeImage() {
                 selectedFile = null;
-                previewContainer.innerHTML = '';
+                previewContainer.textContent = '';
                 altTextContainer.style.display = 'none';
                 fileDrop.style.display = 'block';
                 fileInput.value = '';
@@ -322,7 +334,13 @@ struct ComposePage: HTMLDocument {
                     }
 
                     const postData = await postResp.json();
-                    statusMsg.innerHTML = 'Posted! <a href="' + postData.url + '">View post</a>';
+                    statusMsg.textContent = '';
+                    const postedText = document.createTextNode('Posted! ');
+                    const postedLink = document.createElement('a');
+                    postedLink.href = postData.url;
+                    postedLink.textContent = 'View post';
+                    statusMsg.appendChild(postedText);
+                    statusMsg.appendChild(postedLink);
                     statusMsg.className = 'status-msg success';
                     textarea.value = '';
                     charCount.textContent = '0 / 5000';
