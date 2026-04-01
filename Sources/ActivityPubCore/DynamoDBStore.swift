@@ -860,6 +860,167 @@ public struct DynamoDBStore: Sendable {
         )
     }
 
+    // MARK: - Passkey Storage
+
+    /// Store a passkey credential after successful WebAuthn registration.
+    public func storePasskey(
+        credentialId: String,
+        username: String,
+        publicKey: String,
+        publicKeyAlg: Int,
+        signCount: Int
+    ) async throws {
+        let now = iso8601Formatter.string(from: Date())
+        let item: [String: DynamoDBClientTypes.AttributeValue] = [
+            "PK": .s("PASSKEY#\(credentialId)"),
+            "SK": .s("META"),
+            "username": .s(username),
+            "publicKey": .s(publicKey),
+            "publicKeyAlg": .n(String(publicKeyAlg)),
+            "signCount": .n(String(signCount)),
+            "createdAt": .s(now),
+            "lastUsedAt": .s(now),
+        ]
+        let input = PutItemInput(
+            conditionExpression: "attribute_not_exists(PK)",
+            item: item,
+            tableName: tableName
+        )
+        _ = try await client.putItem(input: input)
+    }
+
+    /// Fetch a passkey credential by credential ID. Returns nil if not found.
+    public func getPasskey(credentialId: String) async throws -> PasskeyCredential? {
+        let input = GetItemInput(
+            key: [
+                "PK": .s("PASSKEY#\(credentialId)"),
+                "SK": .s("META"),
+            ],
+            tableName: tableName
+        )
+        let output = try await client.getItem(input: input)
+        guard let item = output.item else { return nil }
+        return PasskeyCredential.fromDynamoDB(item)
+    }
+
+    /// Update sign count and lastUsedAt after successful authentication.
+    public func updatePasskeySignCount(credentialId: String, signCount: Int) async throws {
+        let now = iso8601Formatter.string(from: Date())
+        let input = UpdateItemInput(
+            expressionAttributeNames: ["#sc": "signCount", "#lu": "lastUsedAt"],
+            expressionAttributeValues: [":sc": .n(String(signCount)), ":lu": .s(now)],
+            key: [
+                "PK": .s("PASSKEY#\(credentialId)"),
+                "SK": .s("META"),
+            ],
+            tableName: tableName,
+            updateExpression: "SET #sc = :sc, #lu = :lu"
+        )
+        _ = try await client.updateItem(input: input)
+    }
+
+    // MARK: - WebAuthn Challenges
+
+    /// Store a WebAuthn challenge with a 5-minute TTL.
+    public func storeChallenge(
+        challengeId: String,
+        challenge: String,
+        type: String,
+        username: String?
+    ) async throws {
+        let ttl = Int(Date().timeIntervalSince1970) + 300  // 5 minutes
+        var item: [String: DynamoDBClientTypes.AttributeValue] = [
+            "PK": .s("PASSKEY_CHALLENGE#\(challengeId)"),
+            "SK": .s("META"),
+            "challenge": .s(challenge),
+            "type": .s(type),
+            "TTL": .n(String(ttl)),
+        ]
+        if let username {
+            item["username"] = .s(username)
+        }
+        let input = PutItemInput(item: item, tableName: tableName)
+        _ = try await client.putItem(input: input)
+    }
+
+    /// Fetch and delete a challenge atomically (prevents replay).
+    public func consumeChallenge(challengeId: String) async throws -> ChallengeRecord? {
+        let input = DeleteItemInput(
+            conditionExpression: "attribute_exists(PK)",
+            key: [
+                "PK": .s("PASSKEY_CHALLENGE#\(challengeId)"),
+                "SK": .s("META"),
+            ],
+            returnValues: .allOld,
+            tableName: tableName
+        )
+        do {
+            let output = try await client.deleteItem(input: input)
+            guard let item = output.attributes else { return nil }
+            return ChallengeRecord.fromDynamoDB(item)
+        } catch is ConditionalCheckFailedException {
+            return nil
+        }
+    }
+
+    // MARK: - Registration Tokens
+
+    /// Store a one-time registration token with 15-minute TTL.
+    public func storeRegistrationToken(token: String, username: String) async throws {
+        let ttl = Int(Date().timeIntervalSince1970) + 900  // 15 minutes
+        let item: [String: DynamoDBClientTypes.AttributeValue] = [
+            "PK": .s("REGISTRATION_TOKEN#\(token)"),
+            "SK": .s("META"),
+            "username": .s(username),
+            "TTL": .n(String(ttl)),
+        ]
+        let input = PutItemInput(item: item, tableName: tableName)
+        _ = try await client.putItem(input: input)
+    }
+
+    /// Validate a registration token (read-only, does not consume it).
+    public func getRegistrationToken(token: String) async throws -> RegistrationToken? {
+        let input = GetItemInput(
+            key: [
+                "PK": .s("REGISTRATION_TOKEN#\(token)"),
+                "SK": .s("META"),
+            ],
+            tableName: tableName
+        )
+        let output = try await client.getItem(input: input)
+        guard let item = output.item else { return nil }
+
+        // Check TTL manually (DynamoDB TTL deletion is eventually consistent)
+        if case .n(let ttlStr) = item["TTL"], let ttl = Int(ttlStr) {
+            if ttl < Int(Date().timeIntervalSince1970) { return nil }
+        }
+
+        guard case .s(let username) = item["username"] else { return nil }
+        return RegistrationToken(token: token, username: username)
+    }
+
+    /// Atomically consume (delete) a registration token. Returns the token if it existed.
+    /// Uses conditional delete to prevent race conditions with concurrent tabs.
+    public func consumeRegistrationToken(token: String) async throws -> RegistrationToken? {
+        let input = DeleteItemInput(
+            conditionExpression: "attribute_exists(PK)",
+            key: [
+                "PK": .s("REGISTRATION_TOKEN#\(token)"),
+                "SK": .s("META"),
+            ],
+            returnValues: .allOld,
+            tableName: tableName
+        )
+        do {
+            let output = try await client.deleteItem(input: input)
+            guard let item = output.attributes,
+                  case .s(let username) = item["username"] else { return nil }
+            return RegistrationToken(token: token, username: username)
+        } catch is ConditionalCheckFailedException {
+            return nil
+        }
+    }
+
     // MARK: - ULID Generation
 
     /// Generate a ULID-like identifier (timestamp + random).
