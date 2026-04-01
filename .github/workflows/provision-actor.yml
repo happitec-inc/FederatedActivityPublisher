@@ -51,6 +51,11 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
+      - name: Install Swift dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils libc6-dev libcurl4-openssl-dev libxml2-dev
+
       - name: Install Swift
         run: |
           if swift --version 2>/dev/null | grep -q "6.3"; then
