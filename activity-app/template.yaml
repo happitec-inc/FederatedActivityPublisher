@@ -43,6 +43,13 @@ Parameters:
       workflow parameter (not !Ref) to avoid circular dependency with the
       implicit ServerlessRestApi used by InboxFunction.
 
+  ClientApiUrlParam:
+    Type: String
+    Default: ""
+    Description: >-
+      Client API URL, passed as a workflow parameter (not !Sub with !Ref ClientApi)
+      to avoid circular dependency between ComposeFunction (federation API) and ClientApi.
+
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
 
@@ -513,7 +520,7 @@ Resources:
       Timeout: 30
       Environment:
         Variables:
-          CLIENT_API_URL: !Sub "https://${ClientApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+          CLIENT_API_URL: !Ref ClientApiUrlParam
       Policies:
         - SSMParameterReadPolicy:
             ParameterName: !Sub "activity/${Stage}/*"

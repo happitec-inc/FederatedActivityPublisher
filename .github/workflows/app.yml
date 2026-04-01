@@ -107,7 +107,8 @@ jobs:
               ServerDomain=${{ vars.SERVER_DOMAIN }} \
               HandleDomain=${{ vars.HANDLE_DOMAIN }} \
               ProxyDistributionId=${{ vars.PROXY_DISTRIBUTION_ID }} \
-              ActivityDistributionId=${{ vars.ACTIVITY_DISTRIBUTION_ID }}
+              ActivityDistributionId=${{ vars.ACTIVITY_DISTRIBUTION_ID }} \
+              ClientApiUrlParam=${{ vars.CLIENT_API_URL }}
 
       - name: Upload frontend assets
         run: |
