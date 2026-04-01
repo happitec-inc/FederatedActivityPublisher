@@ -96,7 +96,13 @@ Resources:
       Auth:
         DefaultAuthorizer: NONE
       Cors:
-        AllowOrigin: "'*'"
+        AllowOrigin: !If
+          - IsProd
+          - !Sub "'https://${ServerDomain}'"
+          - !Sub
+            - "'https://${Stage}.${Domain}'"
+            - Domain: !ImportValue
+                Fn::Sub: "${BootstrapStackName}-DomainName"
         AllowHeaders: "'Content-Type,Authorization,X-CSRF-Token'"
         AllowMethods: "'GET,POST,PATCH,OPTIONS'"
       BinaryMediaTypes:
