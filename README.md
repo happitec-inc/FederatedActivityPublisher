@@ -112,6 +112,9 @@ These must be set for deployment workflows to succeed:
 | `RUNNER_LABELS_LINUX` | app, bootstrap, environment | `"ubuntu-latest"` | JSON array of runner labels, e.g. `["self-hosted", "linux"]` |
 | `RUNNER_LABELS_MACOS` | deploy-docc | `"macos-26"` | JSON array of runner labels for macOS jobs |
 | `PROXY_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for cross-distribution cache invalidation; leave empty if not using a parent domain proxy |
+| `ACTIVITY_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for activity subdomain; passed as parameter to avoid circular dependency |
+| `CLIENT_API_DOMAIN_STAGE` | app | _(empty)_ | Execute-api domain for the stage Client API Gateway (e.g. `abc123.execute-api.us-east-1.amazonaws.com`). Enables same-origin routing through CloudFront. |
+| `CLIENT_API_DOMAIN_PROD` | app | _(empty)_ | Execute-api domain for the prod Client API Gateway. Same as stage but for the production stack. |
 | `ENABLE_DOCC_DEPLOY` | deploy-docc | _(unset)_ | Set to `true` to enable private-repo DocC features (OG images, Mermaid diagrams) |
 
 ### SAM Parameter Overrides
