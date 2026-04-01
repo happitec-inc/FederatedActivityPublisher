@@ -446,6 +446,74 @@ Resources:
               Fn::Sub: "${EnvironmentStackName}-QueueArn"
             BatchSize: 1
 
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-auth-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/AuthHandler/AuthHandler.zip
+      Timeout: 30
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+      Events:
+        LoginPage:
+          Type: Api
+          Properties:
+            Path: /auth/login
+            Method: GET
+        RegisterPage:
+          Type: Api
+          Properties:
+            Path: /auth/register
+            Method: GET
+        AuthChallenge:
+          Type: Api
+          Properties:
+            Path: /api/internal/auth/challenge
+            Method: POST
+        AuthVerify:
+          Type: Api
+          Properties:
+            Path: /api/internal/auth/verify
+            Method: POST
+        RegisterChallenge:
+          Type: Api
+          Properties:
+            Path: /api/internal/passkeys/register-challenge
+            Method: POST
+        RegisterPasskey:
+          Type: Api
+          Properties:
+            Path: /api/internal/passkeys/register
+            Method: POST
+
+  ComposeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-compose-${Stage}"
+      CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/ComposeHandler/ComposeHandler.zip
+      Timeout: 30
+      Policies:
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+      Events:
+        ComposePage:
+          Type: Api
+          Properties:
+            Path: /compose
+            Method: GET
+
   # --- CloudFront Cache Policies ---
 
   WebFingerCachePolicy:
@@ -560,6 +628,22 @@ Resources:
         QueryStringsConfig:
           QueryStringBehavior: none
 
+  SessionOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub "activity-session-origin-${Stage}"
+        CookiesConfig:
+          CookieBehavior: whitelist
+          Cookies:
+            - session
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers:
+            - Content-Type
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
   # --- CloudFront OAC for S3 Media ---
 
   CloudFrontOAC:
@@ -637,6 +721,27 @@ Resources:
           OriginRequestPolicyId: !Ref InboxOriginRequestPolicy
           AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
         CacheBehaviors:
+          - PathPattern: /auth/*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref SessionOriginRequestPolicy
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            Compress: true
+          - PathPattern: /api/internal/*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref SessionOriginRequestPolicy
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            Compress: true
+          - PathPattern: /compose
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref SessionOriginRequestPolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
           - PathPattern: /api/v1/instance
             TargetOriginId: ApiGateway
             ViewerProtocolPolicy: redirect-to-https
