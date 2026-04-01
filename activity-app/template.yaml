@@ -511,6 +511,9 @@ Resources:
       FunctionName: !Sub "activity-app-compose-${Stage}"
       CodeUri: ../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/ComposeHandler/ComposeHandler.zip
       Timeout: 30
+      Environment:
+        Variables:
+          CLIENT_API_URL: !Sub "https://${ClientApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
       Policies:
         - SSMParameterReadPolicy:
             ParameterName: !Sub "activity/${Stage}/*"
