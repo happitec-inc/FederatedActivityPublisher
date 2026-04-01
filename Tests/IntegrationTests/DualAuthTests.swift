@@ -10,10 +10,10 @@ import FoundationNetworking
         ProcessInfo.processInfo.environment["TEST_API_URL"],
         "TEST_API_URL environment variable is required for integration tests"
     )
-    guard let bearerToken = ProcessInfo.processInfo.environment["TEST_BEARER_TOKEN"] else {
-        // Skip if no bearer token configured — not all environments have one
-        return
-    }
+    let bearerToken = try #require(
+        ProcessInfo.processInfo.environment["TEST_BEARER_TOKEN"],
+        "TEST_BEARER_TOKEN environment variable is required for this test"
+    )
 
     let url = URL(string: "\(baseURL)/api/v1/statuses")!
     var request = URLRequest(url: url)
