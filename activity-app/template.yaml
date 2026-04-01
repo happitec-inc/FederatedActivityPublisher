@@ -62,8 +62,20 @@ Globals:
       Variables:
         TABLE_NAME: !ImportValue
           Fn::Sub: "${EnvironmentStackName}-TableName"
-        SERVER_DOMAIN: !Ref ServerDomain
-        HANDLE_DOMAIN: !Ref HandleDomain
+        SERVER_DOMAIN: !If
+          - IsProd
+          - !Ref ServerDomain
+          - !Sub
+            - "${Stage}.${Domain}"
+            - Domain: !ImportValue
+                Fn::Sub: "${BootstrapStackName}-DomainName"
+        HANDLE_DOMAIN: !If
+          - IsProd
+          - !Ref HandleDomain
+          - !Sub
+            - "${Stage}.${Domain}"
+            - Domain: !ImportValue
+                Fn::Sub: "${BootstrapStackName}-DomainName"
         QUEUE_URL: !ImportValue
           Fn::Sub: "${EnvironmentStackName}-QueueUrl"
         SSM_KEY_PREFIX: !ImportValue
