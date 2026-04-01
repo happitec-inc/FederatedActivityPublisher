@@ -1,4 +1,4 @@
-# Phase 6 Design -- Mastodon Client API
+# Phase $oauth Design -- Mastodon Client API
 
 ## Goal
 
