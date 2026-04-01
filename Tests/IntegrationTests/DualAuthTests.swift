@@ -7,8 +7,8 @@ import FoundationNetworking
 
 @Test func postStatusWithBearerTokenWorks() async throws {
     let baseURL = try #require(
-        ProcessInfo.processInfo.environment["TEST_API_URL"],
-        "TEST_API_URL environment variable is required for integration tests"
+        ProcessInfo.processInfo.environment["TEST_CLIENT_API_URL"],
+        "TEST_CLIENT_API_URL environment variable is required for posting tests"
     )
     let bearerToken = try #require(
         ProcessInfo.processInfo.environment["TEST_BEARER_TOKEN"],
@@ -41,8 +41,8 @@ import FoundationNetworking
 
 @Test func postStatusWithNoAuthReturns401Or403() async throws {
     let baseURL = try #require(
-        ProcessInfo.processInfo.environment["TEST_API_URL"],
-        "TEST_API_URL environment variable is required for integration tests"
+        ProcessInfo.processInfo.environment["TEST_CLIENT_API_URL"],
+        "TEST_CLIENT_API_URL environment variable is required for posting tests"
     )
 
     let url = URL(string: "\(baseURL)/api/v1/statuses")!

@@ -29,6 +29,7 @@ jobs:
     runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
     outputs:
       api_url: ${{ steps.stack-outputs.outputs.api_url }}
+      client_api_url: ${{ steps.stack-outputs.outputs.client_api_url }}
       stage: ${{ steps.stack-outputs.outputs.stage }}
     env:
       STAGE: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
@@ -140,7 +141,12 @@ jobs:
             --stack-name "activity-app-${{ env.STAGE }}" \
             --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
             --output text --region us-east-1)
+          CLIENT_API_URL=$(aws cloudformation describe-stacks \
+            --stack-name "activity-app-${{ env.STAGE }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ClientApiUrl'].OutputValue" \
+            --output text --region us-east-1)
           echo "api_url=$API_URL" >> "$GITHUB_OUTPUT"
+          echo "client_api_url=$CLIENT_API_URL" >> "$GITHUB_OUTPUT"
           echo "stage=${{ env.STAGE }}" >> "$GITHUB_OUTPUT"
 
   integration-tests:
@@ -196,6 +202,7 @@ jobs:
       - name: Run integration tests
         env:
           TEST_API_URL: ${{ needs.deploy.outputs.api_url }}
+          TEST_CLIENT_API_URL: ${{ needs.deploy.outputs.client_api_url }}
           TEST_BEARER_TOKEN: ${{ steps.token.outputs.bearer }}
           LD_LIBRARY_PATH: /usr/local/lib/swift/linux
         run: swift test --filter IntegrationTests
