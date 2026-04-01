@@ -25,17 +25,18 @@ jobs:
     if: >-
       github.event_name != 'release' ||
       (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
-    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    # runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     env:
       STAGE: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
     steps:
-      - name: Clean workspace (self-hosted, prod only)
-        if: ${{ vars.RUNNER_LABELS_LINUX && env.STAGE == 'prod' }}
-        run: |
-          sudo rm -rf .build/ || true
-          sudo git clean -fdx -e .git || true
-          docker container prune -f || true
-          docker builder prune -af --filter "until=24h" || true
+      # - name: Clean workspace (self-hosted, prod only)
+      #   if: ${{ vars.RUNNER_LABELS_LINUX && env.STAGE == 'prod' }}
+      #   run: |
+      #     sudo rm -rf .build/ || true
+      #     sudo git clean -fdx -e .git || true
+      #     docker container prune -f || true
+      #     docker builder prune -af --filter "until=24h" || true
 
       - name: Checkout
         uses: actions/checkout@v6
