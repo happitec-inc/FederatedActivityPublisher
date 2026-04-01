@@ -23,6 +23,8 @@ let package = Package(
         .executable(name: "MediaUploadHandler", targets: ["MediaUploadHandler"]),
         .executable(name: "ProfileUpdateHandler", targets: ["ProfileUpdateHandler"]),
         .executable(name: "InstanceHandler", targets: ["InstanceHandler"]),
+        .executable(name: "AuthHandler", targets: ["AuthHandler"]),
+        .executable(name: "ComposeHandler", targets: ["ComposeHandler"]),
     ],
     dependencies: [
         .package(url: "https://github.com/swift-server/swift-aws-lambda-runtime.git", from: "2.0.0"),
@@ -185,6 +187,27 @@ let package = Package(
                 .product(name: "AWSS3", package: "aws-sdk-swift"),
                 .product(name: "AWSSSM", package: "aws-sdk-swift"),
                 .product(name: "AWSCloudFront", package: "aws-sdk-swift"),
+            ]
+        ),
+
+        .executableTarget(
+            name: "AuthHandler",
+            dependencies: [
+                "ActivityPubCore",
+                .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
+                .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
+                .product(name: "AWSSSM", package: "aws-sdk-swift"),
+                .product(name: "Elementary", package: "elementary"),
+            ]
+        ),
+        .executableTarget(
+            name: "ComposeHandler",
+            dependencies: [
+                "ActivityPubCore",
+                .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
+                .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
+                .product(name: "AWSSSM", package: "aws-sdk-swift"),
+                .product(name: "Elementary", package: "elementary"),
             ]
         ),
 
