@@ -69,13 +69,7 @@ Globals:
             - "${Stage}.${Domain}"
             - Domain: !ImportValue
                 Fn::Sub: "${BootstrapStackName}-DomainName"
-        HANDLE_DOMAIN: !If
-          - IsProd
-          - !Ref HandleDomain
-          - !Sub
-            - "${Stage}.${Domain}"
-            - Domain: !ImportValue
-                Fn::Sub: "${BootstrapStackName}-DomainName"
+        HANDLE_DOMAIN: !Ref HandleDomain
         QUEUE_URL: !ImportValue
           Fn::Sub: "${EnvironmentStackName}-QueueUrl"
         SSM_KEY_PREFIX: !ImportValue
