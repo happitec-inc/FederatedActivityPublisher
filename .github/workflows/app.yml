@@ -36,7 +36,7 @@ jobs:
       - name: Clean workspace (self-hosted)
         if: ${{ vars.RUNNER_LABELS_LINUX }}
         run: |
-          sudo rm -rf .build/
+          sudo rm -rf .build/ || true
           sudo git clean -fdx -e .git || true
           docker container prune -f || true
           docker builder prune -af --filter "until=24h" || true
