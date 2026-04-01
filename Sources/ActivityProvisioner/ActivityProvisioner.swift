@@ -7,6 +7,15 @@ import Foundation
 @main
 struct ActivityProvisioner: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
+        abstract: "Provision and manage ActivityPub actors",
+        subcommands: [ProvisionActor.self, RegisterPasskey.self],
+        defaultSubcommand: ProvisionActor.self
+    )
+}
+
+struct ProvisionActor: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "provision",
         abstract: "Provision an ActivityPub actor in DynamoDB with RSA keypair"
     )
 
