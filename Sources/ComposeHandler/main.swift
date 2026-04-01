@@ -260,7 +260,7 @@ struct ComposePage: HTMLDocument {
                 const removeBtn = document.createElement('button');
                 removeBtn.className = 'remove-image';
                 removeBtn.type = 'button';
-                removeBtn.textContent = '\u00d7';
+                removeBtn.textContent = '\u{00d7}';
                 removeBtn.addEventListener('click', removeImage);
                 wrapper.appendChild(img);
                 wrapper.appendChild(removeBtn);
