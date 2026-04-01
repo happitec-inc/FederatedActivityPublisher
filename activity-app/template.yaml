@@ -534,6 +534,9 @@ Resources:
       Policies:
         - SSMParameterReadPolicy:
             ParameterName: !Sub "activity/${Stage}/*"
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
         - Statement:
             - Effect: Allow
               Action: kms:Decrypt
