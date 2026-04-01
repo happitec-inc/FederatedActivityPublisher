@@ -24,14 +24,36 @@ let runtime = LambdaRuntime {
     (event: APIGatewayRequest, context: LambdaContext) -> APIGatewayResponse in
 
     do {
-        // 1. Verify bearer token auth
+        // 1. Verify auth (bearer token or session cookie)
         let authHeader = event.headers["authorization"] ?? event.headers["Authorization"] ?? ""
-        let authResult: BearerAuthResult
+        let cookies = event.headers["cookie"] ?? event.headers["Cookie"]
+
+        let signingKey: String
         do {
-            authResult = try await authenticateBearer(
+            let signingKeyOutput = try await ssmClient.getParameter(input: .init(
+                name: "\(ssmKeyPrefix)/session-signing-key",
+                withDecryption: true
+            ))
+            signingKey = signingKeyOutput.parameter?.value ?? ""
+        } catch {
+            signingKey = ""
+        }
+
+        let authResult: RequestAuthResult
+        do {
+            authResult = try await authenticateRequest(
                 authHeader: authHeader,
+                cookies: cookies,
                 ssmKeyPrefix: ssmKeyPrefix,
-                ssmClient: ssmClient
+                ssmClient: ssmClient,
+                signingKey: signingKey,
+                serverDomain: serverDomain
+            )
+        } catch BearerAuthError.sessionExpired {
+            return APIGatewayResponse(
+                statusCode: .unauthorized,
+                headers: ["content-type": "application/json"],
+                body: #"{"error":"Session expired"}"#
             )
         } catch BearerAuthError.missingHeader {
             return APIGatewayResponse(
@@ -46,13 +68,36 @@ let runtime = LambdaRuntime {
                 body: #"{"error":"Invalid bearer token"}"#
             )
         } catch let error as BearerAuthError {
-            context.logger.error("Bearer auth error: \(error)")
+            context.logger.error("Auth error: \(error)")
             return APIGatewayResponse(
                 statusCode: .internalServerError,
                 headers: ["content-type": "application/json"],
                 body: #"{"error":"Server configuration error"}"#
             )
         }
+
+        // CSRF check for session-based auth on POST requests
+        if authResult.method == .session {
+            let csrfHeader = event.headers["x-csrf-token"] ?? event.headers["X-CSRF-Token"] ?? ""
+            if csrfHeader.isEmpty {
+                return APIGatewayResponse(
+                    statusCode: .forbidden,
+                    headers: ["content-type": "application/json"],
+                    body: #"{"error":"Missing CSRF token"}"#
+                )
+            }
+            if let sessionJWT = cookies.flatMap({ extractCookie(name: "session", from: $0) }),
+               let claims = try? JWTSession.verify(jwt: sessionJWT, key: signingKey, expectedIssuer: serverDomain) {
+                guard JWTSession.verifyCSRF(token: csrfHeader, signingKey: signingKey, sub: claims.sub, iat: claims.iat) else {
+                    return APIGatewayResponse(
+                        statusCode: .forbidden,
+                        headers: ["content-type": "application/json"],
+                        body: #"{"error":"Invalid CSRF token"}"#
+                    )
+                }
+            }
+        }
+
         let username = authResult.username
 
         // 2. Parse the request body (multipart or base64)
