@@ -95,6 +95,10 @@ Resources:
       StageName: !Ref Stage
       Auth:
         DefaultAuthorizer: NONE
+      Cors:
+        AllowOrigin: "'*'"
+        AllowHeaders: "'Content-Type,Authorization,X-CSRF-Token'"
+        AllowMethods: "'GET,POST,PATCH,OPTIONS'"
       BinaryMediaTypes:
         - "multipart/form-data"
         - "application/octet-stream"
