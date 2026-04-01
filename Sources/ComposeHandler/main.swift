@@ -13,6 +13,7 @@ let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "
 let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw
 
 let ssmClient = try await SSMClient()
+let store = try await DynamoDBStore()
 
 /// Cached signing key
 nonisolated(unsafe) var cachedSigningKey: String?
@@ -48,8 +49,18 @@ let runtime = LambdaRuntime {
             return redirectToLogin()
         }
 
+        // Fetch recent public/unlisted statuses for this user
+        let recentStatuses: [Status]
+        do {
+            let (allStatuses, _) = try await store.listStatuses(username: claims.sub, limit: 20)
+            recentStatuses = allStatuses.filter { $0.visibility == "public" || $0.visibility == "unlisted" }
+        } catch {
+            context.logger.warning("Failed to load recent posts: \(error)")
+            recentStatuses = []
+        }
+
         let csrfToken = JWTSession.csrfToken(signingKey: signingKey, sub: claims.sub, iat: claims.iat)
-        let page = ComposePage(username: claims.sub, csrfToken: csrfToken, domain: serverDomain)
+        let page = ComposePage(username: claims.sub, csrfToken: csrfToken, domain: serverDomain, recentStatuses: recentStatuses)
         let html = page.render()
 
         return APIGatewayResponse(
@@ -82,6 +93,7 @@ struct ComposePage: HTMLDocument {
     var username: String
     var csrfToken: String
     var domain: String
+    var recentStatuses: [Status]
 
     var title: String { "Compose - Happitec" }
     var lang: String { "en" }
@@ -122,6 +134,11 @@ struct ComposePage: HTMLDocument {
             .success { color: #080; }
             .visibility-group { display: flex; gap: 1rem; flex-wrap: wrap; }
             .visibility-group label { font-weight: normal; display: flex; align-items: center; gap: 0.3rem; }
+            .post-entry { margin-bottom: 2rem; }
+            .post-meta { font-size: 0.85rem; color: #888; margin-top: 0.5rem; }
+            .post-cw { background: #fff3cd; border: 1px solid #ffc107; padding: 0.5rem 0.8rem; border-radius: 4px; margin-bottom: 0.8rem; font-weight: bold; }
+            .post-media img { max-width: 100%; height: auto; border-radius: 4px; margin-top: 0.5rem; }
+            .post-content { overflow-wrap: break-word; }
             @media (prefers-color-scheme: dark) {
                 textarea { background: #1a1a1a; color: #ddd; border-color: #444; }
                 .form-group input[type="text"] { background: #1a1a1a; color: #ddd; border-color: #444; }
@@ -132,6 +149,8 @@ struct ComposePage: HTMLDocument {
                 .char-count { color: #aaa; }
                 .submit-btn { background: #444; border-color: #555; }
                 .submit-btn:hover { background: #555; }
+                .post-meta { color: #999; }
+                .post-cw { background: #4a3c00; border-color: #997a00; color: #ffd54f; }
             }
         </style>
         """)
@@ -197,6 +216,53 @@ struct ComposePage: HTMLDocument {
             p(.class("status-msg"), .id("status-msg")) { "" }
 
             HTMLRaw("</form>")
+
+            // Recent posts section
+            if !recentStatuses.isEmpty {
+                hr()
+                section {
+                    h2 { "Recent Posts" }
+                    for status in recentStatuses {
+                        div(.class("post-entry")) {
+                            // Content warning
+                            if let cw = status.contentWarning, !cw.isEmpty {
+                                div(.class("post-cw")) {
+                                    "Content Warning: \(cw)"
+                                }
+                            }
+
+                            // Post content
+                            div(.class("post-content")) {
+                                HTMLRaw(status.content)
+                            }
+
+                            // Media attachments
+                            if let attachments = status.attachments, !attachments.isEmpty {
+                                div(.class("post-media")) {
+                                    for attachment in attachments {
+                                        if attachment.contentType.hasPrefix("image/") {
+                                            figure {
+                                                img(.src(attachment.url), .alt(attachment.description ?? "Media attachment"))
+                                                if let desc = attachment.description, !desc.isEmpty {
+                                                    figcaption { desc }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Metadata line
+                            p(.class("post-meta")) {
+                                a(.href("https://\(domain)/@\(status.username)/\(status.id)")) {
+                                    time(.custom(name: "datetime", value: status.published)) { formatDate(status.published) }
+                                }
+                                " \u{00B7} \(status.likesCount) likes \u{00B7} \(status.boostsCount) boosts \u{00B7} \(status.quotesCount) quotes"
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         HTMLRaw("""
@@ -357,4 +423,14 @@ struct ComposePage: HTMLDocument {
         </script>
         """)
     }
+}
+
+// MARK: - Helpers
+
+/// Format an ISO 8601 date string into a human-readable format.
+func formatDate(_ isoDate: String) -> String {
+    if isoDate.count >= 10 {
+        return String(isoDate.prefix(10))
+    }
+    return isoDate
 }
