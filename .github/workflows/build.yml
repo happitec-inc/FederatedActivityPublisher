@@ -76,17 +76,32 @@ jobs:
           sudo chmod 666 /var/run/docker.sock
           docker --version
 
-      - name: Build AL2023 Swift Docker image (cached)
+      - name: Cache Docker image
+        id: docker-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/docker-image.tar
+          key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
+
+      - name: Load or build AL2023 Swift Docker image
         run: |
-          HASH=$(sha256sum docker/Dockerfile.al2023-swift | cut -c1-12)
-          if docker image inspect "swift-al2023:cache-$HASH" >/dev/null 2>&1; then
-            echo "Using cached image (Dockerfile hash: $HASH)"
-            docker tag "swift-al2023:cache-$HASH" swift-al2023:6.3
+          if [ -f /tmp/docker-image.tar ]; then
+            echo "Loading cached Docker image"
+            docker load < /tmp/docker-image.tar
           else
-            echo "Building image (Dockerfile hash: $HASH)"
+            echo "Building Docker image"
             docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
-            docker tag swift-al2023:6.3 "swift-al2023:cache-$HASH"
+            docker save swift-al2023:6.3 > /tmp/docker-image.tar
           fi
+
+      - name: Cache Swift build artifacts
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: swift-build-${{ hashFiles('Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            swift-build-${{ hashFiles('Package.resolved') }}-
+            swift-build-
 
       - name: Build Lambda zip
         run: swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3 --disable-docker-image-update
