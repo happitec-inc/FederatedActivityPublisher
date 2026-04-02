@@ -716,6 +716,25 @@ Resources:
               StringEquals:
                 AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
 
+  # --- CloudFront Function: /@username rewrite ---
+
+  ProfileRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "activity-profile-rewrite-${Stage}"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: "Rewrite /@username to /profile/username"
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          if (request.uri.startsWith('/@')) {
+            request.uri = '/profile/' + request.uri.substring(2);
+          }
+          return request;
+        }
+
   # --- CloudFront Distribution ---
 
   CloudFrontDistribution:
@@ -900,6 +919,15 @@ Resources:
             CachePolicyId: !Ref LongCachePolicy
             AllowedMethods: [GET, HEAD]
             Compress: true
+          - PathPattern: /@*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt ProfileRewriteFunction.FunctionARN
 
   # --- Route 53 DNS Record ---
 
