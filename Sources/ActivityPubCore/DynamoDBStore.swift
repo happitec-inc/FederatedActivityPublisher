@@ -185,6 +185,7 @@ public struct DynamoDBStore: Sendable {
     }
 
     /// Atomically increment the follower count for an actor.
+    /// Uses ADD which auto-initializes to 0 if the attribute doesn't exist.
     public func incrementFollowerCount(username: String, by amount: Int = 1) async throws {
         let input = UpdateItemInput(
             expressionAttributeNames: ["#fc": "followerCount"],
@@ -194,24 +195,31 @@ public struct DynamoDBStore: Sendable {
                 "SK": .s("PROFILE"),
             ],
             tableName: tableName,
-            updateExpression: "SET #fc = #fc + :val"
+            updateExpression: "ADD #fc :val"
         )
         _ = try await client.updateItem(input: input)
     }
 
     /// Atomically decrement the follower count for an actor.
+    /// Uses ADD with a condition to prevent the count from going negative.
+    /// If the count is already 0, this is a no-op.
     public func decrementFollowerCount(username: String) async throws {
         let input = UpdateItemInput(
+            conditionExpression: "#fc > :zero",
             expressionAttributeNames: ["#fc": "followerCount"],
-            expressionAttributeValues: [":one": .n("1"), ":zero": .n("0")],
+            expressionAttributeValues: [":neg_one": .n("-1"), ":zero": .n("0")],
             key: [
                 "PK": .s("ACTOR#\(username)"),
                 "SK": .s("PROFILE"),
             ],
             tableName: tableName,
-            updateExpression: "SET #fc = if_not_exists(#fc, :zero) - :one"
+            updateExpression: "ADD #fc :neg_one"
         )
-        _ = try await client.updateItem(input: input)
+        do {
+            _ = try await client.updateItem(input: input)
+        } catch is ConditionalCheckFailedException {
+            // Count is already 0 — no-op
+        }
     }
 
     // MARK: - Activity Idempotency
