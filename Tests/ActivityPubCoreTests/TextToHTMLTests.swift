@@ -58,4 +58,10 @@ struct TextToHTMLTests {
         let result = convertTextToHTML("See https://a.com and https://b.com here")
         #expect(result == #"<p>See <a href="https://a.com">https://a.com</a> and <a href="https://b.com">https://b.com</a> here</p>"#)
     }
+
+    @Test("URL with & in query params is autolinked correctly")
+    func urlWithAmpersand() {
+        let result = convertTextToHTML("Visit https://example.com?a=1&b=2 now")
+        #expect(result == #"<p>Visit <a href="https://example.com?a=1&amp;b=2">https://example.com?a=1&amp;b=2</a> now</p>"#)
+    }
 }

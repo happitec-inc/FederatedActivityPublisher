@@ -3,10 +3,10 @@ import Foundation
 /// Convert plain text to ActivityPub-compatible HTML.
 ///
 /// Applies the following transformations in order:
-/// 1. HTML-escape special characters (`<`, `>`, `&`, `"`)
-/// 2. Split on double newlines into paragraphs, wrap each in `<p>...</p>`
-/// 3. Convert single newlines within paragraphs to `<br>`
-/// 4. Autolink URLs (`https?://...`) to `<a href="...">...</a>`
+/// 1. Split on double newlines into paragraphs, wrap each in `<p>...</p>`
+/// 2. Autolink URLs (`https?://...`) to `<a href="...">...</a>` with proper escaping
+/// 3. HTML-escape non-URL text portions
+/// 4. Convert single newlines within paragraphs to `<br>`
 ///
 /// - Parameter text: Plain text input from the posting API.
 /// - Returns: HTML string suitable for ActivityPub Note content.
@@ -19,11 +19,9 @@ public func convertTextToHTML(_ text: String) -> String {
     let paragraphs = text.components(separatedBy: "\n\n")
 
     let htmlParagraphs = paragraphs.map { paragraph -> String in
-        // HTML-escape first (before adding any HTML tags)
-        let escaped = htmlEscape(paragraph)
-
-        // Autolink URLs
-        let linked = autolinkURLs(escaped)
+        // Autolink URLs first (on raw text so & in query params is intact),
+        // then HTML-escape the non-URL text segments.
+        let linked = autolinkAndEscape(paragraph)
 
         // Convert single newlines to <br>
         let withBreaks = linked.replacingOccurrences(of: "\n", with: "<br>")
@@ -42,21 +40,20 @@ func htmlEscape(_ text: String) -> String {
         .replacingOccurrences(of: "\"", with: "&quot;")
 }
 
-/// Detect and wrap URLs in anchor tags.
-func autolinkURLs(_ text: String) -> String {
-    // Match http:// or https:// URLs up to whitespace or end of string.
-    // Exclude trailing punctuation that is likely sentence-ending.
-    let pattern = #"https?://[^\s<>&"]+[^\s<>&".,;:!?\)\]\}]"#
+/// Detect URLs, wrap them in anchor tags with escaped href and display text,
+/// and HTML-escape the non-URL portions of the text.
+func autolinkAndEscape(_ text: String) -> String {
+    let pattern = #"https?://[^\s<>"]+[^\s<>".,;:!?\)\]\}]"#
 
     guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-        return text
+        return htmlEscape(text)
     }
 
     let nsText = text as NSString
     let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
 
     if matches.isEmpty {
-        return text
+        return htmlEscape(text)
     }
 
     var result = ""
@@ -64,17 +61,20 @@ func autolinkURLs(_ text: String) -> String {
 
     for match in matches {
         let matchRange = match.range
-        // Append text before this match
-        result += nsText.substring(with: NSRange(location: lastEnd, length: matchRange.location - lastEnd))
+        // HTML-escape text before this URL
+        let before = nsText.substring(with: NSRange(location: lastEnd, length: matchRange.location - lastEnd))
+        result += htmlEscape(before)
 
         let url = nsText.substring(with: matchRange)
-        result += "<a href=\"\(url)\">\(url)</a>"
+        // Escape & in the URL for valid HTML href and display
+        let escapedUrl = url.replacingOccurrences(of: "&", with: "&amp;")
+        result += "<a href=\"\(escapedUrl)\">\(escapedUrl)</a>"
 
         lastEnd = matchRange.location + matchRange.length
     }
 
-    // Append remaining text
-    result += nsText.substring(from: lastEnd)
+    // HTML-escape remaining text after last URL
+    result += htmlEscape(nsText.substring(from: lastEnd))
 
     return result
 }
