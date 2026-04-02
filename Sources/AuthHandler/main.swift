@@ -18,17 +18,21 @@ let ssmClient = try await SSMClient()
 /// Cached signing key -- initialized once per Lambda cold start.
 nonisolated(unsafe) var cachedSigningKey: String?
 
-func getSigningKey() async throws -> String {
+func getSigningKey() async -> String {
     if let key = cachedSigningKey { return key }
-    let output = try await ssmClient.getParameter(input: .init(
-        name: "\(ssmKeyPrefix)/session-signing-key",
-        withDecryption: true
-    ))
-    guard let key = output.parameter?.value, !key.isEmpty else {
-        fatalError("Session signing key not configured at \(ssmKeyPrefix)/session-signing-key")
+    do {
+        let output = try await ssmClient.getParameter(input: .init(
+            name: "\(ssmKeyPrefix)/session-signing-key",
+            withDecryption: true
+        ))
+        guard let key = output.parameter?.value, !key.isEmpty else {
+            return ""
+        }
+        cachedSigningKey = key
+        return key
+    } catch {
+        return ""
     }
-    cachedSigningKey = key
-    return key
 }
 
 let runtime = LambdaRuntime {
@@ -229,7 +233,7 @@ func handleAuthVerify(event: APIGatewayRequest, context: LambdaContext) async th
     try await store.updatePasskeySignCount(credentialId: credentialId, signCount: newSignCount)
 
     // 6. Issue JWT session cookie
-    let signingKey = try await getSigningKey()
+    let signingKey = await getSigningKey()
     let claims = JWTSession.Claims(sub: passkey.username, iss: serverDomain)
     let jwt = try JWTSession.sign(claims: claims, key: signingKey)
 

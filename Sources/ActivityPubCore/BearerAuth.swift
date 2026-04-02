@@ -116,8 +116,8 @@ public func authenticateRequest(
         return RequestAuthResult(username: result.username, method: .bearer)
     }
 
-    // 2. Try session cookie
-    if let cookies, let sessionJWT = extractCookie(name: "session", from: cookies) {
+    // 2. Try session cookie (only if signing key is available)
+    if !signingKey.isEmpty, let cookies, let sessionJWT = extractCookie(name: "session", from: cookies) {
         do {
             let claims = try JWTSession.verify(
                 jwt: sessionJWT,
