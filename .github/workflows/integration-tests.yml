@@ -44,6 +44,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Remove conflicting system libxml2 headers
+        run: sudo apt-get remove -y libxml2-dev || true
+
       - name: Install Swift
         run: |
           if swift --version 2>/dev/null | grep -q "6.3"; then
