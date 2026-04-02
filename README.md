@@ -125,8 +125,19 @@ Key parameters passed to `sam deploy` for the app stack:
 |-----------|-------|-------------|
 | `ServerDomain` | app | The domain the ActivityPub server runs on (e.g. `activity.example.com`) |
 | `HandleDomain` | app | The domain used in ActivityPub handles (e.g. `example.com` for `@user@example.com`) |
-| `ProxyDistributionId` | app | Optional cross-distribution invalidation target; empty string to skip |
+| `ProxyDistributionId` | app | Optional CloudFront distribution ID for cross-distribution cache invalidation (e.g. parent domain proxy); empty string to skip |
+| `ActivityDistributionId` | app | CloudFront distribution ID for the activity subdomain; passed as a string parameter instead of `!Ref` to avoid circular CloudFormation dependency with InboxFunction |
+| `ClientApiDomain` | app | Execute-api domain for the Client API Gateway (e.g. `abc123.execute-api.us-east-1.amazonaws.com`); enables same-origin CloudFront routing for compose page posting |
 | `Stage` | app, environment | `stage` or `prod` |
+
+### SSM Parameters
+
+Runtime parameters stored in AWS Systems Manager Parameter Store, organized by stage:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `/activity/{stage}/keys/client-token` | SecureString | Bearer token for API authentication, format `username:token` |
+| `/activity/{stage}/keys/session-signing-key` | SecureString | HMAC key for signing session JWTs (passkey auth). Optional — if missing, session auth is disabled and bearer token auth continues working. |
 
 ## License
 
