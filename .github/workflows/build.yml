@@ -91,18 +91,23 @@ jobs:
       - name: Build Lambda zip
         run: swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3 --disable-docker-image-update
 
+      - name: Install SAM CLI
+        uses: ./.github/actions/setup-sam-portable
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
       - name: Package with SAM
         run: |
-          pip3 install --break-system-packages aws-sam-cli 2>/dev/null || pip3 install aws-sam-cli
-          export PATH="$HOME/.local/bin:$PATH"
           sam package \
             --template-file activity-app/template.yaml \
             --output-template-file packaged.yaml \
             --resolve-s3 \
             --region us-east-1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Upload packaged template
         uses: actions/upload-artifact@v4
