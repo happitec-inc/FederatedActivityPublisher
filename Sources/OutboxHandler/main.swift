@@ -52,7 +52,8 @@ let runtime = LambdaRuntime {
         let (statuses, hasMore) = try await store.listStatuses(
             username: username,
             limit: 20,
-            maxId: maxId
+            maxId: maxId,
+            minId: minId
         )
 
         // Build orderedItems — each status wrapped in a Create activity

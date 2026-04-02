@@ -706,16 +706,37 @@ public struct DynamoDBStore: Sendable {
     /// `maxId` is the ULID of the last status seen — statuses older than this are returned.
     /// Uses ExclusiveStartKey to skip past maxId when provided.
     /// Returns (statuses, hasMore).
-    public func listStatuses(username: String, limit: Int = 20, maxId: String? = nil) async throws -> ([Status], Bool) {
-        let keyCondition = "#pk = :pk AND begins_with(#sk, :prefix)"
-        let exprValues: [String: DynamoDBClientTypes.AttributeValue] = [
+    public func listStatuses(username: String, limit: Int = 20, maxId: String? = nil, minId: String? = nil) async throws -> ([Status], Bool) {
+        var keyCondition = "#pk = :pk AND begins_with(#sk, :prefix)"
+        var exprNames: [String: String] = ["#pk": "PK", "#sk": "SK"]
+        var exprValues: [String: DynamoDBClientTypes.AttributeValue] = [
             ":pk": .s("ACTOR#\(username)"),
             ":prefix": .s("STATUS#"),
         ]
 
-        // When maxId is provided, set ExclusiveStartKey so DynamoDB starts scanning
-        // just before STATUS#{maxId} (exclusive). Since we scan in reverse, this means
-        // "give me items with SK < STATUS#{maxId}" within the begins_with range.
+        // Forward pagination (min_id): items newer than minId, scanned forward
+        if let minId {
+            keyCondition = "#pk = :pk AND #sk > :after"
+            exprValues[":after"] = .s("STATUS#\(minId)")
+            exprValues.removeValue(forKey: ":prefix")
+
+            let input = QueryInput(
+                expressionAttributeNames: exprNames,
+                expressionAttributeValues: exprValues,
+                keyConditionExpression: keyCondition,
+                limit: limit,
+                scanIndexForward: true,
+                tableName: tableName
+            )
+
+            let output = try await client.query(input: input)
+            let items = output.items ?? []
+            let statuses = items.compactMap { Status.fromDynamoDB($0) }.reversed()
+            let hasMore = output.lastEvaluatedKey != nil
+            return (Array(statuses), hasMore)
+        }
+
+        // Backward pagination (max_id): items older than maxId, scanned in reverse
         var exclusiveStartKey: [String: DynamoDBClientTypes.AttributeValue]?
         if let maxId {
             exclusiveStartKey = [
@@ -726,7 +747,7 @@ public struct DynamoDBStore: Sendable {
 
         let input = QueryInput(
             exclusiveStartKey: exclusiveStartKey,
-            expressionAttributeNames: ["#pk": "PK", "#sk": "SK"],
+            expressionAttributeNames: exprNames,
             expressionAttributeValues: exprValues,
             keyConditionExpression: keyCondition,
             limit: limit,
