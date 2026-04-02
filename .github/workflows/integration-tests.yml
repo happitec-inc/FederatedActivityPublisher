@@ -44,8 +44,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Remove conflicting system libxml2 headers
-        run: sudo apt-get remove -y libxml2-dev || true
+      - name: Fix Swift 6.3 ICU header conflict
+        run: |
+          # Swift 6.3's _FoundationICU conflicts with system ICU headers.
+          # Remove the ICU dev headers but keep libxml2-dev (needed by smithy-swift).
+          sudo apt-get remove -y libicu-dev || true
+          sudo apt-get install -y libxml2-dev
 
       - name: Install Swift
         run: |
