@@ -680,7 +680,6 @@ Resources:
           HeaderBehavior: whitelist
           Headers:
             - Content-Type
-            - Authorization
             - X-CSRF-Token
         QueryStringsConfig:
           QueryStringBehavior: all
