@@ -64,13 +64,35 @@ public struct SQSDeliveryClient: Sendable {
                 entries: entries,
                 queueUrl: queueUrl
             )
-            _ = try await client.sendMessageBatch(input: input)
+            let response = try await client.sendMessageBatch(input: input)
+
+            if let failed = response.failed, !failed.isEmpty {
+                let descriptions = failed.map { entry in
+                    "id=\(entry.id ?? "?") code=\(entry.code ?? "?") message=\(entry.message ?? "?")"
+                }
+                throw SQSDeliveryError.partialBatchFailure(
+                    failedCount: failed.count,
+                    totalCount: entries.count,
+                    details: descriptions
+                )
+            }
         }
     }
 }
 
 /// Errors from the SQS delivery client.
-public enum SQSDeliveryError: Error {
+public enum SQSDeliveryError: Error, CustomStringConvertible {
     /// The delivery job could not be encoded to JSON.
     case encodingFailed
+    /// Some messages in a batch failed to enqueue.
+    case partialBatchFailure(failedCount: Int, totalCount: Int, details: [String])
+
+    public var description: String {
+        switch self {
+        case .encodingFailed:
+            return "Failed to encode delivery job to JSON"
+        case .partialBatchFailure(let failedCount, let totalCount, let details):
+            return "SQS batch: \(failedCount)/\(totalCount) messages failed: \(details.joined(separator: "; "))"
+        }
+    }
 }
