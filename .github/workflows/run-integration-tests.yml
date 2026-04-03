@@ -82,6 +82,17 @@ jobs:
           fi
           swift --version
 
+      - name: Fix Swift 6.3 ICU header conflict
+        run: |
+          SWIFT_ICU_DIR=$(find /usr/local/lib/swift -name '_foundation_unicode' -type d | head -1)
+          if [ -n "$SWIFT_ICU_DIR" ]; then
+            sudo rm -rf /usr/include/unicode
+            ARCH_INCLUDE="/usr/include/$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo '')"
+            [ -d "$ARCH_INCLUDE/unicode" ] && sudo rm -rf "$ARCH_INCLUDE/unicode"
+            sudo ln -sf "$SWIFT_ICU_DIR" /usr/include/unicode
+            echo "Replaced system ICU headers with Swift's bundled ICU from $SWIFT_ICU_DIR"
+          fi
+
       - name: Run integration tests
         env:
           TEST_API_URL: ${{ steps.api.outputs.url }}
