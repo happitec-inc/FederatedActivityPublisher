@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   fast-deploy:
@@ -26,14 +26,7 @@ jobs:
       - name: Detect changed targets
         id: changes
         run: |
-          LAST_SHA=$(git rev-parse "deploy-stage" 2>/dev/null || echo "")
-          if [ -z "$LAST_SHA" ]; then
-            echo "No deploy-stage tag found, skipping fast deploy"
-            echo "targets=skip" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          CHANGED=$(git diff --name-only "$LAST_SHA" HEAD)
+          CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
 
           # If template or package files changed, let the full pipeline handle it
           if echo "$CHANGED" | grep -qE '^(Package\.(swift|resolved)|docker/|activity-app/)'; then
@@ -160,8 +153,3 @@ jobs:
               --output text --query 'FunctionName'
           done <<< "$TARGETS"
 
-      - name: Update deploy tag
-        if: steps.changes.outputs.targets != 'skip'
-        run: |
-          git tag -f "deploy-stage" HEAD
-          git push -f origin "deploy-stage"

@@ -20,7 +20,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 jobs:
@@ -159,12 +159,3 @@ jobs:
           echo "client_api_url=$CLIENT_API_URL" >> "$GITHUB_OUTPUT"
           echo "stage=${STAGE}" >> "$GITHUB_OUTPUT"
 
-      - name: Update deploy tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STAGE: ${{ steps.set-stage.outputs.stage }}
-        run: |
-          gh api repos/${{ github.repository }}/git/refs/tags/deploy-${STAGE} \
-            -X PATCH -f sha="${{ github.sha }}" 2>/dev/null \
-          || gh api repos/${{ github.repository }}/git/refs \
-            -f ref="refs/tags/deploy-${STAGE}" -f sha="${{ github.sha }}"
