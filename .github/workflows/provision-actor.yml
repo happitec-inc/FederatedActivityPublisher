@@ -79,7 +79,14 @@ jobs:
           swift --version
 
       - name: Build ActivityProvisioner
-        run: swift build --product ActivityProvisioner
+        run: |
+          pkg-config --cflags libxml-2.0 || echo "pkg-config failed for libxml-2.0"
+          pkg-config --cflags libcrypto || echo "pkg-config failed for libcrypto"
+          which pkg-config && pkg-config --variable pc_path pkg-config || true
+          ls /usr/lib/*/pkgconfig/libxml*.pc /usr/lib/pkgconfig/libxml*.pc 2>/dev/null || true
+          swift build --product ActivityProvisioner
+        env:
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
 
       - name: Provision actor
         run: |
