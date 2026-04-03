@@ -63,7 +63,7 @@ Resources:
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
-        Name: !Sub "activity-webfinger-cache-${AWS::StackName}"
+        Name: !Sub "activity-webfinger-cache-${Stage}"
         DefaultTTL: 86400
         MaxTTL: 86400
         MinTTL: 0
@@ -82,7 +82,7 @@ Resources:
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
-        Name: !Sub "activity-outbox-cache-${AWS::StackName}"
+        Name: !Sub "activity-outbox-cache-${Stage}"
         DefaultTTL: 31536000
         MaxTTL: 31536000
         MinTTL: 0
@@ -103,7 +103,7 @@ Resources:
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
-        Name: !Sub "activity-long-cache-${AWS::StackName}"
+        Name: !Sub "activity-long-cache-${Stage}"
         DefaultTTL: 31536000
         MaxTTL: 31536000
         MinTTL: 0
@@ -120,7 +120,7 @@ Resources:
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
-        Name: !Sub "activity-medium-cache-${AWS::StackName}"
+        Name: !Sub "activity-medium-cache-${Stage}"
         DefaultTTL: 86400
         MaxTTL: 86400
         MinTTL: 0
@@ -137,7 +137,7 @@ Resources:
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
-        Name: !Sub "activity-short-cache-${AWS::StackName}"
+        Name: !Sub "activity-short-cache-${Stage}"
         DefaultTTL: 3600
         MaxTTL: 3600
         MinTTL: 0
@@ -156,7 +156,7 @@ Resources:
     Type: AWS::CloudFront::OriginRequestPolicy
     Properties:
       OriginRequestPolicyConfig:
-        Name: !Sub "activity-inbox-origin-${AWS::StackName}"
+        Name: !Sub "activity-inbox-origin-${Stage}"
         CookiesConfig:
           CookieBehavior: none
         HeadersConfig:
@@ -175,7 +175,7 @@ Resources:
     Type: AWS::CloudFront::OriginRequestPolicy
     Properties:
       OriginRequestPolicyConfig:
-        Name: !Sub "activity-session-origin-${AWS::StackName}"
+        Name: !Sub "activity-session-origin-${Stage}"
         CookiesConfig:
           CookieBehavior: whitelist
           Cookies:
@@ -191,7 +191,7 @@ Resources:
     Type: AWS::CloudFront::OriginRequestPolicy
     Properties:
       OriginRequestPolicyConfig:
-        Name: !Sub "activity-clientapi-origin-${AWS::StackName}"
+        Name: !Sub "activity-clientapi-origin-${Stage}"
         CookiesConfig:
           CookieBehavior: whitelist
           Cookies:
@@ -210,7 +210,7 @@ Resources:
     Type: AWS::CloudFront::OriginAccessControl
     Properties:
       OriginAccessControlConfig:
-        Name: !Sub "activity-media-oac-${AWS::StackName}"
+        Name: !Sub "activity-media-oac-${Stage}"
         OriginAccessControlOriginType: s3
         SigningBehavior: always
         SigningProtocol: sigv4
@@ -241,7 +241,7 @@ Resources:
   ProfileRewriteFunction:
     Type: AWS::CloudFront::Function
     Properties:
-      Name: !Sub "activity-profile-rewrite-${AWS::StackName}"
+      Name: !Sub "activity-profile-rewrite-${Stage}"
       AutoPublish: true
       FunctionConfig:
         Comment: "Rewrite /@username to /profile/username"
