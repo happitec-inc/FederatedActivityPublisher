@@ -3,7 +3,7 @@ run-name: "Integration Tests (${{ github.event.workflow_run.outputs.stage || inp
 
 on:
   workflow_run:
-    workflows: ["Deploy App Stack"]
+    workflows: ["Deploy App Stack", "Fast Stage Deploy"]
     types: [completed]
   workflow_dispatch:
     inputs:
