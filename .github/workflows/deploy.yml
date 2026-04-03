@@ -20,7 +20,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 jobs:
@@ -158,3 +158,12 @@ jobs:
           echo "api_url=$API_URL" >> "$GITHUB_OUTPUT"
           echo "client_api_url=$CLIENT_API_URL" >> "$GITHUB_OUTPUT"
           echo "stage=${STAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Update deploy tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGE: ${{ steps.set-stage.outputs.stage }}
+        run: |
+          # Delete existing tag if present, then create new one
+          gh api repos/${{ github.repository }}/git/refs/tags/deploy-${STAGE} -X DELETE 2>/dev/null || true
+          gh api repos/${{ github.repository }}/git/refs -f ref="refs/tags/deploy-${STAGE}" -f sha="${{ github.sha }}"
