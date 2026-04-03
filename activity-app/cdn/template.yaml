@@ -55,6 +55,7 @@ Conditions:
   HasClientApiDomain: !Not [!Equals [!Ref ClientApiDomain, ""]]
 
   HasDomainOverride: !Not [!Equals [!Ref DomainOverride, ""]]
+  NoDomainOverride: !Equals [!Ref DomainOverride, ""]
 
 Resources:
   # --- CloudFront Cache Policies ---
@@ -456,6 +457,7 @@ Resources:
 
   FederationDnsRecord:
     Type: AWS::Route53::RecordSet
+    Condition: NoDomainOverride
     Properties:
       HostedZoneId: !ImportValue
         Fn::Sub: "${BootstrapStackName}-HostedZoneId"
