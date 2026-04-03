@@ -164,6 +164,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           STAGE: ${{ steps.set-stage.outputs.stage }}
         run: |
-          # Delete existing tag if present, then create new one
-          gh api repos/${{ github.repository }}/git/refs/tags/deploy-${STAGE} -X DELETE 2>/dev/null || true
-          gh api repos/${{ github.repository }}/git/refs -f ref="refs/tags/deploy-${STAGE}" -f sha="${{ github.sha }}"
+          gh api repos/${{ github.repository }}/git/refs/tags/deploy-${STAGE} \
+            -X PATCH -f sha="${{ github.sha }}" 2>/dev/null \
+          || gh api repos/${{ github.repository }}/git/refs \
+            -f ref="refs/tags/deploy-${STAGE}" -f sha="${{ github.sha }}"
