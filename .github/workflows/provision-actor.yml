@@ -51,6 +51,20 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
+      - name: Install AWS CLI
+        run: |
+          if ! command -v aws &>/dev/null; then
+            ARCH=$(uname -m)
+            if [ "$ARCH" = "aarch64" ]; then
+              curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
+            else
+              curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            fi
+            unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install
+            rm -rf /tmp/awscliv2.zip /tmp/aws
+          fi
+          aws --version
+
       - name: Install Swift dependencies
         run: |
           sudo apt-get update
