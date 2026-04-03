@@ -14,7 +14,7 @@ let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropL
 let ssmClient = try await SSMClient()
 let store = try await DynamoDBStore()
 
-/// Cached signing key
+/// Cached signing key for session JWT verification
 nonisolated(unsafe) var cachedSigningKey: String?
 
 func getSigningKey() async throws -> String {
