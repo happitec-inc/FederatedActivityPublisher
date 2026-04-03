@@ -64,10 +64,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y binutils gcc g++ libc6-dev libcurl4-openssl-dev libssl-dev libxml2-dev
-          # Swift 6.3's _FoundationICU conflicts with system ICU headers.
-          # Remove the header files directly rather than the package (which would
-          # cascade-remove libxml2-dev).
-          sudo rm -rf /usr/include/unicode /usr/include/aarch64-linux-gnu/unicode /usr/include/x86_64-linux-gnu/unicode || true
+          # Swift 6.3 bundles _FoundationICU which conflicts with system ICU headers.
+          # Remove ICU headers and pkg-config files so pkg-config resolves libxml2
+          # without trying to satisfy the icu-i18n Requires.private dependency.
+          sudo rm -rf /usr/include/unicode /usr/include/*/unicode || true
+          sudo rm -f /usr/lib/*/pkgconfig/icu*.pc || true
+          # Patch libxml2 pkg-config to remove ICU dependency
+          sudo sed -i 's/Requires.private:.*/Requires.private:/' /usr/lib/*/pkgconfig/libxml-2.0.pc || true
 
       - name: Install Swift
         run: |
