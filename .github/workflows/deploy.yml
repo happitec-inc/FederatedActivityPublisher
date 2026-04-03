@@ -112,7 +112,7 @@ jobs:
               ServerDomain=${{ vars.SERVER_DOMAIN }} \
               HandleDomain=${{ vars.HANDLE_DOMAIN }} \
               ProxyDistributionId=${{ vars.PROXY_DISTRIBUTION_ID }} \
-              ActivityDistributionId=${{ vars.ACTIVITY_DISTRIBUTION_ID }} \
+              ActivityDistributionId=${{ steps.set-stage.outputs.stage == 'prod' && vars.ACTIVITY_DISTRIBUTION_ID_PROD || vars.ACTIVITY_DISTRIBUTION_ID_STAGE }} \
               ClientApiDomain=${{ steps.set-stage.outputs.stage == 'prod' && vars.CLIENT_API_DOMAIN_PROD || vars.CLIENT_API_DOMAIN_STAGE }}
 
       - name: Upload frontend assets
