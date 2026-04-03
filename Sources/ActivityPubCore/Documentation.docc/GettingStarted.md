@@ -57,7 +57,11 @@ FederatedActivityPublisher/
     ActivityPubCoreTests/   # Unit tests
     IntegrationTests/       # Requires deployed stack + TEST_API_URL env var
   activity-app/
-    template.yaml           # SAM template: app stack (Lambdas, CloudFront, API GW)
+    template.yaml           # SAM template: app stack root orchestrator (nested stacks)
+    functions/
+      template.yaml         # Nested stack: Lambda functions + API Gateways
+    cdn/
+      template.yaml         # Nested stack: CloudFront, cache policies, DNS
   activity-environment/
     template.yaml           # SAM template: environment stack (DynamoDB, SQS, S3)
   activity-bootstrap/
@@ -74,6 +78,8 @@ The deployment is split into three SAM templates, each managing a different life
 
 2. **Environment** (`activity-environment/template.yaml`) -- deployed per stage (prod, stage). Creates the DynamoDB table, SQS delivery queue with DLQ, S3 media bucket, and establishes the SSM parameter naming convention for actor keypairs.
 
-3. **App** (`activity-app/template.yaml`) -- deployed per stage by CI. Contains all Lambda functions, both API Gateways (federation and client), the CloudFront distribution, cache policies, and Route 53 DNS records. This is what gets redeployed on every code change.
+3. **App** (`activity-app/template.yaml`) -- deployed per stage by CI. A root orchestrator that creates two nested CloudFormation stacks:
+   - **FunctionsStack** (`activity-app/functions/template.yaml`) -- all Lambda handlers, both API Gateways (federation and client), IAM roles
+   - **CdnStack** (`activity-app/cdn/template.yaml`) -- CloudFront distribution, cache policies, origin request policies, Route 53 DNS record
 
-This separation means you can redeploy application code without touching your data stores, and data stores without touching DNS/certificates.
+This separation means you can redeploy application code without touching your data stores, and data stores without touching DNS/certificates. The nested stack split within the app template further isolates compute changes from CDN changes, enabling the fast-deploy pipeline that updates Lambda functions directly without a full CloudFormation deployment. See <doc:NestedStacksOverview> for details.

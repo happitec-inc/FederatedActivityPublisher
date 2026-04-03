@@ -36,8 +36,11 @@ Under **Settings > Secrets and variables > Actions > Variables**, add:
 |----------|-------|----------|
 | `SERVER_DOMAIN` | Your server domain (e.g. `example.com`) | Yes |
 | `HANDLE_DOMAIN` | Your handle domain (e.g. `example.com`) | Yes |
-| `RUNNER_LABELS_LINUX` | JSON array of runner labels (e.g. `["self-hosted", "linux"]`) | No (defaults to `ubuntu-latest`) |
 | `PROXY_DISTRIBUTION_ID` | CloudFront distribution ID for cross-invalidation | No (only for split DNS) |
+| `ACTIVITY_DISTRIBUTION_ID_STAGE` | CloudFront distribution ID for stage (set after first deploy) | No (set after step 7) |
+| `ACTIVITY_DISTRIBUTION_ID_PROD` | CloudFront distribution ID for prod (set after first prod deploy) | No (set after going to production) |
+| `CLIENT_API_DOMAIN_STAGE` | Client API Gateway domain for stage (set after first deploy) | No (set after step 7) |
+| `CLIENT_API_DOMAIN_PROD` | Client API Gateway domain for prod | No (set after going to production) |
 
 For simple DNS mode (recommended), set `SERVER_DOMAIN` and `HANDLE_DOMAIN` to the same value.
 
@@ -81,16 +84,18 @@ The environment stack creates DynamoDB, S3, and SQS resources.
 
 ## Step 7: Deploy the app stack
 
-The app stack deploys all Lambda functions, API Gateway, and CloudFront.
+The app stack deploys all Lambda functions, API Gateway, and CloudFront via nested CloudFormation stacks.
 
-1. Go to **Actions > Deploy App Stack**
+1. Go to **Actions > Build App**
 2. Click **Run workflow**
 3. Choose `stage`
 4. Run the workflow
 
-This is the longest step (~5-10 minutes). It builds Swift Lambda functions in Docker, packages them, and deploys via SAM.
+This triggers `build.yml`, which builds all Lambda handlers and packages the template. When it completes, `deploy.yml` triggers automatically and deploys to the selected stage.
 
-After deployment, the workflow output shows stack outputs including the CloudFront domain and API endpoints.
+This is the longest step (~7 minutes with warm caches, 20+ minutes on first run). The build runs on a `linux_large` runner with Docker, and the deploy runs on `ubuntu-latest`.
+
+After deployment, the deploy workflow output shows stack outputs including the CloudFront distribution ID, domain, and API endpoints. Copy the `CloudFrontDistributionId` and `ClientApiUrl` values -- you will need them for repository variables.
 
 ## Step 8: Verify the server
 
@@ -176,10 +181,16 @@ curl -X POST "$API_URL/api/v1/statuses" \
 
 Once you have verified everything works on `stage`:
 
-1. Re-run the environment workflow with `prod`
-2. Re-run the app workflow with `prod`
-3. Re-provision your actor with `--stage prod`
-4. Or: create a GitHub release with a `v`-prefixed tag (e.g. `v1.0.0`) to trigger a prod deploy automatically
+1. Set repository variables from your stage deploy outputs:
+   - `ACTIVITY_DISTRIBUTION_ID_STAGE` -- CloudFront distribution ID from stage deploy output
+   - `CLIENT_API_DOMAIN_STAGE` -- Client API Gateway domain from stage deploy output
+2. Re-run the environment workflow with `prod`
+3. Re-run the build workflow with `prod` (deploy triggers automatically)
+4. Set the prod repository variables:
+   - `ACTIVITY_DISTRIBUTION_ID_PROD` -- CloudFront distribution ID from prod deploy output
+   - `CLIENT_API_DOMAIN_PROD` -- Client API Gateway domain from prod deploy output
+5. Re-provision your actor with `--stage prod`
+6. Or: create a GitHub release with a `v`-prefixed tag (e.g. `v1.0.0`) to trigger a prod deploy automatically
 
 ## Troubleshooting
 

@@ -4,45 +4,90 @@ Build Lambda binaries with Docker, deploy with SAM, and manage CI/CD pipelines.
 
 ## Overview
 
-The project builds Swift Lambda binaries targeting Amazon Linux 2023 (ARM64). A custom Docker image handles cross-compilation, and SAM CLI manages packaging and CloudFormation deployment. Four GitHub Actions workflows automate the full lifecycle from deployment through documentation publishing.
+The project builds Swift Lambda binaries targeting Amazon Linux 2023 (ARM64). A custom Docker image handles cross-compilation, and SAM CLI manages packaging and CloudFormation deployment. Six GitHub Actions workflows automate the full lifecycle from build through testing and documentation publishing.
 
 ## GitHub Actions Workflows
 
-### Deploy App Stack (`app.yml`)
+### Build App (`build.yml`)
 
-The primary deployment workflow. Builds all Swift Lambda handlers inside a Docker container, deploys the app CloudFormation stack via SAM, and uploads frontend assets to S3.
+Builds all Swift Lambda handlers inside a Docker container on the `linux_large` runner, packages the template with SAM, and uploads artifacts for the deploy workflow.
 
 **Triggers:**
-- Push to `main` -- deploys to **stage**
-- GitHub Release (non-prerelease, `v`-prefixed tag) -- deploys to **prod**
+- Push to `main`
+- GitHub Release (non-prerelease, `v`-prefixed tag)
 - Manual dispatch (`workflow_dispatch`) -- caller selects stage or prod
 
-**What it creates or modifies:**
-- All Lambda functions (PostHandler, InboxHandler, ActorHandler, WebFingerHandler, etc.)
-- API Gateway (federation API and client API)
-- CloudFront distribution with cache behaviors
-- Route 53 DNS record for `activity.happitec.com` or `stage.activity.happitec.com`
-- CloudFront cache policies and origin request policies
-- S3 bucket policy for media OAC access
-- Frontend assets (`latex.css`) uploaded to the environment S3 media bucket
+**Key steps:**
+1. Install Swift 6.3 and Docker on the `linux_large` runner
+2. Restore or build the AL2023 Docker image (cached by Dockerfile content hash)
+3. Restore the SwiftPM `.build` directory (cached by `Package.resolved` hash + commit SHA)
+4. Build all Lambda zip archives via `swift package archive`
+5. Package with `sam package` and upload the packaged template as a GitHub Actions artifact
+6. Upload frontend assets as a separate artifact
+
+**Required secrets:**
+- `AWS_ACCESS_KEY_ID` -- IAM access key (for `sam package` S3 upload)
+- `AWS_SECRET_ACCESS_KEY` -- IAM secret key
+
+### Deploy App Stack (`deploy.yml`)
+
+Downloads the packaged template from the build workflow and deploys it via SAM on a standard `ubuntu-latest` runner. Triggers automatically when `build.yml` completes successfully, or can be triggered manually with a specific build run ID.
+
+**Triggers:**
+- `workflow_run` on "Build App" completion
+- Manual dispatch -- caller selects stage and optionally a build run ID
+
+**Key steps:**
+1. Determine the stage (inferred from build workflow name or manual input)
+2. Download the packaged template and frontend assets from the build run
+3. Deploy with `sam deploy` (nested stacks require `CAPABILITY_AUTO_EXPAND`)
+4. Upload frontend assets to the environment S3 media bucket with immutable cache headers
+5. Print stack outputs to the GitHub Actions summary
 
 **Required secrets:**
 - `AWS_ACCESS_KEY_ID` -- IAM access key for deployment
 - `AWS_SECRET_ACCESS_KEY` -- IAM secret key for deployment
 
 **Required repository variables:**
-- `PROXY_DISTRIBUTION_ID` -- CloudFront distribution ID for a parent-domain proxy (used for cross-invalidation)
-
-**Key steps:**
-1. Clean workspace (self-hosted runners only)
-2. Install Swift 6.3 on the runner if not already present
-3. Build or reuse a cached Docker image from `docker/Dockerfile.al2023-swift` (keyed by Dockerfile SHA-256 hash)
-4. Build Lambda zip archives via `swift package archive`
-5. Deploy with `sam deploy`
-6. Upload frontend assets to S3 with immutable cache headers
-7. Print stack outputs to the GitHub Actions summary
+- `PROXY_DISTRIBUTION_ID` -- CloudFront distribution ID for parent-domain proxy (cross-invalidation)
+- `ACTIVITY_DISTRIBUTION_ID_STAGE` -- CloudFront distribution ID for the stage activity subdomain
+- `ACTIVITY_DISTRIBUTION_ID_PROD` -- CloudFront distribution ID for the prod activity subdomain
+- `CLIENT_API_DOMAIN_STAGE` -- Execute-api domain for the stage Client API Gateway
+- `CLIENT_API_DOMAIN_PROD` -- Execute-api domain for the prod Client API Gateway
 
 See <doc:ArchitectureOverview> for a diagram of the resources this stack creates.
+
+### Fast Stage Deploy (`fast-stage-deploy.yml`)
+
+An optimized pipeline for code-only changes to stage. Detects which Lambda targets changed via `git diff`, builds only those targets selectively, and updates the Lambda functions directly via the AWS API -- bypassing CloudFormation entirely.
+
+**Triggers:**
+- Push to `main` when files under `Sources/` changed
+- Manual dispatch (`workflow_dispatch`)
+
+**Key steps:**
+1. Run `git diff` and pipe changed files through `scripts/detect-changed-targets.sh`
+2. If infrastructure files changed (`Package.swift`, `docker/`, `activity-app/`), skip and defer to the full pipeline
+3. Build only affected targets inside the Docker container using `scripts/build-selective.sh`
+4. Look up physical Lambda function names from the nested functions stack
+5. Update each Lambda directly with `aws lambda update-function-code`
+
+**Timing:** ~2m 23s with warm caches. See <doc:NestedStacksOverview> for details on the selective build system.
+
+### Integration Tests (`integration-tests.yml`)
+
+Runs the Swift integration test suite against a deployed stack. Triggers automatically after either "Deploy App Stack" or "Fast Stage Deploy" completes.
+
+**Triggers:**
+- `workflow_run` on "Deploy App Stack" or "Fast Stage Deploy" completion
+- Manual dispatch -- caller selects stage
+
+**Key steps:**
+1. Load or build the AL2023 Docker image (shared cache with build workflows)
+2. Fetch stack outputs and bearer token from AWS
+3. Run `swift test --filter IntegrationTests` inside the AL2023 Docker container
+
+The tests compile inside the Docker container to avoid ICU/Swift version conflicts on the runner host.
 
 ### Deploy DocC Documentation (`deploy-docc.yml`)
 
@@ -138,14 +183,14 @@ Or trigger the `environment.yml` workflow manually, selecting the desired stage.
 
 ### 4. App Stack (per stage)
 
-Deploy the app stack, which references both the bootstrap and environment stacks.
+Deploy the app stack, which references both the bootstrap and environment stacks. The app stack uses nested CloudFormation stacks, so `CAPABILITY_AUTO_EXPAND` is required alongside `CAPABILITY_IAM`.
 
 ```bash
 cd activity-app
 sam deploy \
   --stack-name activity-app-stage \
   --resolve-s3 \
-  --capabilities CAPABILITY_IAM \
+  --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
   --parameter-overrides \
     Stage=stage \
     EnvironmentStackName=activity-environment-stage \
@@ -155,7 +200,7 @@ sam deploy \
     ProxyDistributionId=YOUR_DISTRIBUTION_ID
 ```
 
-After the first manual deploy, pushes to `main` automatically deploy to stage via the `app.yml` workflow.
+After the first manual deploy, pushes to `main` automatically deploy to stage via the `build.yml` -> `deploy.yml` pipeline. See <doc:NestedStacksOverview> for details on the nested stack architecture.
 
 ### 5. Actor Provisioning
 
@@ -179,30 +224,50 @@ Set these repository variables so the CI/CD workflows can reference them:
 | Variable | Purpose | Example |
 |---|---|---|
 | `PROXY_DISTRIBUTION_ID` | CloudFront distribution ID for parent-domain proxy (cross-invalidation) | `E1234567890ABC` |
+| `ACTIVITY_DISTRIBUTION_ID_STAGE` | CloudFront distribution ID for the stage activity subdomain (from first deploy output) | `E1234567890ABC` |
+| `ACTIVITY_DISTRIBUTION_ID_PROD` | CloudFront distribution ID for the prod activity subdomain | `E1234567890ABC` |
+| `CLIENT_API_DOMAIN_STAGE` | Execute-api domain for the stage Client API Gateway | `abc123.execute-api.us-east-1.amazonaws.com` |
+| `CLIENT_API_DOMAIN_PROD` | Execute-api domain for the prod Client API Gateway | `def456.execute-api.us-east-1.amazonaws.com` |
 
-The `ACTIVITY_API_DOMAIN` and `ACTIVITY_CDN_DOMAIN` values are derived from stack outputs automatically.
+The `ACTIVITY_DISTRIBUTION_ID_*` and `CLIENT_API_DOMAIN_*` values come from the stack outputs after the first deploy. Set them and redeploy to enable CloudFront cache invalidation from Lambda and same-origin client API routing through CloudFront.
 
 ## CI/CD Pipeline
 
 ### Stage Deployment
 
-Every push to `main` triggers the `app.yml` workflow targeting **stage**. The workflow builds all Lambda handlers, deploys to CloudFormation, uploads frontend assets, and prints stack outputs.
+Every push to `main` triggers two parallel pipelines:
+
+1. **Full pipeline** (`build.yml` -> `deploy.yml`): Builds all handlers, packages with SAM, and deploys via CloudFormation. This handles infrastructure changes (template modifications, new resources).
+2. **Fast pipeline** (`fast-stage-deploy.yml`): Detects which handlers changed, builds only those, and updates Lambda functions directly. This handles code-only changes in ~2m 23s with warm caches.
+
+Both pipelines run in parallel. The fast pipeline skips automatically if infrastructure files changed, deferring to the full pipeline.
 
 ### Production Deployment
 
-Creating a GitHub Release with a `v`-prefixed tag (e.g., `v1.2.0`) triggers the `app.yml` workflow targeting **prod**. The release must not be marked as a prerelease. You can also trigger a prod deploy manually via `workflow_dispatch`.
+Creating a GitHub Release with a `v`-prefixed tag (e.g., `v1.2.0`) triggers `build.yml` targeting **prod**. The release must not be marked as a prerelease. When the build completes, `deploy.yml` picks up the artifact and deploys to prod. You can also trigger a prod deploy manually via `workflow_dispatch` on either workflow.
+
+The fast-stage-deploy pipeline is stage-only by design. Production deployments always go through the full CloudFormation pipeline.
+
+### Integration Tests
+
+After either deploy pipeline completes successfully, `integration-tests.yml` triggers automatically. It compiles and runs the Swift integration test suite inside the AL2023 Docker container against the deployed stack.
 
 ### Documentation Deployment
 
 Every push to `main` also triggers the `deploy-docc.yml` workflow, which builds and deploys DocC documentation to GitHub Pages. The documentation and app deployments run in parallel.
 
-### Docker Image Caching
+### Build Caching
 
-The `app.yml` workflow caches the Docker build image by tagging it with the first 12 characters of the Dockerfile's SHA-256 hash. If the Dockerfile has not changed since the last build, the cached image is reused. On GitHub-hosted runners there is no persistent Docker cache, so the image is always rebuilt. On self-hosted runners, the cache persists across workflow runs.
+All workflows that use Docker share two layers of caching via `actions/cache`:
+
+- **Docker image cache** -- keyed by the Dockerfile content hash. Saves ~3 minutes per run by loading a pre-built tarball instead of rebuilding the image.
+- **SwiftPM `.build` directory cache** -- keyed by `Package.resolved` hash and commit SHA, with fallback to any previous `.build` directory. Enables incremental Swift builds.
+
+See <doc:NestedStacksOverview> for detailed cache key strategies and timing comparisons.
 
 ### Frontend Assets
 
-The `app.yml` workflow uploads files from the `frontend/` directory to the environment S3 media bucket on every deploy, with `Cache-Control: public, max-age=31536000, immutable` headers. This includes `latex.css` for rendering mathematical notation in posts.
+The `deploy.yml` workflow uploads files from the `frontend/` directory to the environment S3 media bucket on every deploy, with `Cache-Control: public, max-age=31536000, immutable` headers. This includes `latex.css` for rendering mathematical notation in posts.
 
 ### CloudFront Cache Invalidation
 
@@ -210,30 +275,15 @@ You do not need to manually invalidate CloudFront caches after deployment. The `
 
 ## Runner Configuration
 
-All deployment workflows support both self-hosted and GitHub-hosted runners via repository variables. This lets you migrate between runner types without modifying workflow files.
+The build-intensive workflows (`build.yml`, `fast-stage-deploy.yml`, `integration-tests.yml`) run on the `linux_large` runner, which provides the disk space and memory needed for Docker builds and Swift compilation. The lightweight deploy workflow (`deploy.yml`) runs on `ubuntu-latest`.
 
 ### Configuration Variables
 
 | Variable | Purpose | Default (if unset) |
 |---|---|---|
-| `RUNNER_LABELS_LINUX` | Runner labels for Linux jobs | `ubuntu-latest` |
-| `RUNNER_LABELS_MACOS` | Runner labels for macOS jobs | `macos-15` |
+| `RUNNER_LABELS_MACOS` | Runner labels for macOS jobs (DocC builds) | `macos-26` |
 
-To use self-hosted runners, set these variables in the repository settings under **Settings > Variables > Actions**:
-
-- `RUNNER_LABELS_LINUX` = `["self-hosted", "linux"]`
-- `RUNNER_LABELS_MACOS` = `["self-hosted", "macOS"]`
-
-To use GitHub-hosted runners, remove or leave these variables unset. The workflows fall back to `ubuntu-latest` for Linux and `macos-15` for macOS.
-
-### Self-Hosted Runner Considerations
-
-When using self-hosted runners, the workflows include additional cleanup steps:
-- Workspace cleaning (`rm -rf .build/`, `git clean -fdx`) to avoid stale build artifacts
-- Docker container and builder pruning
-- Persistent Docker image cache (avoids rebuilding the Swift AL2023 image on every run)
-
-These cleanup steps are automatically skipped on GitHub-hosted runners, which start with a clean environment.
+The `linux_large` runner label is hardcoded in the build, fast-deploy, and integration-test workflows. The deploy workflow uses `ubuntu-latest` directly.
 
 ## Building the Docker Image
 
@@ -261,6 +311,7 @@ This produces zip archives under `.build/plugins/AWSLambdaPackager/outputs/AWSLa
 
 ### Related Articles
 
+- <doc:NestedStacksOverview>
 - <doc:ArchitectureOverview>
 - <doc:AWSPermissions>
 - <doc:CostEstimates>

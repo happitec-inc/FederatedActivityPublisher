@@ -14,15 +14,19 @@ Built for [happitec-inc](https://happitec.com) brand accounts like [@logos@happi
 
 ## Architecture
 
-Three SAM/CloudFormation templates, parameterized by stage:
+Three SAM/CloudFormation templates, parameterized by stage. The app template uses nested stacks:
 
 | Stack | Purpose |
 |-------|---------|
 | `activity-bootstrap` | Route 53 hosted zone, ACM wildcard certificate |
 | `activity-environment-{stage}` | DynamoDB table, S3 media bucket, SQS delivery queue |
-| `activity-app-{stage}` | 14 Lambda handlers, API Gateway, CloudFront |
+| `activity-app-{stage}` | Root orchestrator with two nested stacks |
+| -- `FunctionsStack` | 18 Lambda handlers, Server API Gateway, Client API Gateway |
+| -- `CdnStack` | CloudFront distribution, cache policies, DNS record |
 
 All public traffic is proxied through the `happitec.com` CloudFront distribution. The `activity.happitec.com` subdomain exists for infrastructure but is not the public-facing domain.
+
+The nested stack split isolates compute (Lambda + API Gateway) from edge (CloudFront + DNS), enabling a fast-deploy pipeline that updates only changed Lambda functions in ~2.5 minutes. See the [full documentation](https://docs.happitec.com/FederatedActivityPublisher/documentation/activitypubcore/nestedstacksoverview) for details.
 
 ## Lambda Handlers
 
@@ -77,12 +81,12 @@ swift package --allow-network-connections docker archive \
   --base-docker-image swift-al2023:6.3 \
   --disable-docker-image-update
 
-# Deploy to stage
+# Deploy to stage (nested stacks require CAPABILITY_AUTO_EXPAND)
 sam deploy \
   --template-file activity-app/template.yaml \
   --stack-name activity-app-stage \
   --resolve-s3 \
-  --capabilities CAPABILITY_IAM \
+  --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
   --parameter-overrides Stage=stage ...
 ```
 
@@ -107,14 +111,14 @@ These must be set for deployment workflows to succeed:
 
 | Variable | Used by | Default | Description |
 |----------|---------|---------|-------------|
-| `SERVER_DOMAIN` | app, provision-actor | _(required)_ | Domain where the ActivityPub server runs. In simple mode, same as handle domain. In split mode, the subdomain (e.g. `activity.example.com`). |
-| `HANDLE_DOMAIN` | app, provision-actor | _(required)_ | Domain used in handles (`@user@example.com`). Permanent once federated. |
-| `RUNNER_LABELS_LINUX` | app, bootstrap, environment | `"ubuntu-latest"` | JSON array of runner labels, e.g. `["self-hosted", "linux"]` |
+| `SERVER_DOMAIN` | build, deploy, provision-actor | _(required)_ | Domain where the ActivityPub server runs. In simple mode, same as handle domain. In split mode, the subdomain (e.g. `activity.example.com`). |
+| `HANDLE_DOMAIN` | build, deploy, provision-actor | _(required)_ | Domain used in handles (`@user@example.com`). Permanent once federated. |
 | `RUNNER_LABELS_MACOS` | deploy-docc | `"macos-26"` | JSON array of runner labels for macOS jobs |
-| `PROXY_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for cross-distribution cache invalidation; leave empty if not using a parent domain proxy |
-| `ACTIVITY_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for activity subdomain; passed as parameter to avoid circular dependency |
-| `CLIENT_API_DOMAIN_STAGE` | app | _(empty)_ | Execute-api domain for the stage Client API Gateway (e.g. `abc123.execute-api.us-east-1.amazonaws.com`). Enables same-origin routing through CloudFront. |
-| `CLIENT_API_DOMAIN_PROD` | app | _(empty)_ | Execute-api domain for the prod Client API Gateway. Same as stage but for the production stack. |
+| `PROXY_DISTRIBUTION_ID` | deploy | _(empty)_ | CloudFront distribution ID for cross-distribution cache invalidation; leave empty if not using a parent domain proxy |
+| `ACTIVITY_DISTRIBUTION_ID_STAGE` | deploy | _(empty)_ | CloudFront distribution ID for the stage activity subdomain; set after first deploy to enable Lambda cache invalidation |
+| `ACTIVITY_DISTRIBUTION_ID_PROD` | deploy | _(empty)_ | CloudFront distribution ID for the prod activity subdomain; set after first prod deploy |
+| `CLIENT_API_DOMAIN_STAGE` | deploy | _(empty)_ | Execute-api domain for the stage Client API Gateway (e.g. `abc123.execute-api.us-east-1.amazonaws.com`). Enables same-origin routing through CloudFront. |
+| `CLIENT_API_DOMAIN_PROD` | deploy | _(empty)_ | Execute-api domain for the prod Client API Gateway. Same as stage but for the production stack. |
 | `ENABLE_DOCC_DEPLOY` | deploy-docc | _(unset)_ | Set to `true` to enable private-repo DocC features (OG images, Mermaid diagrams) |
 
 ### SAM Parameter Overrides
@@ -126,6 +130,8 @@ Key parameters passed to `sam deploy` for the app stack:
 | `ServerDomain` | app | The domain the ActivityPub server runs on (e.g. `activity.example.com`) |
 | `HandleDomain` | app | The domain used in ActivityPub handles (e.g. `example.com` for `@user@example.com`) |
 | `ProxyDistributionId` | app | Optional cross-distribution invalidation target; empty string to skip |
+| `ActivityDistributionId` | app | CloudFront distribution ID for the activity subdomain; breaks circular dependency between Lambda and CloudFront |
+| `ClientApiDomain` | app | Client API Gateway execute-api domain for same-origin CloudFront routing |
 | `Stage` | app, environment | `stage` or `prod` |
 
 ## License

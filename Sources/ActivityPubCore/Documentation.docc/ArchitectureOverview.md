@@ -1,12 +1,14 @@
 # Architecture Overview
 
-The three-template stack architecture, request flows, and domain consolidation strategy.
+The nested stack architecture, request flows, and domain consolidation strategy.
 
 ## Overview
 
-The server is split into three AWS SAM templates with different lifecycles. This article covers the full architecture with diagrams showing how requests flow through the system.
+The server is split into three AWS SAM templates with different lifecycles. The app template itself uses nested CloudFormation stacks -- a root orchestrator delegates to a functions stack and a CDN stack. This article covers the full architecture with diagrams showing how requests flow through the system.
 
-### Three-Template Stack Architecture
+See <doc:NestedStacksOverview> for details on why the app stack is split into nested stacks and how the fast-deploy pipeline works.
+
+### Stack Architecture
 
 ```mermaid
 flowchart TB
@@ -27,25 +29,29 @@ flowchart TB
         SM["SSM Parameter Store<br/>RSA Keypairs"]
     end
 
-    subgraph "activity-app-{stage}"
-        CF["CloudFront<br/>(OAC for S3, cache-until-invalidated)"]
-        APIGW_S["API Gateway<br/>(federation)"]
-        NI["nodeinfo"]
-        WF["webfinger"]
-        ACTOR["actor"]
-        OBJECT["object"]
-        INBOX["inbox"]
-        OUTBOX["outbox"]
-        FOLLOWERS["followers"]
-        FOLLOWING["following"]
-        FEATURED["featured"]
-        FEATUREDTAGS["featuredTags"]
-        PROFILE["profile<br/>(HTML pages)"]
-        DELIVER["deliver<br/>(SQS consumer)"]
-        APIGW_C["API Gateway<br/>(client, authed)"]
-        POST["post"]
-        MEDIA["media-upload"]
-        PROFILE_UPDATE["profile-update"]
+    subgraph "activity-app-{stage} (root orchestrator)"
+        subgraph "CdnStack (cdn/template.yaml)"
+            CF["CloudFront<br/>(OAC for S3, cache-until-invalidated)"]
+        end
+        subgraph "FunctionsStack (functions/template.yaml)"
+            APIGW_S["API Gateway<br/>(federation)"]
+            NI["nodeinfo"]
+            WF["webfinger"]
+            ACTOR["actor"]
+            OBJECT["object"]
+            INBOX["inbox"]
+            OUTBOX["outbox"]
+            FOLLOWERS["followers"]
+            FOLLOWING["following"]
+            FEATURED["featured"]
+            FEATUREDTAGS["featuredTags"]
+            PROFILE["profile<br/>(HTML pages)"]
+            DELIVER["deliver<br/>(SQS consumer)"]
+            APIGW_C["API Gateway<br/>(client, authed)"]
+            POST["post"]
+            MEDIA["media-upload"]
+            PROFILE_UPDATE["profile-update"]
+        end
     end
 
     FED -->|"GET /.well-known/webfinger"| CF

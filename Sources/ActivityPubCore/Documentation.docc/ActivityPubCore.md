@@ -24,13 +24,13 @@ The server is designed for zero cost at rest -- you only pay when posting or rec
 
 ### Architecture at a Glance
 
-The system uses a three-template SAM architecture:
+The system uses a three-template SAM architecture with nested stacks:
 
 - **Bootstrap** -- Route 53 hosted zone and ACM wildcard certificate (deployed once)
 - **Environment** -- DynamoDB table, SQS queues, S3 media bucket, SSM key prefix (per stage)
-- **App** -- All Lambda functions, API Gateways, and CloudFront distribution (per stage)
+- **App** -- Root orchestrator with two nested stacks: FunctionsStack (all Lambda handlers + API Gateways) and CdnStack (CloudFront + cache policies + DNS)
 
-See <doc:ArchitectureOverview> for detailed diagrams.
+See <doc:ArchitectureOverview> for detailed diagrams and <doc:NestedStacksOverview> for the nested stack design and fast-deploy pipeline.
 
 ## Topics
 
@@ -40,6 +40,7 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 - <doc:DeployYourOwn>
 - <doc:BuildingAndDeploying>
 - <doc:ArchitectureOverview>
+- <doc:NestedStacksOverview>
 - <doc:DNSSetup>
 
 ### Operations
