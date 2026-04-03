@@ -49,6 +49,14 @@ Parameters:
       Client API Gateway execute-api domain (e.g. abc123.execute-api.us-east-1.amazonaws.com).
       Passed as a string to avoid circular dependency between ComposeFunction and ClientApi.
 
+  DomainOverride:
+    Type: String
+    Default: ""
+    Description: >-
+      Temporary CloudFront alias override for parallel prod migration.
+      When set, the CDN stack uses this domain as the CloudFront alias
+      instead of the computed domain, avoiding alias conflicts.
+
 Conditions:
   HasActivityDistribution: !Not [!Equals [!Ref ActivityDistributionId, ""]]
 
@@ -85,6 +93,7 @@ Resources:
         ProxyDistributionId: !Ref ProxyDistributionId
         ServerDomain: !Ref ServerDomain
         HandleDomain: !Ref HandleDomain
+        DomainOverride: !Ref DomainOverride
 
 Outputs:
   ApiEndpoint:
