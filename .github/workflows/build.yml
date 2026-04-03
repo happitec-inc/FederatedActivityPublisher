@@ -98,9 +98,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .build
-          key: swift-build-${{ hashFiles('Package.resolved') }}-${{ github.sha }}
+          key: swift-build-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            swift-build-${{ hashFiles('Package.resolved') }}-
+            swift-build-${{ hashFiles('**/Package.resolved') }}-
             swift-build-
 
       - name: Build Lambda zip
