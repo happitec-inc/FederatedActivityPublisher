@@ -99,6 +99,22 @@ jobs:
             swift-al2023:6.3 \
             bash scripts/build-selective.sh $TARGETS_ARGS
 
+      - name: Install AWS CLI
+        if: steps.changes.outputs.targets != 'skip'
+        run: |
+          if ! command -v aws &>/dev/null; then
+            ARCH=$(uname -m)
+            if [ "$ARCH" = "aarch64" ]; then
+              curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
+            else
+              curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            fi
+            sudo apt-get install -y unzip 2>/dev/null || true
+            unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install
+            rm -rf /tmp/awscliv2.zip /tmp/aws
+          fi
+          aws --version
+
       - name: Configure AWS credentials
         if: steps.changes.outputs.targets != 'skip'
         uses: aws-actions/configure-aws-credentials@v6
