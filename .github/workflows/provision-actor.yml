@@ -51,6 +51,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
+      - name: Install Swift dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils gcc g++ libc6-dev libcurl4-openssl-dev libssl-dev libxml2-dev pkg-config unzip
+          # Ensure pkg-config binary exists (Ubuntu 24.04 may install pkgconf instead)
+          which pkg-config || sudo ln -sf /usr/bin/pkgconf /usr/bin/pkg-config || true
+
       - name: Install AWS CLI
         run: |
           if ! command -v aws &>/dev/null; then
@@ -64,13 +71,6 @@ jobs:
             rm -rf /tmp/awscliv2.zip /tmp/aws
           fi
           aws --version
-
-      - name: Install Swift dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y binutils gcc g++ libc6-dev libcurl4-openssl-dev libssl-dev libxml2-dev pkg-config
-          # Ensure pkg-config binary exists (Ubuntu 24.04 may install pkgconf instead)
-          which pkg-config || sudo ln -sf /usr/bin/pkgconf /usr/bin/pkg-config || true
 
       - name: Install Swift
         run: |
