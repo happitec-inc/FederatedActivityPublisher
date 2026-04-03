@@ -82,9 +82,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .build
-          key: swift-build-${{ hashFiles('Package.resolved') }}-${{ github.sha }}
+          key: swift-build-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            swift-build-${{ hashFiles('Package.resolved') }}-
+            swift-build-${{ hashFiles('**/Package.resolved') }}-
             swift-build-
 
       - name: Build changed targets in Docker
@@ -98,6 +98,9 @@ jobs:
             -w /workspace \
             swift-al2023:6.3 \
             bash scripts/build-selective.sh $TARGETS_ARGS
+
+          # Fix permissions so actions/cache can tar the .build directory
+          sudo chown -R $(id -u):$(id -g) .build
 
       - name: Install AWS CLI
         if: steps.changes.outputs.targets != 'skip'
