@@ -1,0 +1,482 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Activity App — CDN Stack (CloudFront, Cache Policies, DNS)
+
+Parameters:
+  Stage:
+    Type: String
+    AllowedValues:
+      - stage
+      - prod
+
+  EnvironmentStackName:
+    Type: String
+
+  BootstrapStackName:
+    Type: String
+
+  ServerlessRestApiId:
+    Type: String
+    Description: Implicit SAM API Gateway ID from Functions stack
+
+  ClientApiId:
+    Type: String
+    Description: Client API Gateway ID from Functions stack
+
+  ClientApiDomain:
+    Type: String
+    Default: ""
+    Description: >-
+      Client API Gateway execute-api domain (e.g. abc123.execute-api.us-east-1.amazonaws.com).
+
+  ProxyDistributionId:
+    Type: String
+    Default: ""
+
+  ServerDomain:
+    Type: String
+    Description: Domain where actor URLs live (e.g. happitec.com)
+
+  HandleDomain:
+    Type: String
+    Description: Domain used in handles (@user@happitec.com)
+
+  DomainOverride:
+    Type: String
+    Default: ""
+    Description: >-
+      Temporary alias override for prod migration. When set, this domain is used
+      as the CloudFront alias instead of the computed domain.
+
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
+
+  HasCrossDistribution: !Not [!Equals [!Ref ProxyDistributionId, ""]]
+
+  HasClientApiDomain: !Not [!Equals [!Ref ClientApiDomain, ""]]
+
+  HasDomainOverride: !Not [!Equals [!Ref DomainOverride, ""]]
+
+Resources:
+  # --- CloudFront Cache Policies ---
+
+  WebFingerCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "activity-webfinger-cache-${AWS::StackName}"
+        DefaultTTL: 86400
+        MaxTTL: 86400
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: whitelist
+            QueryStrings:
+              - resource
+          EnableAcceptEncodingGzip: true
+
+  OutboxCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "activity-outbox-cache-${AWS::StackName}"
+        DefaultTTL: 31536000
+        MaxTTL: 31536000
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: whitelist
+            QueryStrings:
+              - page
+              - min_id
+              - max_id
+          EnableAcceptEncodingGzip: true
+
+  LongCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "activity-long-cache-${AWS::StackName}"
+        DefaultTTL: 31536000
+        MaxTTL: 31536000
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+          EnableAcceptEncodingGzip: true
+
+  MediumCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "activity-medium-cache-${AWS::StackName}"
+        DefaultTTL: 86400
+        MaxTTL: 86400
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+          EnableAcceptEncodingGzip: true
+
+  ShortCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "activity-short-cache-${AWS::StackName}"
+        DefaultTTL: 3600
+        MaxTTL: 3600
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+          EnableAcceptEncodingGzip: true
+
+  # --- CloudFront Origin Request Policies ---
+
+  InboxOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub "activity-inbox-origin-${AWS::StackName}"
+        CookiesConfig:
+          CookieBehavior: none
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers:
+            - Date
+            - Digest
+            - Signature
+            - Signature-Input
+            - Content-Type
+            - Content-Digest
+        QueryStringsConfig:
+          QueryStringBehavior: none
+
+  SessionOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub "activity-session-origin-${AWS::StackName}"
+        CookiesConfig:
+          CookieBehavior: whitelist
+          Cookies:
+            - session
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers:
+            - Content-Type
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
+  ClientApiOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub "activity-clientapi-origin-${AWS::StackName}"
+        CookiesConfig:
+          CookieBehavior: whitelist
+          Cookies:
+            - session
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers:
+            - Content-Type
+            - X-CSRF-Token
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
+  # --- CloudFront OAC for S3 Media ---
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "activity-media-oac-${AWS::StackName}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # --- S3 Media Bucket Policy ---
+
+  MediaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !ImportValue
+        Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub
+              - "${BucketArn}/*"
+              - BucketArn: !ImportValue
+                  Fn::Sub: "${EnvironmentStackName}-MediaBucketArn"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+
+  # --- CloudFront Function: /@username rewrite ---
+
+  ProfileRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "activity-profile-rewrite-${AWS::StackName}"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: "Rewrite /@username to /profile/username"
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          if (request.uri.startsWith('/@')) {
+            request.uri = '/profile/' + request.uri.substring(2);
+          }
+          return request;
+        }
+
+  # --- CloudFront Distribution ---
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "activity-app-${Stage}"
+        Aliases:
+          - !If
+            - HasDomainOverride
+            - !Ref DomainOverride
+            - !If
+              - IsProd
+              - !ImportValue
+                  Fn::Sub: "${BootstrapStackName}-DomainName"
+              - !Sub
+                - "${Stage}.${Domain}"
+                - Domain: !ImportValue
+                    Fn::Sub: "${BootstrapStackName}-DomainName"
+        ViewerCertificate:
+          AcmCertificateArn: !ImportValue
+            Fn::Sub: "${BootstrapStackName}-CertificateArn"
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        HttpVersion: http2and3
+        Origins:
+          - Id: ApiGateway
+            DomainName: !Sub "${ServerlessRestApiId}.execute-api.${AWS::Region}.amazonaws.com"
+            OriginPath: /Prod
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+          - Id: ClientApiGateway
+            DomainName: !If
+              - HasClientApiDomain
+              - !Ref ClientApiDomain
+              - !Sub "${ServerlessRestApiId}.execute-api.${AWS::Region}.amazonaws.com"
+            OriginPath: !If
+              - HasClientApiDomain
+              - !Sub "/${Stage}"
+              - /Prod
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+          - Id: S3Media
+            DomainName: !Sub
+              - "${BucketName}.s3.${AWS::Region}.amazonaws.com"
+              - BucketName: !ImportValue
+                  Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: ApiGateway
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled managed policy
+          OriginRequestPolicyId: !Ref InboxOriginRequestPolicy
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+        CacheBehaviors:
+          - PathPattern: /auth/*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref SessionOriginRequestPolicy
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            Compress: true
+          - PathPattern: /api/internal/*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref SessionOriginRequestPolicy
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            Compress: true
+          - PathPattern: /compose
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref SessionOriginRequestPolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /api/v1/statuses
+            TargetOriginId: ClientApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref ClientApiOriginRequestPolicy
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            Compress: true
+          - PathPattern: /api/v2/media
+            TargetOriginId: ClientApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref ClientApiOriginRequestPolicy
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            Compress: true
+          - PathPattern: /api/v1/accounts/update_credentials
+            TargetOriginId: ClientApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: !Ref ClientApiOriginRequestPolicy
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            Compress: true
+          - PathPattern: /api/v1/instance
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /api/v2/instance
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /.well-known/nodeinfo
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /nodeinfo/*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /.well-known/webfinger*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref WebFingerCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/outbox*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref OutboxCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/statuses/*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref LongCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/collections/featured
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/collections/tags
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/followers*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref ShortCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/following*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref ShortCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /users/*/inbox
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: !Ref InboxOriginRequestPolicy
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            Compress: true
+          - PathPattern: /users/*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /media/*
+            TargetOriginId: S3Media
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref LongCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+          - PathPattern: /@*
+            TargetOriginId: ApiGateway
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref MediumCachePolicy
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt ProfileRewriteFunction.FunctionARN
+
+  # --- Route 53 DNS Record ---
+
+  FederationDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !ImportValue
+        Fn::Sub: "${BootstrapStackName}-HostedZoneId"
+      Name: !If
+        - IsProd
+        - !ImportValue
+            Fn::Sub: "${BootstrapStackName}-DomainName"
+        - !Sub
+          - "${Stage}.${Domain}"
+          - Domain: !ImportValue
+              Fn::Sub: "${BootstrapStackName}-DomainName"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+
+Outputs:
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID
+    Value: !Ref CloudFrontDistribution
+
+  CloudFrontDomainName:
+    Description: CloudFront distribution domain name
+    Value: !GetAtt CloudFrontDistribution.DomainName
