@@ -101,7 +101,7 @@ jobs:
           sam deploy \
             --template-file packaged.yaml \
             --stack-name "activity-app-${STAGE}" \
-            --capabilities CAPABILITY_IAM \
+            --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
             --region us-east-1 \

@@ -1,0 +1,563 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Activity App — Functions Stack (Lambda + API Gateway)
+
+Parameters:
+  Stage:
+    Type: String
+    AllowedValues:
+      - stage
+      - prod
+
+  EnvironmentStackName:
+    Type: String
+
+  BootstrapStackName:
+    Type: String
+
+  ServerDomain:
+    Type: String
+    Description: Domain where actor URLs live (e.g. happitec.com)
+
+  HandleDomain:
+    Type: String
+    Description: Domain used in handles (@user@happitec.com)
+
+  ProxyDistributionId:
+    Type: String
+    Default: ""
+    Description: CloudFront distribution ID for a parent-domain proxy (cross-invalidation)
+
+  ActivityDistributionId:
+    Type: String
+    Default: ""
+    Description: >-
+      CloudFront distribution ID for activity.happitec.com, passed as a
+      workflow parameter (not !Ref) to avoid circular dependency with the
+      implicit ServerlessRestApi used by InboxFunction.
+
+  ClientApiDomain:
+    Type: String
+    Default: ""
+    Description: >-
+      Client API Gateway execute-api domain (e.g. abc123.execute-api.us-east-1.amazonaws.com).
+      Passed as a string to avoid circular dependency between ComposeFunction and ClientApi.
+
+  CloudFrontDistributionId:
+    Type: String
+    Default: ""
+    Description: CloudFront distribution ID from CDN stack (for PostFunction/ProfileUpdateFunction invalidation)
+
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
+
+  HasCrossDistribution: !Not [!Equals [!Ref ProxyDistributionId, ""]]
+
+  HasActivityDistribution: !Not [!Equals [!Ref ActivityDistributionId, ""]]
+
+  HasCloudFrontDistribution: !Not [!Equals [!Ref CloudFrontDistributionId, ""]]
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: provided.al2023
+    Architectures:
+      - arm64
+    Handler: swift.bootstrap
+    Environment:
+      Variables:
+        TABLE_NAME: !ImportValue
+          Fn::Sub: "${EnvironmentStackName}-TableName"
+        SERVER_DOMAIN: !If
+          - IsProd
+          - !Ref ServerDomain
+          - !Sub
+            - "${Stage}.${Domain}"
+            - Domain: !ImportValue
+                Fn::Sub: "${BootstrapStackName}-DomainName"
+        HANDLE_DOMAIN: !If
+          - IsProd
+          - !Ref HandleDomain
+          - !Sub
+            - "${Stage}.${HandleDomain}"
+            - {}
+        QUEUE_URL: !ImportValue
+          Fn::Sub: "${EnvironmentStackName}-QueueUrl"
+        SSM_KEY_PREFIX: !ImportValue
+          Fn::Sub: "${EnvironmentStackName}-SSMKeyPrefix"
+
+Resources:
+  # --- Client API Gateway (routed through CloudFront as same-origin) ---
+  ClientApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      Auth:
+        DefaultAuthorizer: NONE
+      BinaryMediaTypes:
+        - "multipart/form-data"
+        - "application/octet-stream"
+        - "image/*"
+
+  PostFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-post-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/PostHandler/PostHandler.zip
+      Timeout: 60
+      Environment:
+        Variables:
+          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistributionId
+          PROXY_DISTRIBUTION_ID: !Ref ProxyDistributionId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - SQSSendMessagePolicy:
+            QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
+        - !If
+          - HasCloudFrontDistribution
+          - Statement:
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource:
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistributionId}"
+                  - !If
+                    - HasCrossDistribution
+                    - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProxyDistributionId}"
+                    - !Ref AWS::NoValue
+          - !Ref AWS::NoValue
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+      Events:
+        CreateStatus:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ClientApi
+            Path: /api/v1/statuses
+            Method: POST
+
+  MediaUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-media-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/MediaUploadHandler/MediaUploadHandler.zip
+      Timeout: 60
+      Environment:
+        Variables:
+          MEDIA_BUCKET_NAME: !ImportValue
+            Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub
+                - "${BucketArn}/*"
+                - BucketArn: !ImportValue
+                    Fn::Sub: "${EnvironmentStackName}-MediaBucketArn"
+        - DynamoDBCrudPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+      Events:
+        UploadMedia:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ClientApi
+            Path: /api/v2/media
+            Method: POST
+
+  ProfileUpdateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-profileupdate-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/ProfileUpdateHandler/ProfileUpdateHandler.zip
+      Timeout: 60
+      Environment:
+        Variables:
+          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistributionId
+          PROXY_DISTRIBUTION_ID: !Ref ProxyDistributionId
+          MEDIA_BUCKET_NAME: !ImportValue
+            Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - Statement:
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub
+                - "${BucketArn}/*"
+                - BucketArn: !ImportValue
+                    Fn::Sub: "${EnvironmentStackName}-MediaBucketArn"
+        - SQSSendMessagePolicy:
+            QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+        - !If
+          - HasCloudFrontDistribution
+          - Statement:
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource:
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistributionId}"
+                  - !If
+                    - HasCrossDistribution
+                    - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProxyDistributionId}"
+                    - !Ref AWS::NoValue
+          - !Ref AWS::NoValue
+      Events:
+        UpdateCredentials:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ClientApi
+            Path: /api/v1/accounts/update_credentials
+            Method: PATCH
+
+  WebFingerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-webfinger-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/WebFingerHandler/WebFingerHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        WebFinger:
+          Type: Api
+          Properties:
+            Path: /.well-known/webfinger
+            Method: GET
+
+  ActorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-actor-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/ActorHandler/ActorHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetActor:
+          Type: Api
+          Properties:
+            Path: /users/{username}
+            Method: GET
+
+  InstanceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-instance-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/InstanceHandler/InstanceHandler.zip
+      Events:
+        InstanceV1:
+          Type: Api
+          Properties:
+            Path: /api/v1/instance
+            Method: GET
+        InstanceV2:
+          Type: Api
+          Properties:
+            Path: /api/v2/instance
+            Method: GET
+
+  NodeInfoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-nodeinfo-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/NodeInfoHandler/NodeInfoHandler.zip
+      Events:
+        NodeInfoDiscovery:
+          Type: Api
+          Properties:
+            Path: /.well-known/nodeinfo
+            Method: GET
+        NodeInfo21:
+          Type: Api
+          Properties:
+            Path: /nodeinfo/2.1
+            Method: GET
+
+  OutboxFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-outbox-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/OutboxHandler/OutboxHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetOutbox:
+          Type: Api
+          Properties:
+            Path: /users/{username}/outbox
+            Method: GET
+
+  FollowersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-followers-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/FollowersHandler/FollowersHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetFollowers:
+          Type: Api
+          Properties:
+            Path: /users/{username}/followers
+            Method: GET
+
+  FollowingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-following-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/FollowingHandler/FollowingHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetFollowing:
+          Type: Api
+          Properties:
+            Path: /users/{username}/following
+            Method: GET
+
+  FeaturedFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-featured-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/FeaturedHandler/FeaturedHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetFeatured:
+          Type: Api
+          Properties:
+            Path: /users/{username}/collections/featured
+            Method: GET
+
+  FeaturedTagsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-featuredtags-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/FeaturedTagsHandler/FeaturedTagsHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetFeaturedTags:
+          Type: Api
+          Properties:
+            Path: /users/{username}/collections/tags
+            Method: GET
+
+  ObjectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-object-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/ObjectHandler/ObjectHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetObject:
+          Type: Api
+          Properties:
+            Path: /users/{username}/statuses/{id}
+            Method: GET
+
+  ProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-profile-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/ProfileHandler/ProfileHandler.zip
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+      Events:
+        GetProfile:
+          Type: Api
+          Properties:
+            Path: /profile/{proxy+}
+            Method: GET
+
+  InboxFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-inbox-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/InboxHandler/InboxHandler.zip
+      ReservedConcurrentExecutions: 25
+      Environment:
+        Variables:
+          CLOUDFRONT_DISTRIBUTION_ID: !Ref ActivityDistributionId
+          PROXY_DISTRIBUTION_ID: !Ref ProxyDistributionId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - SQSSendMessagePolicy:
+            QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
+        - !If
+          - HasActivityDistribution
+          - Statement:
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource:
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ActivityDistributionId}"
+          - !Ref AWS::NoValue
+        - !If
+          - HasCrossDistribution
+          - Statement:
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource:
+                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProxyDistributionId}"
+          - !Ref AWS::NoValue
+      Events:
+        PostInbox:
+          Type: Api
+          Properties:
+            Path: /users/{username}/inbox
+            Method: POST
+
+  DeliverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-deliver-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/DeliverHandler/DeliverHandler.zip
+      Timeout: 60
+      ReservedConcurrentExecutions: 5
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/keys/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-QueueArn"
+            BatchSize: 1
+
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-auth-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/AuthHandler/AuthHandler.zip
+      Timeout: 30
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+      Events:
+        LoginPage:
+          Type: Api
+          Properties:
+            Path: /auth/login
+            Method: GET
+        RegisterPage:
+          Type: Api
+          Properties:
+            Path: /auth/register
+            Method: GET
+        AuthChallenge:
+          Type: Api
+          Properties:
+            Path: /api/internal/auth/challenge
+            Method: POST
+        AuthVerify:
+          Type: Api
+          Properties:
+            Path: /api/internal/auth/verify
+            Method: POST
+        RegisterChallenge:
+          Type: Api
+          Properties:
+            Path: /api/internal/passkeys/register-challenge
+            Method: POST
+        RegisterPasskey:
+          Type: Api
+          Properties:
+            Path: /api/internal/passkeys/register
+            Method: POST
+
+  ComposeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-compose-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/ComposeHandler/ComposeHandler.zip
+      Timeout: 30
+      Policies:
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/*"
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+      Events:
+        ComposePage:
+          Type: Api
+          Properties:
+            Path: /compose
+            Method: GET
+
+Outputs:
+  ServerlessRestApiId:
+    Description: Implicit SAM API Gateway ID (federation endpoints)
+    Value: !Ref ServerlessRestApi
+
+  ClientApiId:
+    Description: Client API Gateway ID
+    Value: !Ref ClientApi
+
+  ApiEndpoint:
+    Description: API Gateway endpoint URL (direct, bypasses CloudFront)
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+
+  ClientApiUrl:
+    Description: Client API endpoint URL
+    Value: !Sub "https://${ClientApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+
+  ServerDomainOutput:
+    Description: Public domain for the federation API
+    Value: !If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]
