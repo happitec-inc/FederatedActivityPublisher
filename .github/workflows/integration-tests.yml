@@ -44,12 +44,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Fix Swift 6.3 ICU header conflict
+      - name: Install Swift dependencies
         run: |
-          # Swift 6.3's _FoundationICU conflicts with system ICU headers.
-          # Remove the ICU dev headers but keep libxml2-dev (needed by smithy-swift).
-          sudo apt-get remove -y libicu-dev || true
-          sudo apt-get install -y libxml2-dev
+          sudo apt-get update
+          sudo apt-get install -y libxml2-dev pkg-config
+          which pkg-config || sudo ln -sf /usr/bin/pkgconf /usr/bin/pkg-config || true
 
       - name: Install Swift
         run: |
@@ -65,6 +64,19 @@ jobs:
             curl -fsSL "$SWIFT_URL" | sudo tar xz --strip-components=2 -C /usr/local
           fi
           swift --version
+
+      - name: Fix Swift 6.3 ICU header conflict
+        run: |
+          # Swift 6.3 bundles _FoundationICU (ICU 76+) with newer UErrorCode enums
+          # than system ICU 74. Replace system ICU headers with Swift's bundled version.
+          SWIFT_ICU_DIR=$(find /usr/local/lib/swift -name '_foundation_unicode' -type d | head -1)
+          if [ -n "$SWIFT_ICU_DIR" ]; then
+            sudo rm -rf /usr/include/unicode
+            ARCH_INCLUDE="/usr/include/$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo '')"
+            [ -d "$ARCH_INCLUDE/unicode" ] && sudo rm -rf "$ARCH_INCLUDE/unicode"
+            sudo ln -sf "$SWIFT_ICU_DIR" /usr/include/unicode
+            echo "Replaced system ICU headers with Swift's bundled ICU from $SWIFT_ICU_DIR"
+          fi
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
