@@ -64,6 +64,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y binutils gcc g++ libc6-dev libcurl4-openssl-dev libssl-dev libxml2-dev
+          # Swift 6.3's _FoundationICU conflicts with system ICU headers
+          sudo apt-get remove -y libicu-dev || true
+          sudo apt-get install -y --reinstall libxml2-dev
 
       - name: Install Swift
         run: |
