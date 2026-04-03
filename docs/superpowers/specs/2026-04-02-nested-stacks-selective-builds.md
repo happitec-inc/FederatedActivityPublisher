@@ -83,7 +83,7 @@ Resources:
 
   CdnStack:
     Type: AWS::CloudFormation::Stack
-    DependsOn: FunctionsStack
+    # No explicit DependsOn needed — !GetAtt references create implicit dependency
     Properties:
       TemplateURL: cdn/template.yaml
       Parameters:
@@ -143,6 +143,25 @@ Currently, PostFunction and ProfileUpdateFunction use `!Ref CloudFrontDistributi
 In the nested architecture, the distribution lives in the CDN stack. Both the env var AND the IAM policy ARN must switch to the parameter-based distribution ID.
 
 **Resolution:** The `ActivityDistributionId` parameter already exists and is passed as a workflow variable. The same pattern works here: PostFunction and ProfileUpdateFunction will use the `CloudFrontDistributionId` parameter passed from the root, which on first deploy uses `ActivityDistributionId` and on subsequent deploys uses the actual CDN output. The IAM policy ARNs become `!Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistributionId}"`.
+
+**First-deploy handling:** On first deploy, `CloudFrontDistributionId` is empty (no distribution exists yet). An empty string produces a malformed IAM ARN (`arn:aws:cloudfront::account:distribution/`) which fails CloudFormation validation. The functions template must use a `HasCloudFrontDistribution` condition (same pattern as the existing `HasActivityDistribution` / `HasCrossDistribution` conditions on InboxFunction) to conditionally include the invalidation IAM policy:
+
+```yaml
+Conditions:
+  HasCloudFrontDistribution: !Not [!Equals [!Ref CloudFrontDistributionId, ""]]
+
+# In PostFunction/ProfileUpdateFunction Policies:
+- !If
+  - HasCloudFrontDistribution
+  - Statement:
+      - Effect: Allow
+        Action: cloudfront:CreateInvalidation
+        Resource:
+          - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistributionId}"
+  - !Ref AWS::NoValue
+```
+
+This means first deploy works (no invalidation permissions, no distribution to invalidate anyway), and the second deploy (after `ACTIVITY_DISTRIBUTION_ID` is set) adds the IAM policy. This is the exact same two-pass pattern already documented in Section 4.2 step 5-6.
 
 **Implementation note on ServerDomainOutput:** The current template computes `ServerDomainOutput` as `!If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]`, while `Globals` computes `SERVER_DOMAIN` differently using `!ImportValue` from the bootstrap stack. These are two different computations that happen to produce the same result. In the nested architecture, unify this: compute the domain once in the root stack and pass it down as a parameter.
 
@@ -324,17 +343,28 @@ sam sync --code \
 
 `sam sync --code` is documented to work with nested stacks but is unreliable in practice — it can fail to resolve Lambda physical resource IDs across nested stacks, particularly with SAM transforms. **The primary fast path should be direct `aws lambda update-function-code` calls**, not `sam sync`.
 
-The fast-stage-deploy workflow calls `aws lambda update-function-code` directly for each changed function:
+The fast-stage-deploy workflow calls `aws lambda update-function-code` directly for each changed function. Function names are resolved from the CloudFormation stack (not derived via string manipulation) to avoid fragile naming assumptions:
 
 ```bash
+# Build a target-to-function-name map from the stack's Lambda resources
+FUNCTION_MAP=$(aws cloudformation list-stack-resources \
+  --stack-name "activity-app-stage" \
+  --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].[LogicalResourceId,PhysicalResourceId]" \
+  --output text)
+
 for TARGET in $CHANGED_TARGETS; do
-  FUNCTION_NAME="activity-app-$(echo $TARGET | sed 's/Handler//' | tr '[:upper:]' '[:lower:]')-stage"
+  # Map Swift target name (e.g. "PostHandler") to logical ID (e.g. "PostFunction")
+  LOGICAL_ID="${TARGET/Handler/Function}"
+  FUNCTION_NAME=$(echo "$FUNCTION_MAP" | grep "$LOGICAL_ID" | awk '{print $2}')
+
   aws lambda update-function-code \
     --function-name "$FUNCTION_NAME" \
     --zip-file "fileb://.build/lambda/$TARGET/$TARGET.zip" \
     --region us-east-1
 done
 ```
+
+Note: with nested stacks, the Lambda resources are in the functions child stack, so the query targets the nested stack's physical stack name. The root stack's resources are `AWS::CloudFormation::Stack` types, not Lambda functions.
 
 This bypasses both CloudFormation and SAM entirely. Combined with selective builds, a single-handler change goes from 20+ minutes to under 2 minutes: build one target (~1 min) + upload one zip (~5 sec).
 
@@ -488,7 +518,7 @@ Mitigations:
 
 ### Phase 1: Nested Stack Templates (2-3 days)
 - [ ] Create `activity-app/functions/template.yaml` with full `Globals`, `Conditions`, and `Transform` blocks
-- [ ] Create `activity-app/cdn/template.yaml` with `${AWS::StackName}` naming for all named resources
+- [ ] Create `activity-app/cdn/template.yaml` with `${AWS::StackName}` naming for all named resources and `DomainOverride` parameter for prod migration temporary alias
 - [ ] Rewrite `activity-app/template.yaml` as root orchestrator
 - [ ] Switch PostFunction/ProfileUpdateFunction IAM policy ARNs from `${CloudFrontDistribution}` to `${CloudFrontDistributionId}` parameter
 - [ ] Unify `ServerDomainOutput` computation — compute once in root, pass down
