@@ -44,37 +44,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Swift dependencies
+      - name: Install Docker
         run: |
-          sudo apt-get update
-          sudo apt-get install -y binutils gcc g++ libc6-dev libcurl4-openssl-dev libssl-dev libxml2-dev pkg-config
-
-      - name: Install Swift
-        run: |
-          if swift --version 2>/dev/null | grep -q "6.3"; then
-            echo "Swift 6.3 already installed"
+          if command -v docker &>/dev/null; then
+            echo "Docker already installed"
           else
-            ARCH=$(uname -m)
-            if [ "$ARCH" = "aarch64" ]; then
-              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404-aarch64/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04-aarch64.tar.gz"
-            else
-              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04.tar.gz"
-            fi
-            curl -fsSL "$SWIFT_URL" | sudo tar xz --strip-components=2 -C /usr/local
+            curl -fsSL https://get.docker.com | sudo sh
           fi
-          swift --version
+          sudo chmod 666 /var/run/docker.sock
+          docker --version
 
-      - name: Fix Swift 6.3 ICU header conflict
+      - name: Cache Docker image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/docker-image.tar
+          key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
+
+      - name: Load or build AL2023 Swift Docker image
         run: |
-          # Swift 6.3 bundles _FoundationICU (ICU 76+) with newer UErrorCode enums
-          # than system ICU 74. Symlink Swift's headers over system ICU headers.
-          SWIFT_ICU_DIR=$(find /usr/local/lib/swift -name '_foundation_unicode' -type d | head -1)
-          if [ -n "$SWIFT_ICU_DIR" ]; then
-            sudo rm -rf /usr/include/unicode
-            ARCH_INCLUDE="/usr/include/$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo '')"
-            [ -d "$ARCH_INCLUDE/unicode" ] && sudo rm -rf "$ARCH_INCLUDE/unicode"
-            sudo ln -sf "$SWIFT_ICU_DIR" /usr/include/unicode
-            echo "Replaced system ICU headers with Swift's bundled ICU from $SWIFT_ICU_DIR"
+          if [ -f /tmp/docker-image.tar ]; then
+            echo "Loading cached Docker image"
+            docker load < /tmp/docker-image.tar
+          else
+            echo "Building Docker image"
+            docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
+            docker save swift-al2023:6.3 > /tmp/docker-image.tar
           fi
 
       - name: Configure AWS credentials
@@ -113,11 +107,19 @@ jobs:
             echo "bearer=$BEARER" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run integration tests
+      - name: Run integration tests in Docker
         env:
           TEST_API_URL: ${{ steps.stack.outputs.api_url }}
           TEST_CLIENT_API_URL: ${{ steps.stack.outputs.client_api_url }}
           TEST_BEARER_TOKEN: ${{ steps.token.outputs.bearer }}
           TEST_HANDLE_DOMAIN: ${{ steps.set-stage.outputs.stage == 'prod' && vars.HANDLE_DOMAIN || format('{0}.{1}', steps.set-stage.outputs.stage, vars.HANDLE_DOMAIN) }}
-          LD_LIBRARY_PATH: /usr/local/lib/swift/linux
-        run: swift test --filter IntegrationTests
+        run: |
+          docker run --rm \
+            -v "$(pwd):/workspace" \
+            -w /workspace \
+            -e TEST_API_URL \
+            -e TEST_CLIENT_API_URL \
+            -e TEST_BEARER_TOKEN \
+            -e TEST_HANDLE_DOMAIN \
+            swift-al2023:6.3 \
+            swift test --filter IntegrationTests
