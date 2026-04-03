@@ -1,6 +1,6 @@
 # Nested Stacks, Selective Builds, and sam sync — Migration Design
 
-## 2026-04-02
+## 2026-04-02 (revised 2026-04-03 after code review)
 
 ---
 
@@ -124,6 +124,10 @@ Outputs:
 - `ClientApi` (`AWS::Serverless::Api`) — because PostFunction, MediaUploadFunction, and ProfileUpdateFunction reference it via `RestApiId: !Ref ClientApi`
 - The implicit `ServerlessRestApi` — created by SAM from Event blocks that do not specify a RestApiId
 - `Globals` section with shared Function defaults
+- Its own `Conditions` block (replicating `IsProd`, `HasCrossDistribution`, etc. from the current flat template)
+- Each nested template must be a complete, self-contained SAM template with its own `Transform: AWS::Serverless-2016-10-31`
+
+**Implementation note on Globals:** The current `Globals` section uses `!ImportValue` with `Fn::Sub` for cross-stack references and `!If` conditions (`IsProd`). These conditions, imports, and the full `Globals` block must be replicated in the functions nested template along with its own `Conditions` block. Easy to miss during implementation.
 
 **Parameters it receives from root:**
 - `Stage`, `EnvironmentStackName`, `BootstrapStackName`, `ServerDomain`, `HandleDomain`
@@ -132,9 +136,15 @@ Outputs:
 
 **Key design note on CloudFront Distribution ID circular reference:**
 
-Currently, PostFunction and ProfileUpdateFunction use `!Ref CloudFrontDistribution` for `CLOUDFRONT_DISTRIBUTION_ID` env var. In the nested architecture, the distribution lives in the CDN stack. This creates a circular dependency: CDN needs API Gateway IDs from Functions, and Functions needs CloudFront distribution ID from CDN.
+Currently, PostFunction and ProfileUpdateFunction use `!Ref CloudFrontDistribution` for both:
+1. The `CLOUDFRONT_DISTRIBUTION_ID` **env var**
+2. The **IAM policy ARN** for `cloudfront:CreateInvalidation` (`!Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"`)
 
-**Resolution:** The `ActivityDistributionId` parameter already exists and is passed as a workflow variable. The same pattern works here: PostFunction and ProfileUpdateFunction will use the `CloudFrontDistributionId` parameter passed from the root, which on first deploy uses `ActivityDistributionId` and on subsequent deploys uses the actual CDN output.
+In the nested architecture, the distribution lives in the CDN stack. Both the env var AND the IAM policy ARN must switch to the parameter-based distribution ID.
+
+**Resolution:** The `ActivityDistributionId` parameter already exists and is passed as a workflow variable. The same pattern works here: PostFunction and ProfileUpdateFunction will use the `CloudFrontDistributionId` parameter passed from the root, which on first deploy uses `ActivityDistributionId` and on subsequent deploys uses the actual CDN output. The IAM policy ARNs become `!Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistributionId}"`.
+
+**Implementation note on ServerDomainOutput:** The current template computes `ServerDomainOutput` as `!If [IsProd, !Ref ServerDomain, !Sub "${Stage}.${ServerDomain}"]`, while `Globals` computes `SERVER_DOMAIN` differently using `!ImportValue` from the bootstrap stack. These are two different computations that happen to produce the same result. In the nested architecture, unify this: compute the domain once in the root stack and pass it down as a parameter.
 
 **Outputs it provides:**
 - `ServerlessRestApiId` — `!Ref ServerlessRestApi`
@@ -199,6 +209,8 @@ CodeUri paths in the functions template need to be relative to the functions tem
 ### 2.1 Current Build: Why It Is Slow
 
 `swift package archive` compiles ALL executable products inside a Docker container. Even if only one handler changed, all are compiled and zipped. With the AWS SDK Swift dependency tree, a full build takes 15-20 minutes.
+
+**Build caching is not sufficient.** Adding GitHub Actions `.build` cache reduced build times from ~21 minutes to ~18 minutes — a 3-minute improvement. SwiftPM incremental compilation helps marginally, but the archive plugin still links and zips all 18 products regardless. Selective builds are essential for `sam sync` to deliver meaningful speed improvements: there is no value in bypassing CloudFormation's 3-minute deploy if the build still takes 18 minutes.
 
 ### 2.2 Dependency Graph
 
@@ -308,9 +320,25 @@ sam sync --code \
 
 **Important:** `--no-watch` prevents entering watch mode in CI.
 
-### 3.5 sam sync with Nested Stacks
+### 3.5 Direct Lambda Update (Primary Fast Path)
 
-`sam sync --code` with nested stacks detects which Lambda functions changed and updates them directly, regardless of which nested stack they belong to. However, if this proves unreliable, the fallback is to call `aws lambda update-function-code` directly for each changed function.
+`sam sync --code` is documented to work with nested stacks but is unreliable in practice — it can fail to resolve Lambda physical resource IDs across nested stacks, particularly with SAM transforms. **The primary fast path should be direct `aws lambda update-function-code` calls**, not `sam sync`.
+
+The fast-stage-deploy workflow calls `aws lambda update-function-code` directly for each changed function:
+
+```bash
+for TARGET in $CHANGED_TARGETS; do
+  FUNCTION_NAME="activity-app-$(echo $TARGET | sed 's/Handler//' | tr '[:upper:]' '[:lower:]')-stage"
+  aws lambda update-function-code \
+    --function-name "$FUNCTION_NAME" \
+    --zip-file "fileb://.build/lambda/$TARGET/$TARGET.zip" \
+    --region us-east-1
+done
+```
+
+This bypasses both CloudFormation and SAM entirely. Combined with selective builds, a single-handler change goes from 20+ minutes to under 2 minutes: build one target (~1 min) + upload one zip (~5 sec).
+
+`sam sync --code` can be attempted as an alternative, but direct Lambda update is the reliable path.
 
 ---
 
@@ -344,22 +372,60 @@ Stage can tolerate downtime. Delete and redeploy.
 ### 4.3 Prod Migration: Blue/Green DNS Cutover
 
 1. **Deploy parallel stack** as `activity-app-prod-v2` sharing `activity-environment-prod`
-2. **Handle alias conflict:** Two CloudFront distributions cannot share the same CNAME. New stack uses temporary alias (e.g., `v2.activity.happitec.com`) during testing
+2. **Handle alias conflict:** Two CloudFront distributions cannot share the same CNAME. New stack uses temporary alias (e.g., `v2.activity.happitec.com`) during testing. The CDN template needs a `DomainOverride` parameter for this.
 3. **Test** all endpoints against the new stack using its CloudFront domain
-4. **DNS cutover:**
-   - Manually remove alias from old CloudFront distribution via AWS CLI
-   - Update new CloudFront to add the real alias (`activity.happitec.com`)
-   - Route 53 record in new stack points to new CloudFront
+4. **DNS cutover — scripted as a tight atomic operation:**
+   The window between removing the alias from old CF and adding to new CF is the riskiest moment. CloudFront rejects requests for domains not in its alias list, so this is not a DNS TTL issue — it's a CloudFront-level gap. Script this as `scripts/prod-alias-swap.sh`:
+   ```bash
+   #!/bin/bash
+   set -euo pipefail
+   OLD_CF_ID=$1
+   NEW_CF_ID=$2
+   ALIAS="activity.happitec.com"
+
+   # Pre-stage: get both distribution configs
+   OLD_CONFIG=$(aws cloudfront get-distribution-config --id "$OLD_CF_ID")
+   NEW_CONFIG=$(aws cloudfront get-distribution-config --id "$NEW_CF_ID")
+
+   # Step 1: Remove alias from old distribution
+   # (modify OLD_CONFIG to remove ALIAS from Aliases.Items, update)
+   echo "Removing alias from old distribution..."
+   aws cloudfront update-distribution --id "$OLD_CF_ID" ...
+
+   # Step 2: Immediately add alias to new distribution
+   echo "Adding alias to new distribution..."
+   aws cloudfront update-distribution --id "$NEW_CF_ID" ...
+
+   # If step 2 fails, rollback step 1
+   # (re-add alias to old distribution)
+   ```
+   The script must handle failure of step 2 by automatically rolling back step 1 (re-adding the alias to the old distribution). Run during a low-traffic window.
 5. **Update GitHub variables:** `ACTIVITY_DISTRIBUTION_ID`, `CLIENT_API_DOMAIN_PROD`
 6. **Delete old stack:** `aws cloudformation delete-stack --stack-name activity-app-prod`
+7. **Reclaim stack name (optional):** Deploy new template as `activity-app-prod`, then delete `activity-app-prod-v2`. Or keep `-v2` and update workflow variables — the CFN name is just a string.
 
 **Federation URL preservation:** All URLs use the domain name, not CloudFront domain. As long as DNS resolves to a distribution with the correct Lambda functions and DynamoDB access, everything works.
 
-**Rollback:** Old stack is running until explicitly deleted. Point DNS back if needed.
+**Rollback:** Old stack is running until explicitly deleted. Run the alias swap script in reverse to point back.
 
-### 4.4 Cache Policy Name Collisions
+### 4.4 Named Resource Collisions
 
-Cache policy names must be unique per AWS account. During prod migration, both stacks would try to create `activity-webfinger-cache-prod`. **Fix:** use `!Sub "activity-webfinger-cache-${AWS::StackName}"` instead of `!Sub "activity-webfinger-cache-${Stage}"` for unique naming across parallel stacks.
+All named CloudFront resources must be unique per AWS account. During prod migration, both stacks would try to create resources with the same names. **Fix:** use `${AWS::StackName}` instead of `${Stage}` in ALL named resources:
+
+| Current Name Pattern | Resource Type |
+|---------------------|---------------|
+| `activity-webfinger-cache-${Stage}` | Cache Policy |
+| `activity-outbox-cache-${Stage}` | Cache Policy |
+| `activity-long-cache-${Stage}` | Cache Policy |
+| `activity-medium-cache-${Stage}` | Cache Policy |
+| `activity-short-cache-${Stage}` | Cache Policy |
+| `activity-inbox-origin-${Stage}` | Origin Request Policy |
+| `activity-session-origin-${Stage}` | Origin Request Policy |
+| `activity-clientapi-origin-${Stage}` | Origin Request Policy |
+| `activity-media-oac-${Stage}` | Origin Access Control |
+| `activity-profile-rewrite-${Stage}` | CloudFront Function |
+
+All must switch to `${AWS::StackName}` (or a derived suffix) for the parallel-stack migration to work. This change should be made in Phase 1 when creating the CDN nested template.
 
 ---
 
@@ -401,7 +467,14 @@ Deletes `activity-app-pr-{N}`. Add scheduled cleanup for stale stacks.
 
 ### 5.5 Isolation
 
-PR environments share stage DynamoDB. Data written by PR Lambdas is visible to stage. Acceptable for testing. Stronger isolation (key prefixing) deferred.
+PR environments share stage DynamoDB. Risks:
+- Data written by PR Lambdas is visible to stage
+- A buggy PR Lambda could write malformed data that breaks stage
+
+Mitigations:
+- Provision PR actors with a `pr-{N}-` prefix (e.g., `pr-42-testuser`) so PR data is visually distinguishable and easily cleaned up
+- PR Lambdas use the stage `SERVER_DOMAIN`, so generated ActivityPub URLs resolve correctly for functional testing
+- Stronger isolation (DynamoDB key prefixing or separate tables) deferred to a later phase
 
 ---
 
@@ -414,12 +487,16 @@ PR environments share stage DynamoDB. Data written by PR Lambdas is visible to s
 - [ ] Add `deploy-stage` and `deploy-prod` git tags to current HEAD
 
 ### Phase 1: Nested Stack Templates (2-3 days)
-- [ ] Create `activity-app/functions/template.yaml`
-- [ ] Create `activity-app/cdn/template.yaml`
+- [ ] Create `activity-app/functions/template.yaml` with full `Globals`, `Conditions`, and `Transform` blocks
+- [ ] Create `activity-app/cdn/template.yaml` with `${AWS::StackName}` naming for all named resources
 - [ ] Rewrite `activity-app/template.yaml` as root orchestrator
-- [ ] Add `CAPABILITY_AUTO_EXPAND` to deploy commands
-- [ ] Validate templates: `sam validate`
-- [ ] Verify `sam package` uploads nested templates correctly
+- [ ] Switch PostFunction/ProfileUpdateFunction IAM policy ARNs from `${CloudFrontDistribution}` to `${CloudFrontDistributionId}` parameter
+- [ ] Unify `ServerDomainOutput` computation — compute once in root, pass down
+- [ ] Add `CAPABILITY_AUTO_EXPAND` alongside `CAPABILITY_IAM` in deploy workflow
+- [ ] Validate templates: `sam validate --template-file activity-app/template.yaml`
+- [ ] Verify `sam package` uploads nested templates to S3 correctly
+- [ ] Test `sam validate` handles relative CodeUri paths from nested templates
+- [ ] Create `scripts/prod-alias-swap.sh` with automatic rollback
 
 ### Phase 2: Stage Migration (1 day)
 - [ ] Delete `activity-app-stage`
@@ -462,19 +539,23 @@ PR environments share stage DynamoDB. Data written by PR Lambdas is visible to s
 
 4. **Cache policy name collisions.** Use `${AWS::StackName}` instead of `${Stage}` in policy names.
 
-5. **Selective build correctness.** If the dependency graph script diverges from Package.swift, handlers may not be rebuilt. Parse Package.swift programmatically or validate in CI.
+5. **Selective build correctness.** If the dependency graph in `detect-changed-targets.sh` diverges from `Package.swift`, a handler might not be rebuilt when it should. The failure mode is silent and dangerous (deploying stale code). Mitigations: (a) parse `Package.swift` programmatically rather than hardcoding the graph, (b) add a CI validation step that checks the script's graph matches `Package.swift`, (c) always fall back to full build on any ambiguity.
 
 ### Open Questions
 
-1. **Stack naming for prod:** Keep `activity-app-prod-v2` or cycle through to reclaim `activity-app-prod`?
+1. **Stack naming for prod:** Keep `activity-app-prod-v2` permanently or cycle through to reclaim `activity-app-prod`? Recommendation: reclaim the name for consistency across variables, scripts, and mental models.
 
-2. **sam sync in CI:** Requires local template files and CodeUri paths. May need to merge build+deploy for the fast path.
+2. **Fast deploy workflow architecture:** The fast-stage-deploy path needs both the source code (for selective build) and AWS credentials (for `aws lambda update-function-code`). This may need to be a single job rather than the current build/deploy split, since `sam sync` and direct Lambda updates need the built zips locally.
 
-3. **Selective build vs. build cache:** If `.build` cache makes incremental builds fast enough (1-2 min), is selective build complexity worth it?
+3. **PR environment Lambda naming:** `StackSuffix` parameter prevents collisions but adds complexity to every function name. Worth the trade-off for PR envs?
 
-4. **PR environment Lambda naming:** `StackSuffix` parameter prevents collisions but adds complexity to every function name.
+4. **Cross-invalidation in PR environments:** Lambda code must handle empty `CLOUDFRONT_DISTRIBUTION_ID` gracefully (skip invalidation). Verify this is already the case.
 
-5. **Cross-invalidation in PR environments:** Lambda code must handle empty `CLOUDFRONT_DISTRIBUTION_ID` gracefully.
+5. **DeliverFunction SQS event source:** DeliverFunction uses an SQS event type (not API Gateway), referencing `${EnvironmentStackName}-QueueArn` via ImportValue. This works in nested stacks but is a special case worth noting — it's the only function not triggered by API Gateway.
+
+### Resolved Questions
+
+- **Selective build vs. build cache:** RESOLVED. `.build` cache reduced builds from 21 to 18 minutes — insufficient. Selective builds are required for the fast path to deliver meaningful improvement.
 
 ---
 
