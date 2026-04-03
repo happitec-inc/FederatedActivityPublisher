@@ -57,11 +57,6 @@ jobs:
           sudo apt-get install -y binutils gcc g++ libc6-dev libcurl4-openssl-dev libssl-dev libxml2-dev pkg-config
           # Ensure pkg-config binary exists (Ubuntu 24.04 may install pkgconf instead)
           which pkg-config || sudo ln -sf /usr/bin/pkgconf /usr/bin/pkg-config || true
-          # Swift 6.3 bundles _FoundationICU which conflicts with system ICU headers.
-          # Remove ICU headers and pkg-config files so libxml2 resolves cleanly.
-          sudo rm -rf /usr/include/unicode /usr/include/*/unicode || true
-          sudo rm -f /usr/lib/*/pkgconfig/icu*.pc || true
-          sudo sed -i 's/Requires.private:.*/Requires.private:/' /usr/lib/*/pkgconfig/libxml-2.0.pc || true
 
       - name: Install Swift
         run: |
