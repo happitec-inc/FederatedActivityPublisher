@@ -1,6 +1,6 @@
 # Portability Final: Make FederatedActivityPublisher Fully Forkable
 
-**Date:** 2026-04-05
+**Date:** 2026-04-05 (revised after review)
 **Status:** Ready for execution
 **Scope:** Remove all hardcoded happitec.com values, parameterize runner labels and AWS region, decouple from private repos
 
@@ -68,7 +68,7 @@ env:
 ```
 Then replace `--region us-east-1` with `--region $AWS_REGION`.
 
-### Files: all 10 workflow files + 2 samconfig.toml files
+### Files: all 10 workflow files (including deploy.yml which has 6 occurrences) + 2 samconfig.toml files
 
 Remove `region = "us-east-1"` from `activity-bootstrap/samconfig.toml` and `activity-environment/samconfig.toml`, replace with a comment explaining region is set by workflows.
 
@@ -76,7 +76,13 @@ Remove `region = "us-east-1"` from `activity-bootstrap/samconfig.toml` and `acti
 
 ## Task 3: Parameterize OpenAPI Server URLs (BLOCKER)
 
-Replace hardcoded happitec.com URLs in `openapi.yaml` with `example.com` placeholders.
+Replace hardcoded happitec.com URLs in **both** OpenAPI spec files with `example.com` placeholders.
+
+**Important:** There are two copies of the spec:
+- `openapi.yaml` (root — source of truth)
+- `Sources/APIClient/openapi.yaml` (consumed by swift-openapi-generator)
+
+Both must be updated identically.
 
 ### Changes
 
@@ -88,7 +94,9 @@ Replace hardcoded happitec.com URLs in `openapi.yaml` with `example.com` placeho
 
 ---
 
-## Task 4: Remove Hardcoded Domain from RegisterPasskey.swift (BLOCKER)
+## Task 4: Remove Hardcoded Domains from ActivityProvisioner (BLOCKER)
+
+### RegisterPasskey.swift
 
 Make `--domain` a required argument instead of defaulting to `happitec.com`.
 
@@ -102,7 +110,27 @@ var domain: String = "happitec.com"
 var domain: String
 ```
 
-The `provision-actor.yml` workflow already passes the domain explicitly.
+### ActivityProvisioner.swift
+
+Lines 38-44 also have hardcoded defaults:
+
+```swift
+// Before:
+var serverDomain: String = "activity.happitec.com"
+var handleDomain: String = "happitec.com"
+var region: String = "us-east-1"
+
+// After:
+var serverDomain: String  // required
+var handleDomain: String  // required
+var region: String = "us-east-1"  // keep default, us-east-1 is the common case
+```
+
+Make `--server-domain` and `--handle-domain` required arguments (no defaults). The `provision-actor.yml` workflow already passes both explicitly via `${{ vars.SERVER_DOMAIN }}` and `${{ vars.HANDLE_DOMAIN }}`.
+
+### bootstrap.yml workflow input default
+
+Line 12 has `default: "activity.happitec.com"` for the `domain-name` input. Change to empty string or remove the default to force explicit input.
 
 ---
 
@@ -175,18 +203,29 @@ Do NOT change `source_url` pointing to the canonical GitHub repo.
 
 ---
 
+## Pre-merge: Set Repo Variables
+
+Before merging, set these variables on the happitec-inc repo so workflows don't break:
+
+```bash
+gh variable set RUNNER_LABELS_LINUX --body '["linux_large"]' --repo happitec-inc/FederatedActivityPublisher
+gh variable set RUNNER_LABELS_MACOS --body '["macos-26"]' --repo happitec-inc/FederatedActivityPublisher
+gh variable set AWS_REGION --body 'us-east-1' --repo happitec-inc/FederatedActivityPublisher
+```
+
+`ENABLE_DOCC_DEPLOY` should already be set to `true`. Verify with `gh variable list`.
+
 ## Execution Order
 
 1. Task 1 (runner labels) — standalone YAML
 2. Task 2 (region) — standalone YAML
 3. Task 6 (package rename) — Package.swift + NodeInfo
-4. Task 4 (RegisterPasskey) — single Swift file
+4. Task 4 (ActivityProvisioner + bootstrap defaults) — Swift files + workflow
 5. Task 7 (instance metadata) — single Swift file
-6. Task 3 (OpenAPI) — single file
+6. Task 3 (OpenAPI — both copies) — two files
 7. Task 8 (template defaults) — multiple YAML
 8. Task 5 (deploy-docc) — single workflow
-9. Task 9 (documentation) — many files, do last
-10. Task 11 (README config table) — part of Task 9
+9. Task 9 (documentation + README config table) — many files, do last
 
 ---
 
@@ -217,10 +256,10 @@ A fresh fork should be able to:
 
 ---
 
-## Summary: ~36 files modified
+## Summary: ~37 files modified
 
-- 4 Swift source files
-- 1 OpenAPI spec
+- 5 Swift source files (Package.swift, RegisterPasskey.swift, ActivityProvisioner.swift, NodeInfoHandler, InstanceHandler)
+- 2 OpenAPI specs (root + Sources/APIClient/)
 - 10 GitHub workflows
 - 4 SAM templates + 2 SAM configs
 - 16 documentation files (README, AGENTS, 14 DocC articles)
