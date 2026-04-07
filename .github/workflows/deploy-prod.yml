@@ -1,36 +1,27 @@
-name: Build App
-run-name: "Build App (${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }})"
+name: Deploy Prod
+run-name: "Deploy Prod (${{ github.event.release.tag_name || 'manual' }})"
 
 on:
-  push:
-    branches:
-      - main
   release:
     types: [published]
   workflow_dispatch:
-    inputs:
-      stage:
-        description: "Deployment stage"
-        required: true
-        type: choice
-        options:
-          - stage
-          - prod
 
 permissions:
   contents: read
 
+env:
+  STAGE: prod
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
 jobs:
-  build:
+  build-and-deploy:
     if: >-
-      github.event_name != 'release' ||
+      github.event_name == 'workflow_dispatch' ||
       (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
     runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
-    env:
-      STAGE: ${{ (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.stage == 'prod')) && 'prod' || 'stage' }}
     steps:
-      - name: Clean workspace (self-hosted, prod only)
-        if: ${{ vars.RUNNER_LABELS_LINUX && env.STAGE == 'prod' }}
+      - name: Clean workspace (self-hosted)
+        if: ${{ vars.RUNNER_LABELS_LINUX }}
         run: |
           sudo rm -rf .build/ || true
           sudo git clean -fdx -e .git || true
@@ -82,7 +73,6 @@ jobs:
           docker --version
 
       - name: Cache Docker image
-        id: docker-cache
         uses: actions/cache@v4
         with:
           path: /tmp/docker-image.tar
@@ -119,26 +109,52 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Package with SAM
+      - name: Package and deploy with SAM
         run: |
           sam package \
             --template-file activity-app/template.yaml \
             --output-template-file packaged.yaml \
             --resolve-s3 \
-            --region ${{ vars.AWS_REGION || 'us-east-1' }}
+            --region $AWS_REGION
 
-      - name: Upload packaged template
-        uses: actions/upload-artifact@v4
-        with:
-          name: sam-package-${{ env.STAGE }}
-          path: packaged.yaml
-          retention-days: 7
+          sam deploy \
+            --template-file packaged.yaml \
+            --stack-name "activity-app-prod" \
+            --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --region $AWS_REGION \
+            --parameter-overrides \
+              Stage=prod \
+              EnvironmentStackName=activity-environment-prod \
+              BootstrapStackName=activity-bootstrap \
+              ServerDomain=${{ vars.SERVER_DOMAIN }} \
+              HandleDomain=${{ vars.HANDLE_DOMAIN }} \
+              ProxyDistributionId=${{ vars.PROXY_DISTRIBUTION_ID }} \
+              ActivityDistributionId=${{ vars.ACTIVITY_DISTRIBUTION_ID_PROD }} \
+              ClientApiDomain=${{ vars.CLIENT_API_DOMAIN_PROD }}
 
       - name: Upload frontend assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-${{ env.STAGE }}
-          path: frontend/
-          retention-days: 7
+        run: |
+          MEDIA_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "activity-environment-prod" \
+            --query "Stacks[0].Outputs[?OutputKey=='MediaBucketName'].OutputValue" \
+            --output text \
+            --region $AWS_REGION 2>/dev/null || echo "")
+          if [ -n "$MEDIA_BUCKET" ] && [ "$MEDIA_BUCKET" != "None" ]; then
+            aws s3 sync frontend/ "s3://$MEDIA_BUCKET/media/frontend/" \
+              --cache-control "public, max-age=31536000, immutable"
+            echo "Uploaded frontend assets to s3://$MEDIA_BUCKET/media/frontend/"
+          else
+            echo "Warning: Could not determine media bucket name, skipping frontend upload"
+          fi
+
+      - name: Print stack outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "activity-app-prod" \
+            --query "Stacks[0].Outputs" \
+            --output table \
+            --region $AWS_REGION >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
