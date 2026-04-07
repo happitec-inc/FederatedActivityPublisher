@@ -17,14 +17,13 @@ permissions:
 
 jobs:
   test:
-    # runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
-    runs-on: linux_large
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
     steps:
-      # - name: Clean workspace (self-hosted)
-      #   if: ${{ vars.RUNNER_LABELS_LINUX }}
-      #   run: |
-      #     sudo rm -rf .build/
-      #     sudo git clean -fdx -e .git || true
+      - name: Clean workspace (self-hosted)
+        if: ${{ vars.RUNNER_LABELS_LINUX }}
+        run: |
+          sudo rm -rf .build/
+          sudo git clean -fdx -e .git || true
 
       - uses: actions/checkout@v6
         with:
@@ -35,7 +34,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Get API URLs and bearer token
         id: api
@@ -43,18 +42,18 @@ jobs:
           API_URL=$(aws cloudformation describe-stacks \
             --stack-name "activity-app-${{ inputs.environment }}" \
             --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
-            --output text --region us-east-1)
+            --output text --region ${{ vars.AWS_REGION || 'us-east-1' }})
           CLIENT_API_URL=$(aws cloudformation describe-stacks \
             --stack-name "activity-app-${{ inputs.environment }}" \
             --query "Stacks[0].Outputs[?OutputKey=='ClientApiUrl'].OutputValue" \
-            --output text --region us-east-1)
+            --output text --region ${{ vars.AWS_REGION || 'us-east-1' }})
           echo "url=$API_URL" >> "$GITHUB_OUTPUT"
           echo "client_url=$CLIENT_API_URL" >> "$GITHUB_OUTPUT"
           echo "Testing against: $API_URL (federation) + $CLIENT_API_URL (client)"
 
           TOKEN_VALUE=$(aws ssm get-parameter \
             --name "/activity/${{ inputs.environment }}/keys/client-token" \
-            --with-decryption --query "Parameter.Value" --output text --region us-east-1 2>/dev/null || echo "")
+            --with-decryption --query "Parameter.Value" --output text --region ${{ vars.AWS_REGION || 'us-east-1' }} 2>/dev/null || echo "")
           if [ -n "$TOKEN_VALUE" ]; then
             BEARER=$(echo "$TOKEN_VALUE" | cut -d: -f2)
             echo "bearer=$BEARER" >> "$GITHUB_OUTPUT"

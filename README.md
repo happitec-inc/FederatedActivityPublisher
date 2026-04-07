@@ -2,11 +2,11 @@
 
 A serverless ActivityPub server for brand accounts. Swift 6.3 on AWS Lambda, federated with Mastodon and the fediverse. Zero cost at rest.
 
-Built for [happitec-inc](https://happitec.com) brand accounts like [@logos@happitec.com](https://happitec.com/@logos), [@randomforms@happitec.com](https://happitec.com/@randomforms), and others.
+Originally built for [Happitec](https://happitec.com) brand accounts. Fork it to run your own.
 
 ## What it does
 
-- Hosts ActivityPub actors on `happitec.com` (e.g. `@logos@happitec.com`)
+- Hosts ActivityPub actors on your domain (e.g. `@myapp@example.com`)
 - Federates with Mastodon, GoToSocial, Misskey, and other ActivityPub servers
 - Posts text and images, accepts followers, receives likes/boosts/replies
 - Serves HTML profile and post pages with [latex.css](https://latex.css.netlify.app/) styling
@@ -22,7 +22,7 @@ Three SAM/CloudFormation templates, parameterized by stage:
 | `activity-environment-{stage}` | DynamoDB table, S3 media bucket, SQS delivery queue |
 | `activity-app-{stage}` | 14 Lambda handlers, API Gateway, CloudFront |
 
-All public traffic is proxied through the `happitec.com` CloudFront distribution. The `activity.happitec.com` subdomain exists for infrastructure but is not the public-facing domain.
+In simple DNS mode, your domain points directly to the server. In split DNS mode, traffic is proxied through a parent domain's CloudFront distribution.
 
 ## Lambda Handlers
 
@@ -56,7 +56,7 @@ Route 53 hosted zone ($0.50/month) is the only fixed cost. Everything else is pa
 
 ## Documentation
 
-Full DocC documentation at [docs.happitec.com/FederatedActivityPublisher](https://docs.happitec.com/FederatedActivityPublisher/documentation/activitypubcore/).
+Full DocC documentation available when deployed to GitHub Pages (see `deploy-docc.yml` workflow).
 
 See [AGENTS.md](AGENTS.md) for operating the server (provisioning accounts, posting, profile management).
 
@@ -115,7 +115,9 @@ These must be set for deployment workflows to succeed:
 | `ACTIVITY_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for activity subdomain; passed as parameter to avoid circular dependency |
 | `CLIENT_API_DOMAIN_STAGE` | app | _(empty)_ | Execute-api domain for the stage Client API Gateway (e.g. `abc123.execute-api.us-east-1.amazonaws.com`). Enables same-origin routing through CloudFront. |
 | `CLIENT_API_DOMAIN_PROD` | app | _(empty)_ | Execute-api domain for the prod Client API Gateway. Same as stage but for the production stack. |
-| `ENABLE_DOCC_DEPLOY` | deploy-docc | _(unset)_ | Set to `true` to enable private-repo DocC features (OG images, Mermaid diagrams) |
+| `AWS_REGION` | all | `us-east-1` | AWS region for all deployments |
+| `ENABLE_DOCC_DEPLOY` | deploy-docc | _(unset)_ | Set to `true` to enable DocC features (OG images, Mermaid diagrams) |
+| `DOCC_BASE_URL` | deploy-docc | `https://{owner}.github.io/FederatedActivityPublisher` | Base URL for DocC OG meta tags |
 
 ### SAM Parameter Overrides
 

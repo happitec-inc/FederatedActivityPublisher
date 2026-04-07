@@ -9,8 +9,8 @@ import Foundation
 ///
 /// - Parameters:
 ///   - actor: The local actor to serialize.
-///   - serverDomain: The domain hosting ActivityPub endpoints (e.g. `activity.happitec.com`).
-///   - handleDomain: The domain used in handles (e.g. `happitec.com`).
+///   - serverDomain: The domain hosting ActivityPub endpoints (e.g. `example.com`).
+///   - handleDomain: The domain used in handles (e.g. `example.com`).
 /// - Returns: A JSON string containing the actor's JSON-LD document.
 public func buildActorJSONLD(
     actor: Actor,

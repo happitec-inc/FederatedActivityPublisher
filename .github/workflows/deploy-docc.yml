@@ -24,15 +24,20 @@ jobs:
       token: ${{ secrets.HAPPITEC_READ_ONLY_PAT }}
 
   build:
-    if: vars.ENABLE_DOCC_DEPLOY == 'true' || github.repository == 'happitec-inc/FederatedActivityPublisher'
+    if: vars.ENABLE_DOCC_DEPLOY == 'true'
     needs: [generate-og-image]
-    # runs-on: ${{ vars.RUNNER_LABELS_MACOS && fromJSON(vars.RUNNER_LABELS_MACOS) || 'macos-26' }}
-    runs-on: macos-26
+    runs-on: ${{ vars.RUNNER_LABELS_MACOS && fromJSON(vars.RUNNER_LABELS_MACOS) || 'macos-26' }}
     env:
       PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Substitute domain variables
+        run: |
+          SERVER_DOMAIN="${{ vars.SERVER_DOMAIN }}" \
+          HANDLE_DOMAIN="${{ vars.HANDLE_DOMAIN }}" \
+          bash scripts/substitute-variables.sh
 
       - name: Checkout swift-docc-render fork (Mermaid support)
         if: vars.ENABLE_DOCC_DEPLOY == 'true'
@@ -85,7 +90,7 @@ jobs:
         with:
           docs-path: ./docs
           og-image-path: ./og-image/og-image.png
-          base-url: https://docs.happitec.com/FederatedActivityPublisher
+          base-url: ${{ vars.DOCC_BASE_URL || format('https://{0}.github.io/FederatedActivityPublisher', github.repository_owner) }}
           title: "FederatedActivityPublisher — Documentation"
           description: "A serverless ActivityPub server for brand accounts. Swift 6.3 on AWS Lambda, federated with Mastodon."
 
@@ -110,10 +115,9 @@ jobs:
           path: ./docs
 
   deploy:
-    if: vars.ENABLE_DOCC_DEPLOY == 'true' || github.repository == 'happitec-inc/FederatedActivityPublisher'
+    if: vars.ENABLE_DOCC_DEPLOY == 'true'
     needs: build
-    # runs-on: ${{ vars.RUNNER_LABELS_MACOS && fromJSON(vars.RUNNER_LABELS_MACOS) || 'macos-26' }}
-    runs-on: macos-26
+    runs-on: ${{ vars.RUNNER_LABELS_MACOS && fromJSON(vars.RUNNER_LABELS_MACOS) || 'macos-26' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -1,6 +1,6 @@
 # AGENTS.md — Operating the ActivityPub Server
 
-Guide for creating and managing bot accounts on the happitec.com ActivityPub server.
+Guide for creating and managing bot accounts on your ActivityPub server.
 
 ## Prerequisites
 
@@ -20,14 +20,14 @@ swift run ActivityProvisioner \
   --username myapp \
   --display-name "My App" \
   --summary "Official account for My App" \
-  --server-domain happitec.com \
-  --handle-domain happitec.com
+  --server-domain {{SERVER_DOMAIN}} \
+  --handle-domain {{HANDLE_DOMAIN}}
 ```
 
 This creates:
 - DynamoDB actor record at `ACTOR#myapp / PROFILE`
 - RSA private key in SSM at `/activity/prod/keys/myapp`
-- The actor is immediately discoverable at `@myapp@happitec.com`
+- The actor is immediately discoverable at `@myapp@{{HANDLE_DOMAIN}}`
 
 ### Alternative: Provision via GitHub Actions
 
@@ -89,13 +89,13 @@ Note: the `/activity/prod/keys/client-token` parameter is shared — it holds cr
 
 ```bash
 # WebFinger discovery
-curl -s "https://happitec.com/.well-known/webfinger?resource=acct:myapp@happitec.com" | jq .
+curl -s "https://{{SERVER_DOMAIN}}/.well-known/webfinger?resource=acct:myapp@{{HANDLE_DOMAIN}}" | jq .
 
 # Actor JSON-LD
-curl -s -H "Accept: application/activity+json" "https://happitec.com/users/myapp" | jq .
+curl -s -H "Accept: application/activity+json" "https://{{SERVER_DOMAIN}}/users/myapp" | jq .
 
 # HTML profile page
-open "https://happitec.com/@myapp"
+open "https://{{SERVER_DOMAIN}}/@myapp"
 ```
 
 ## Updating a Profile
@@ -254,18 +254,18 @@ curl -s -X POST "$API_URL/api/v2/media" \
 
 ### HTML pages
 
-- Profile: `https://happitec.com/@username`
-- Post: `https://happitec.com/@username/{statusId}`
+- Profile: `https://{{SERVER_DOMAIN}}/@username`
+- Post: `https://{{SERVER_DOMAIN}}/@username/{statusId}`
 
 ### ActivityPub JSON-LD
 
-- Actor: `curl -H "Accept: application/activity+json" https://happitec.com/users/username`
-- Status: `curl -H "Accept: application/activity+json" https://happitec.com/users/username/statuses/{id}`
-- Outbox: `curl -H "Accept: application/activity+json" https://happitec.com/users/username/outbox?page=true`
+- Actor: `curl -H "Accept: application/activity+json" https://{{SERVER_DOMAIN}}/users/username`
+- Status: `curl -H "Accept: application/activity+json" https://{{SERVER_DOMAIN}}/users/username/statuses/{id}`
+- Outbox: `curl -H "Accept: application/activity+json" https://{{SERVER_DOMAIN}}/users/username/outbox?page=true`
 
 ### Search from Mastodon
 
-Search for `@username@happitec.com` in any Mastodon client to find and follow the account.
+Search for `@username@{{HANDLE_DOMAIN}}` in any Mastodon client to find and follow the account.
 
 ## Environment
 

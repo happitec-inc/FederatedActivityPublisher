@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Activity.happitec.com App Stack — Root Orchestrator (nested stacks)
+Description: FederatedActivityPublisher App Stack — Root Orchestrator (nested stacks)
 
 Parameters:
   Stage:
@@ -21,13 +21,11 @@ Parameters:
 
   ServerDomain:
     Type: String
-    Default: happitec.com
-    Description: Domain where actor URLs live (e.g. happitec.com)
+    Description: Required. Your server domain (e.g. example.com).
 
   HandleDomain:
     Type: String
-    Default: happitec.com
-    Description: Domain used in handles (@user@happitec.com)
+    Description: Required. Your handle domain (e.g. example.com).
 
   ProxyDistributionId:
     Type: String
@@ -38,7 +36,7 @@ Parameters:
     Type: String
     Default: ""
     Description: >-
-      CloudFront distribution ID for activity.happitec.com, passed as a
+      CloudFront distribution ID for the activity server, passed as a
       workflow parameter (not !Ref) to avoid circular dependency with the
       implicit ServerlessRestApi used by InboxFunction.
 

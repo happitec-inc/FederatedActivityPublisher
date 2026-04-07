@@ -92,7 +92,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Deploy with SAM
         env:
@@ -104,7 +104,7 @@ jobs:
             --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
-            --region us-east-1 \
+            --region ${{ vars.AWS_REGION || 'us-east-1' }} \
             --parameter-overrides \
               Stage=${STAGE} \
               EnvironmentStackName=activity-environment-${STAGE} \
@@ -123,7 +123,7 @@ jobs:
             --stack-name "activity-environment-${STAGE}" \
             --query "Stacks[0].Outputs[?OutputKey=='MediaBucketName'].OutputValue" \
             --output text \
-            --region us-east-1 2>/dev/null || echo "")
+            --region ${{ vars.AWS_REGION || 'us-east-1' }} 2>/dev/null || echo "")
           if [ -n "$MEDIA_BUCKET" ] && [ "$MEDIA_BUCKET" != "None" ]; then
             aws s3 sync frontend/ "s3://$MEDIA_BUCKET/media/frontend/" \
               --cache-control "public, max-age=31536000, immutable"
@@ -141,7 +141,7 @@ jobs:
             --stack-name "activity-app-${STAGE}" \
             --query "Stacks[0].Outputs" \
             --output table \
-            --region us-east-1)
+            --region ${{ vars.AWS_REGION || 'us-east-1' }})
           echo "## Stack Outputs (${STAGE})" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "$OUTPUTS" >> "$GITHUB_STEP_SUMMARY"
@@ -150,11 +150,11 @@ jobs:
           API_URL=$(aws cloudformation describe-stacks \
             --stack-name "activity-app-${STAGE}" \
             --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
-            --output text --region us-east-1)
+            --output text --region ${{ vars.AWS_REGION || 'us-east-1' }})
           CLIENT_API_URL=$(aws cloudformation describe-stacks \
             --stack-name "activity-app-${STAGE}" \
             --query "Stacks[0].Outputs[?OutputKey=='ClientApiUrl'].OutputValue" \
-            --output text --region us-east-1)
+            --output text --region ${{ vars.AWS_REGION || 'us-east-1' }})
           echo "api_url=$API_URL" >> "$GITHUB_OUTPUT"
           echo "client_api_url=$CLIENT_API_URL" >> "$GITHUB_OUTPUT"
           echo "stage=${STAGE}" >> "$GITHUB_OUTPUT"

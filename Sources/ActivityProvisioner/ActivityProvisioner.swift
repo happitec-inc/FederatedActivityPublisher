@@ -34,11 +34,11 @@ struct ProvisionActor: AsyncParsableCommand {
     @Option(name: .customLong("table-name"), help: "DynamoDB table name (default: activity-{stage})")
     var tableName: String?
 
-    @Option(name: .customLong("server-domain"), help: "Server domain for actor URLs")
-    var serverDomain: String = "activity.happitec.com"
+    @Option(name: .customLong("server-domain"), help: "Server domain for actor URLs (e.g. example.com)")
+    var serverDomain: String
 
-    @Option(name: .customLong("handle-domain"), help: "Handle domain (after the @)")
-    var handleDomain: String = "happitec.com"
+    @Option(name: .customLong("handle-domain"), help: "Handle domain (after the @, e.g. example.com)")
+    var handleDomain: String
 
     @Option(help: "AWS region")
     var region: String = "us-east-1"

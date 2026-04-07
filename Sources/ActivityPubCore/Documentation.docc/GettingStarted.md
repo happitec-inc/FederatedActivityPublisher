@@ -4,15 +4,7 @@ Set up your development environment and understand the project structure.
 
 ## Overview
 
-This guide covers prerequisites, repository setup, and an overview of the three-template architecture that powers `activity.happitec.com`.
-
-### Live Accounts
-
-The following accounts are currently live and federating on the happitec.com domain:
-
-- [happitec.com/@logos](https://happitec.com/@logos) -- the Happitec brand account
-- [happitec.com/@test1](https://happitec.com/@test1) -- a test account used during development
-- [happitec.com/@randomforms](https://happitec.com/@randomforms) -- the RandomForms app account
+This guide covers prerequisites, repository setup, and an overview of the three-template architecture that powers your ActivityPub server.
 
 ### Prerequisites
 
@@ -70,7 +62,7 @@ FederatedActivityPublisher/
 
 The deployment is split into three SAM templates, each managing a different lifecycle:
 
-1. **Bootstrap** (`activity-bootstrap/template.yaml`) -- deployed once, manually. Creates the Route 53 hosted zone for `activity.happitec.com` and an ACM wildcard certificate. These resources outlive all environments.
+1. **Bootstrap** (`activity-bootstrap/template.yaml`) -- deployed once, manually. Creates the Route 53 hosted zone for your server domain and an ACM wildcard certificate. These resources outlive all environments.
 
 2. **Environment** (`activity-environment/template.yaml`) -- deployed per stage (prod, stage). Creates the DynamoDB table, SQS delivery queue with DLQ, S3 media bucket, and establishes the SSM parameter naming convention for actor keypairs.
 

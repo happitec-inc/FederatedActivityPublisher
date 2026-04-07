@@ -16,8 +16,8 @@ flowchart TB
     end
 
     subgraph "activity-bootstrap (shared, manual deploy)"
-        R53["Route 53<br/>Hosted Zone<br/>activity.happitec.com"]
-        ACM["ACM<br/>*.activity.happitec.com + apex"]
+        R53["Route 53<br/>Hosted Zone<br/>{{SERVER_DOMAIN}}"]
+        ACM["ACM<br/>*.{{SERVER_DOMAIN}} + apex"]
     end
 
     subgraph "activity-environment-{stage}"
@@ -176,7 +176,7 @@ sequenceDiagram
 
 ### Domain Consolidation
 
-The happitec.com apex domain has its own CloudFront distribution that serves the main website. ActivityPub federation endpoints live at `activity.happitec.com` with a separate CloudFront distribution. WebFinger discovery is delegated from `happitec.com` to `activity.happitec.com` so that handles like `@randomforms@happitec.com` resolve correctly.
+In split DNS mode, the handle domain has its own CloudFront distribution that serves the main website. ActivityPub federation endpoints live at the server domain with a separate CloudFront distribution. WebFinger discovery is delegated from the handle domain to the server domain so that handles resolve correctly. In simple DNS mode, the server domain and handle domain are the same.
 
 The client API (for posting and media uploads) runs on a separate API Gateway domain, not behind CloudFront. This keeps the public-facing CDN purely read-only.
 

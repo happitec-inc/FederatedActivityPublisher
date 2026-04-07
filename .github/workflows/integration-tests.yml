@@ -24,7 +24,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-    runs-on: linux_large
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
     steps:
       - name: Determine stage
         id: set-stage
@@ -91,21 +91,22 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Get stack outputs
         id: stack
         env:
           STAGE: ${{ steps.set-stage.outputs.stage }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
         run: |
           API_URL=$(aws cloudformation describe-stacks \
             --stack-name "activity-app-${STAGE}" \
             --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
-            --output text --region us-east-1)
+            --output text --region $AWS_REGION)
           CLIENT_API_URL=$(aws cloudformation describe-stacks \
             --stack-name "activity-app-${STAGE}" \
             --query "Stacks[0].Outputs[?OutputKey=='ClientApiUrl'].OutputValue" \
-            --output text --region us-east-1)
+            --output text --region $AWS_REGION)
           echo "api_url=$API_URL" >> "$GITHUB_OUTPUT"
           echo "client_api_url=$CLIENT_API_URL" >> "$GITHUB_OUTPUT"
 
@@ -113,10 +114,11 @@ jobs:
         id: token
         env:
           STAGE: ${{ steps.set-stage.outputs.stage }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
         run: |
           TOKEN_VALUE=$(aws ssm get-parameter \
             --name "/activity/${STAGE}/keys/client-token" \
-            --with-decryption --query "Parameter.Value" --output text --region us-east-1 2>/dev/null || echo "")
+            --with-decryption --query "Parameter.Value" --output text --region $AWS_REGION 2>/dev/null || echo "")
           if [ -n "$TOKEN_VALUE" ]; then
             BEARER=$(echo "$TOKEN_VALUE" | cut -d: -f2)
             echo "bearer=$BEARER" >> "$GITHUB_OUTPUT"
