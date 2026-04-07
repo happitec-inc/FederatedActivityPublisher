@@ -1,20 +1,20 @@
 openapi: 3.1.0
 info:
-  title: activity.happitec.com
-  description: Serverless ActivityPub server for happitec-inc
+  title: FederatedActivityPublisher
+  description: Serverless ActivityPub server. A project by Happitec.
   version: 0.1.0
   license:
     name: MIT
 
 servers:
-  - url: https://activity.happitec.com
-    description: Production (federation)
-  - url: https://stage.activity.happitec.com
+  - url: https://api.example.com
+    description: Production (federation) — set SERVER_DOMAIN repo variable
+  - url: https://stage.api.example.com
     description: Stage (federation)
-  - url: https://client.activity.happitec.com
-    description: Production (client)
-  - url: https://client-stage.activity.happitec.com
-    description: Stage (client)
+  - url: https://client.api.example.com
+    description: Production (client API)
+  - url: https://client-stage.api.example.com
+    description: Stage (client API)
 
 security: []  # Federation endpoints are public by default; client endpoints override with bearerAuth
 
@@ -50,7 +50,7 @@ paths:
                         href:
                           type: string
                           format: uri
-                          example: "https://activity.happitec.com/nodeinfo/2.1"
+                          example: "https://api.example.com/nodeinfo/2.1"
 
   /nodeinfo/2.1:
     get:
@@ -76,14 +76,14 @@ paths:
       description: |
         Resolves an `acct:` URI to an ActivityPub actor.
         Required for Mastodon federation compatibility.
-        Handle domain is `happitec.com`; actor URLs point to `activity.happitec.com`.
+        Handle domain is set via HANDLE_DOMAIN repo variable; actor URLs point to SERVER_DOMAIN.
       parameters:
         - name: resource
           in: query
           required: true
           schema:
             type: string
-            example: "acct:randomforms@happitec.com"
+            example: "acct:myactor@example.com"
           description: "Must be in format `acct:{username}@{handle_domain}`"
       responses:
         "200":
@@ -565,7 +565,7 @@ components:
       required: true
       schema:
         type: string
-        example: randomforms
+        example: myactor
 
   schemas:
     WebFingerResponse:
@@ -574,7 +574,7 @@ components:
       properties:
         subject:
           type: string
-          example: "acct:randomforms@happitec.com"
+          example: "acct:myactor@example.com"
         aliases:
           type: array
           items:
@@ -765,7 +765,7 @@ components:
           properties:
             name:
               type: string
-              example: "activity-happitec"
+              example: "federated-activity-publisher"
             version:
               type: string
               example: "0.1.0"

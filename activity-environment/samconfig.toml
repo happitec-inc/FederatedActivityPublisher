@@ -6,5 +6,5 @@ stack_name = "activity-environment-stage"
 [default.deploy.parameters]
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
-region = "us-east-1"
+# region is set by the workflow via --region flag (defaults to us-east-1)
 parameter_overrides = "Stage=stage"

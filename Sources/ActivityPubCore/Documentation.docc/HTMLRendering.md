@@ -25,7 +25,7 @@ All pages use [latex.css](https://latex.now.sh) with the `latex-dark-auto` body 
 
 ### Open Graph and Twitter Cards
 
-Both page types include Open Graph (`og:`) meta tags and Twitter Card meta tags in their `<head>`. Profile pages set `og:type` to `profile` and use the actor's avatar as the image. Post pages set `og:type` to `article` and include the post content as the description. This means links to happitec.com profiles and posts render rich previews when shared on social media, chat apps, or link aggregators.
+Both page types include Open Graph (`og:`) meta tags and Twitter Card meta tags in their `<head>`. Profile pages set `og:type` to `profile` and use the actor's avatar as the image. Post pages set `og:type` to `article` and include the post content as the description. This means links to your server's profiles and posts render rich previews when shared on social media, chat apps, or link aggregators.
 
 ### Not a Client-Side Framework
 

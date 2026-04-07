@@ -8,7 +8,7 @@ ActivityPub is a JSON-LD based protocol. When remote servers request an actor pr
 
 ### Actor Serialization
 
-``buildActorJSONLD(actor:serverDomain:handleDomain:)`` takes an ``Actor`` record and produces the full JSON-LD actor document that remote servers fetch via `GET /users/{username}`. This includes the actor's public key, inbox/outbox URLs, endpoints, profile fields as `attachment` objects, and the discoverable/indexable flags. The `handleDomain` parameter supports the domain consolidation strategy where handles use `happitec.com` but the server runs at `activity.happitec.com`.
+``buildActorJSONLD(actor:serverDomain:handleDomain:)`` takes an ``Actor`` record and produces the full JSON-LD actor document that remote servers fetch via `GET /users/{username}`. This includes the actor's public key, inbox/outbox URLs, endpoints, profile fields as `attachment` objects, and the discoverable/indexable flags. The `handleDomain` parameter supports the domain consolidation strategy where handles use one domain but the server runs at a different subdomain (split DNS mode).
 
 ### Status and Activity Serialization
 

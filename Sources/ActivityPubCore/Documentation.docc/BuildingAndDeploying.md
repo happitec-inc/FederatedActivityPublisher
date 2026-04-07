@@ -21,7 +21,7 @@ The primary deployment workflow. Builds all Swift Lambda handlers inside a Docke
 - All Lambda functions (PostHandler, InboxHandler, ActorHandler, WebFingerHandler, etc.)
 - API Gateway (federation API and client API)
 - CloudFront distribution with cache behaviors
-- Route 53 DNS record for `activity.happitec.com` or `stage.activity.happitec.com`
+- Route 53 DNS record for `{{SERVER_DOMAIN}}` or `stage.{{SERVER_DOMAIN}}`
 - CloudFront cache policies and origin request policies
 - S3 bucket policy for media OAC access
 - Frontend assets (`latex.css`) uploaded to the environment S3 media bucket
@@ -53,14 +53,14 @@ Builds Swift DocC documentation with Mermaid diagram support and deploys it to G
 - Manual dispatch
 
 **What it creates or modifies:**
-- GitHub Pages deployment at `docs.happitec.com/FederatedActivityPublisher`
+- GitHub Pages deployment at `your-org.github.io/FederatedActivityPublisher`
 - OG images and meta tags for social sharing
 
 **Required secrets:**
 - `HAPPITEC_READ_ONLY_PAT` -- PAT for accessing the logo generator repository
 
 **Key steps:**
-1. Generate an OG image via a reusable workflow in `happitec-logo-generator`
+1. Generate an OG image via a reusable workflow (requires `ENABLE_DOCC_DEPLOY` variable)
 2. Check out the `swift-docc-render` fork with Mermaid diagram support
 3. Build the custom DocC renderer with Node.js
 4. Run `swift package generate-documentation` targeting `ActivityPubCore`
@@ -71,20 +71,20 @@ Builds Swift DocC documentation with Mermaid diagram support and deploys it to G
 
 ### Deploy Bootstrap Stack (`bootstrap.yml`)
 
-One-time infrastructure setup. Creates the Route 53 hosted zone and ACM TLS certificate for `activity.happitec.com`.
+One-time infrastructure setup. Creates the Route 53 hosted zone and ACM TLS certificate for your server domain.
 
 **Triggers:**
 - Manual dispatch only (`workflow_dispatch`)
 
 **What it creates or modifies:**
-- Route 53 hosted zone for `activity.happitec.com`
-- ACM certificate with DNS validation for `activity.happitec.com` and `*.activity.happitec.com`
+- Route 53 hosted zone for your server domain
+- ACM certificate with DNS validation for your server domain and wildcard subdomain
 
 **Required secrets:**
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 
-> Important: After deploying the bootstrap stack, you must manually add NS delegation records in the parent `happitec.com` hosted zone. The stack outputs list the nameservers.
+> Important: After deploying the bootstrap stack, you must set your domain's nameservers (simple mode) or add NS delegation records in the parent zone (split mode). The stack outputs list the nameservers.
 
 ### Deploy Environment Stack (`environment.yml`)
 
@@ -120,7 +120,7 @@ Or trigger the `bootstrap.yml` workflow manually from the GitHub Actions UI.
 
 ### 2. NS Delegation in Parent Zone
 
-After the bootstrap stack deploys, copy the four NS record values from the stack outputs and create an NS record in the parent `happitec.com` hosted zone pointing `activity.happitec.com` to those nameservers. Without this, ACM certificate validation will not complete and CloudFront will not serve traffic.
+After the bootstrap stack deploys, copy the four NS record values from the stack outputs and configure DNS accordingly. In simple mode, set these as your registrar's nameservers. In split mode, add NS records in the parent zone. Without this, ACM certificate validation will not complete and CloudFront will not serve traffic.
 
 ### 3. Environment Stack (per stage)
 
@@ -150,8 +150,8 @@ sam deploy \
     Stage=stage \
     EnvironmentStackName=activity-environment-stage \
     BootstrapStackName=activity-bootstrap \
-    ServerDomain=happitec.com \
-    HandleDomain=happitec.com \
+    ServerDomain={{SERVER_DOMAIN}} \
+    HandleDomain={{HANDLE_DOMAIN}} \
     ProxyDistributionId=YOUR_DISTRIBUTION_ID
 ```
 
@@ -161,16 +161,16 @@ After the first manual deploy, pushes to `main` automatically deploy to stage vi
 
 Use the `ActivityProvisioner` CLI tool to create actor accounts in DynamoDB and generate signing key pairs in SSM Parameter Store. See <doc:ProvisioningAccounts> for detailed instructions.
 
-### 6. happitec.com CloudFront Behaviors
+### 6. Parent Domain CloudFront Behaviors (split mode only)
 
-Configure the parent `happitec.com` CloudFront distribution to proxy ActivityPub paths to the `activity.happitec.com` CloudFront distribution. The required behaviors are:
+In split DNS mode, configure the handle domain's CloudFront distribution to proxy ActivityPub paths to the server domain's CloudFront distribution. The required behaviors are:
 
 - `/.well-known/webfinger*`
 - `/.well-known/nodeinfo`
 - `/nodeinfo/*`
 - `/users/*`
 
-Each behavior uses an origin pointing to `activity.happitec.com` with HTTPS-only and forwards the appropriate headers.
+Each behavior uses an origin pointing to the server domain with HTTPS-only and forwards the appropriate headers.
 
 ### 7. GitHub Repository Variables
 
@@ -206,7 +206,7 @@ The `app.yml` workflow uploads files from the `frontend/` directory to the envir
 
 ### CloudFront Cache Invalidation
 
-You do not need to manually invalidate CloudFront caches after deployment. The `PostHandler` and `ProfileUpdateHandler` Lambdas automatically issue CloudFront invalidations when content changes, targeting both the `activity.happitec.com` distribution and the parent `happitec.com` distribution.
+You do not need to manually invalidate CloudFront caches after deployment. The `PostHandler` and `ProfileUpdateHandler` Lambdas automatically issue CloudFront invalidations when content changes, targeting both the server domain distribution and the parent domain distribution (if configured).
 
 ## Runner Configuration
 
@@ -217,14 +217,14 @@ All deployment workflows support both self-hosted and GitHub-hosted runners via 
 | Variable | Purpose | Default (if unset) |
 |---|---|---|
 | `RUNNER_LABELS_LINUX` | Runner labels for Linux jobs | `ubuntu-latest` |
-| `RUNNER_LABELS_MACOS` | Runner labels for macOS jobs | `macos-15` |
+| `RUNNER_LABELS_MACOS` | Runner labels for macOS jobs | `macos-26` |
 
 To use self-hosted runners, set these variables in the repository settings under **Settings > Variables > Actions**:
 
 - `RUNNER_LABELS_LINUX` = `["self-hosted", "linux"]`
 - `RUNNER_LABELS_MACOS` = `["self-hosted", "macOS"]`
 
-To use GitHub-hosted runners, remove or leave these variables unset. The workflows fall back to `ubuntu-latest` for Linux and `macos-15` for macOS.
+To use GitHub-hosted runners, remove or leave these variables unset. The workflows fall back to `ubuntu-latest` for Linux and `macos-26` for macOS.
 
 ### Self-Hosted Runner Considerations
 

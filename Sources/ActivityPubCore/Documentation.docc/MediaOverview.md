@@ -16,4 +16,4 @@ The MediaUploadHandler Lambda receives the multipart request, validates the cont
 
 ### Storage and CDN
 
-The S3 media bucket has no public access. All reads go through CloudFront using Origin Access Control (OAC), which means the bucket never needs a public policy. Media objects are cached with a 365-day TTL and never invalidated, since each upload gets a unique key. The CloudFront distribution serves media at `https://happitec.com/media/`.
+The S3 media bucket has no public access. All reads go through CloudFront using Origin Access Control (OAC), which means the bucket never needs a public policy. Media objects are cached with a 365-day TTL and never invalidated, since each upload gets a unique key. The CloudFront distribution serves media at `https://{your-domain}/media/`.

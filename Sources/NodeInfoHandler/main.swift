@@ -16,7 +16,7 @@ let runtime = LambdaRuntime {
         let body = """
         {
           "version": "2.1",
-          "software": {"name": "activity-happitec", "version": "0.1.0"},
+          "software": {"name": "federated-activity-publisher", "version": "0.1.0"},
           "protocols": ["activitypub"],
           "services": {"inbound": [], "outbound": []},
           "openRegistrations": false,

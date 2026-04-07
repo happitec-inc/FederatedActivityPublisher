@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   fast-deploy:
-    runs-on: linux_large
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
     env:
       STAGE: stage
     steps:
@@ -124,23 +124,25 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Update Lambda functions directly
         if: steps.changes.outputs.targets != 'skip'
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
         run: |
           # Get the nested functions stack ARN (list-stack-resources accepts ARNs directly)
           FUNCTIONS_STACK_ARN=$(aws cloudformation describe-stack-resource \
             --stack-name "activity-app-stage" \
             --logical-resource-id FunctionsStack \
             --query "StackResourceDetail.PhysicalResourceId" \
-            --output text --region us-east-1)
+            --output text --region $AWS_REGION)
 
           # Build a map of logical ID -> physical function name
           FUNCTION_MAP=$(aws cloudformation list-stack-resources \
             --stack-name "$FUNCTIONS_STACK_ARN" \
             --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].[LogicalResourceId,PhysicalResourceId]" \
-            --output text --region us-east-1)
+            --output text --region $AWS_REGION)
 
           TARGETS="${{ steps.changes.outputs.targets }}"
           OUTPUT_BASE=".build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager"
@@ -166,7 +168,7 @@ jobs:
             aws lambda update-function-code \
               --function-name "$FUNCTION_NAME" \
               --zip-file "fileb://$ZIP_PATH" \
-              --region us-east-1 \
+              --region $AWS_REGION \
               --output text --query 'FunctionName'
           done <<< "$TARGETS"
 

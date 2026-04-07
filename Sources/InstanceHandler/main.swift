@@ -6,6 +6,8 @@ guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] el
     fatalError("SERVER_DOMAIN environment variable is required")
 }
 
+let instanceTitle = ProcessInfo.processInfo.environment["INSTANCE_TITLE"] ?? "FederatedActivityPublisher"
+
 let runtime = LambdaRuntime {
     (event: APIGatewayRequest, context: LambdaContext) -> APIGatewayResponse in
 
@@ -15,10 +17,10 @@ let runtime = LambdaRuntime {
         let body = """
         {
           "domain": "\(serverDomain)",
-          "title": "Happitec",
+          "title": "\(instanceTitle)",
           "version": "4.5.0 (compatible; FederatedActivityPublisher 0.4.2)",
           "source_url": "https://github.com/happitec-inc/FederatedActivityPublisher",
-          "description": "A serverless ActivityPub server for happitec-inc brand accounts.",
+          "description": "A serverless ActivityPub server powered by FederatedActivityPublisher. A project by Happitec.",
           "usage": {"users": {"active_month": 4}},
           "thumbnail": null,
           "icon": [],
@@ -71,9 +73,9 @@ let runtime = LambdaRuntime {
         let body = """
         {
           "uri": "\(serverDomain)",
-          "title": "Happitec",
-          "short_description": "ActivityPub server for Happitec brand accounts",
-          "description": "A serverless ActivityPub server for happitec-inc brand accounts. Powered by FederatedActivityPublisher.",
+          "title": "\(instanceTitle)",
+          "short_description": "A serverless ActivityPub server powered by FederatedActivityPublisher",
+          "description": "A serverless ActivityPub server powered by FederatedActivityPublisher. A project by Happitec.",
           "email": "",
           "version": "4.5.0 (compatible; FederatedActivityPublisher 0.4.2)",
           "urls": {

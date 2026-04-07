@@ -3,7 +3,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "activity-happitec",
+    name: "federated-activity-publisher",
     platforms: [.macOS(.v15)],
     products: [
         .executable(name: "WebFingerHandler", targets: ["WebFingerHandler"]),

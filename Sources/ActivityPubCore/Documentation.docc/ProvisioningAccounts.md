@@ -26,7 +26,7 @@ The provisioner creates the actor's DynamoDB profile record and generates an RSA
 .build/debug/ActivityProvisioner create \
   --username randomforms \
   --display-name "Random Forms" \
-  --summary "Official account for the Random Forms app by happitec-inc." \
+  --summary "Official account for the Random Forms app." \
   --stage prod
 ```
 
@@ -64,7 +64,7 @@ Profile metadata fields (displayed as key-value pairs on the actor's profile) ca
 curl -X PATCH \
   -H "Authorization: Bearer your-token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d 'fields_attributes[0][name]=Website&fields_attributes[0][value]=https://happitec.com' \
+  -d 'fields_attributes[0][name]=Website&fields_attributes[0][value]=https://example.com' \
   "https://your-client-api-url/api/v1/accounts/update_credentials"
 ```
 

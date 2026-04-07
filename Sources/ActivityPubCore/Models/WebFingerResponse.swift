@@ -5,7 +5,7 @@ import Foundation
 /// Returned by `GET /.well-known/webfinger?resource=acct:user@domain`. Contains the
 /// subject (acct URI) and links pointing to the actor's ActivityPub profile.
 public struct WebFingerResponse: Codable, Sendable {
-    /// The queried resource (e.g. `acct:randomforms@happitec.com`).
+    /// The queried resource (e.g. `acct:myactor@example.com`).
     public let subject: String
     /// Links to the actor's representations (ActivityPub JSON-LD, profile page, etc.).
     public let links: [WebFingerLink]
