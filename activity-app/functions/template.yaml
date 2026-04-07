@@ -107,28 +107,12 @@ Resources:
       FunctionName: !Sub "activity-app-post-${Stage}"
       CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/PostHandler/PostHandler.zip
       Timeout: 60
-      Environment:
-        Variables:
-          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistributionId
-          PROXY_DISTRIBUTION_ID: !Ref ProxyDistributionId
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !ImportValue
               Fn::Sub: "${EnvironmentStackName}-TableName"
         - SQSSendMessagePolicy:
             QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
-        - !If
-          - HasCloudFrontDistribution
-          - Statement:
-              - Effect: Allow
-                Action: cloudfront:CreateInvalidation
-                Resource:
-                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistributionId}"
-                  - !If
-                    - HasCrossDistribution
-                    - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProxyDistributionId}"
-                    - !Ref AWS::NoValue
-          - !Ref AWS::NoValue
         - SSMParameterReadPolicy:
             ParameterName: !Sub "activity/${Stage}/*"
         - Statement:
@@ -186,8 +170,6 @@ Resources:
       Timeout: 60
       Environment:
         Variables:
-          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistributionId
-          PROXY_DISTRIBUTION_ID: !Ref ProxyDistributionId
           MEDIA_BUCKET_NAME: !ImportValue
             Fn::Sub: "${EnvironmentStackName}-MediaBucketName"
       Policies:
@@ -209,18 +191,6 @@ Resources:
             - Effect: Allow
               Action: kms:Decrypt
               Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
-        - !If
-          - HasCloudFrontDistribution
-          - Statement:
-              - Effect: Allow
-                Action: cloudfront:CreateInvalidation
-                Resource:
-                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistributionId}"
-                  - !If
-                    - HasCrossDistribution
-                    - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProxyDistributionId}"
-                    - !Ref AWS::NoValue
-          - !Ref AWS::NoValue
       Events:
         UpdateCredentials:
           Type: Api
@@ -413,32 +383,12 @@ Resources:
       FunctionName: !Sub "activity-app-inbox-${Stage}"
       CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/InboxHandler/InboxHandler.zip
       ReservedConcurrentExecutions: 25
-      Environment:
-        Variables:
-          CLOUDFRONT_DISTRIBUTION_ID: !Ref ActivityDistributionId
-          PROXY_DISTRIBUTION_ID: !Ref ProxyDistributionId
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !ImportValue
               Fn::Sub: "${EnvironmentStackName}-TableName"
         - SQSSendMessagePolicy:
             QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
-        - !If
-          - HasActivityDistribution
-          - Statement:
-              - Effect: Allow
-                Action: cloudfront:CreateInvalidation
-                Resource:
-                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ActivityDistributionId}"
-          - !Ref AWS::NoValue
-        - !If
-          - HasCrossDistribution
-          - Statement:
-              - Effect: Allow
-                Action: cloudfront:CreateInvalidation
-                Resource:
-                  - !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProxyDistributionId}"
-          - !Ref AWS::NoValue
       Events:
         PostInbox:
           Type: Api

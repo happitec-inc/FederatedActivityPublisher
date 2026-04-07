@@ -145,7 +145,6 @@ let package = Package(
                 "ActivityPubCore",
                 .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
                 .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
-                .product(name: "AWSCloudFront", package: "aws-sdk-swift"),
             ]
         ),
         .executableTarget(
@@ -165,7 +164,6 @@ let package = Package(
                 .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
                 .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
                 .product(name: "AWSSSM", package: "aws-sdk-swift"),
-                .product(name: "AWSCloudFront", package: "aws-sdk-swift"),
             ]
         ),
         .executableTarget(
@@ -186,7 +184,6 @@ let package = Package(
                 .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
                 .product(name: "AWSS3", package: "aws-sdk-swift"),
                 .product(name: "AWSSSM", package: "aws-sdk-swift"),
-                .product(name: "AWSCloudFront", package: "aws-sdk-swift"),
             ]
         ),
 
