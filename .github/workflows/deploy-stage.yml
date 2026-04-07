@@ -136,6 +136,25 @@ jobs:
 
           sudo chown -R $(id -u):$(id -g) .build
 
+      - name: Bundle OpenSSL libs into changed zips
+        run: |
+          mkdir -p /tmp/ssl-libs
+          docker run --rm -v /tmp/ssl-libs:/out swift-al2023:6.3 \
+            bash -c 'cp /lib64/libcrypto.so.3 /lib64/libssl.so.3 /out/'
+
+          OUTPUT_BASE=".build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager"
+          TARGETS="${{ needs.detect.outputs.targets }}"
+          while IFS= read -r TARGET; do
+            [ -z "$TARGET" ] && continue
+            zip_file="$OUTPUT_BASE/$TARGET/$TARGET.zip"
+            if [ -f "$zip_file" ]; then
+              handler_dir=$(dirname "$zip_file")
+              mkdir -p "$handler_dir/lib"
+              cp /tmp/ssl-libs/* "$handler_dir/lib/"
+              (cd "$handler_dir" && zip -u "$(basename "$zip_file")" lib/*)
+            fi
+          done <<< "$TARGETS"
+
       - name: Install AWS CLI
         run: |
           if ! command -v aws &>/dev/null; then
@@ -287,6 +306,23 @@ jobs:
 
       - name: Build Lambda zip
         run: swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3 --disable-docker-image-update
+
+      - name: Bundle OpenSSL libs from build image
+        run: |
+          # Copy OpenSSL libs to a temp dir once
+          mkdir -p /tmp/ssl-libs
+          docker run --rm -v /tmp/ssl-libs:/out swift-al2023:6.3 \
+            bash -c 'cp /lib64/libcrypto.so.3 /lib64/libssl.so.3 /out/'
+
+          # Add libs to each Lambda zip
+          OUTPUT_BASE=".build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager"
+          for zip_file in "$OUTPUT_BASE"/*/*.zip; do
+            handler_dir=$(dirname "$zip_file")
+            mkdir -p "$handler_dir/lib"
+            cp /tmp/ssl-libs/* "$handler_dir/lib/"
+            (cd "$handler_dir" && zip -u "$(basename "$zip_file")" lib/*)
+          done
+          echo "Bundled OpenSSL libs into $(ls "$OUTPUT_BASE"/*/*.zip | wc -l) zips"
 
       - name: Install SAM CLI
         uses: ./.github/actions/setup-sam-portable
