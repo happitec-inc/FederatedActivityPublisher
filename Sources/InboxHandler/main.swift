@@ -1,6 +1,5 @@
 import AWSLambdaEvents
 import AWSLambdaRuntime
-import AWSCloudFront
 import ActivityPubCore
 import Foundation
 
@@ -10,13 +9,9 @@ guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] el
 guard let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] else {
     fatalError("HANDLE_DOMAIN environment variable is required")
 }
-let distributionId = ProcessInfo.processInfo.environment["CLOUDFRONT_DISTRIBUTION_ID"] ?? ""
-let proxyDistributionId = ProcessInfo.processInfo.environment["PROXY_DISTRIBUTION_ID"] ?? ""
-
 let store = try await DynamoDBStore()
 let sqsClient = try await SQSDeliveryClient()
 let keyManager = KeyManager()
-let cfClient = try await CloudFrontClient()
 
 let runtime = LambdaRuntime {
     (event: APIGatewayRequest, context: LambdaContext) -> APIGatewayResponse in
@@ -397,8 +392,6 @@ func handleFollow(
     context.logger.info("Follow accepted from \(actorUri), Accept enqueued to \(targetInbox)")
 
     // Invalidate followers cache so the count updates
-    await invalidateFollowersCache(username: username, context: context)
-
     return APIGatewayResponse(
         statusCode: .accepted,
         headers: ["content-type": "application/json"],
@@ -434,7 +427,6 @@ func handleUndo(
         let wasRemoved = try await store.removeFollower(username: username, actorUri: actorUri)
         if wasRemoved {
             try await store.decrementFollowerCount(username: username)
-            await invalidateFollowersCache(username: username, context: context)
         }
     } else if objectType == "Like" {
         context.logger.info("Processing Undo Like from \(actorUri) for \(username)")
@@ -454,7 +446,7 @@ func handleUndo(
             )
             if wasRemoved {
                 try await store.decrementLikesCount(username: parsed.username, statusId: parsed.statusId)
-                await invalidateStatusCache(username: parsed.username, statusId: parsed.statusId, context: context)
+
             }
         } else {
             context.logger.info("Undo Like with unparseable object from \(actorUri)")
@@ -478,7 +470,7 @@ func handleUndo(
             )
             if wasRemoved {
                 try await store.decrementBoostsCount(username: parsed.username, statusId: parsed.statusId)
-                await invalidateStatusCache(username: parsed.username, statusId: parsed.statusId, context: context)
+
             }
         } else {
             context.logger.info("Undo Announce with unparseable object from \(actorUri)")
@@ -545,7 +537,7 @@ func handleLike(
 
     if isNew {
         try await store.incrementLikesCount(username: parsed.username, statusId: parsed.statusId)
-        await invalidateStatusCache(username: parsed.username, statusId: parsed.statusId, context: context)
+
     }
 
     context.logger.info("Like \(isNew ? "stored" : "duplicate") from \(actorUri) on \(objectUri)")
@@ -603,7 +595,7 @@ func handleAnnounce(
 
     if isNew {
         try await store.incrementBoostsCount(username: parsed.username, statusId: parsed.statusId)
-        await invalidateStatusCache(username: parsed.username, statusId: parsed.statusId, context: context)
+
     }
 
     context.logger.info("Announce \(isNew ? "stored" : "duplicate") from \(actorUri) on \(objectUri)")
@@ -700,7 +692,7 @@ func handleCreate(
 
     if isNew {
         try await store.incrementRepliesCount(username: parsed.username, statusId: parsed.statusId)
-        await invalidateStatusCache(username: parsed.username, statusId: parsed.statusId, context: context)
+
     }
 
     context.logger.info("Reply \(isNew ? "stored" : "duplicate") from \(actorUri) to \(inReplyTo)")
@@ -884,7 +876,7 @@ func handleDelete(
         )
         if removedLike {
             try await store.decrementLikesCount(username: parsed.username, statusId: parsed.statusId)
-            await invalidateStatusCache(username: parsed.username, statusId: parsed.statusId, context: context)
+    
             context.logger.info("Deleted Like from \(actorUri) on \(objectUri)")
         }
 
@@ -897,7 +889,7 @@ func handleDelete(
         )
         if removedAnnounce {
             try await store.decrementBoostsCount(username: parsed.username, statusId: parsed.statusId)
-            await invalidateStatusCache(username: parsed.username, statusId: parsed.statusId, context: context)
+    
             context.logger.info("Deleted Announce from \(actorUri) on \(objectUri)")
         }
 
@@ -906,7 +898,7 @@ func handleDelete(
             context.logger.info("Deleted reply \(objectUri) from \(actorUri)")
             if !inReplyTo.isEmpty, let parentParsed = parseStatusUri(inReplyTo) {
                 try await store.decrementRepliesCount(username: parentParsed.username, statusId: parentParsed.statusId)
-                await invalidateStatusCache(username: parentParsed.username, statusId: parentParsed.statusId, context: context)
+
             }
         }
 
@@ -918,7 +910,7 @@ func handleDelete(
         let wasRemoved = try await store.removeFollower(username: username, actorUri: actorUri)
         if wasRemoved {
             try await store.decrementFollowerCount(username: username)
-            await invalidateFollowersCache(username: username, context: context)
+
             context.logger.info("Removed follower \(actorUri) via self-deletion")
         }
 
@@ -927,7 +919,7 @@ func handleDelete(
             context.logger.info("Deleted reply \(objectUri) from \(actorUri)")
             if !inReplyTo.isEmpty, let parentParsed = parseStatusUri(inReplyTo) {
                 try await store.decrementRepliesCount(username: parentParsed.username, statusId: parentParsed.statusId)
-                await invalidateStatusCache(username: parentParsed.username, statusId: parentParsed.statusId, context: context)
+
             }
         }
 
@@ -938,7 +930,7 @@ func handleDelete(
             context.logger.info("Deleted reply \(objectUri) from \(actorUri)")
             if !inReplyTo.isEmpty, let parentParsed = parseStatusUri(inReplyTo) {
                 try await store.decrementRepliesCount(username: parentParsed.username, statusId: parentParsed.statusId)
-                await invalidateStatusCache(username: parentParsed.username, statusId: parentParsed.statusId, context: context)
+
             }
         } else {
             context.logger.info("Delete for unrecognized object \(objectUri) from \(actorUri)")
@@ -986,69 +978,6 @@ func extractObjectUri(from json: [String: Any]) -> String? {
 
 enum InboxError: Error {
     case encodingFailed
-}
-
-/// Invalidate CloudFront cache for the followers collection so count updates are visible.
-func invalidateFollowersCache(username: String, context: LambdaContext) async {
-    await invalidateCache(
-        paths: ["/users/\(username)/followers*"],
-        callerReference: "followers-\(UUID().uuidString)",
-        context: context
-    )
-}
-
-/// Invalidate CloudFront cache for a status page and the owner's profile so interaction counts update.
-func invalidateStatusCache(username: String, statusId: String, context: LambdaContext) async {
-    await invalidateCache(
-        paths: [
-            "/users/\(username)/statuses/\(statusId)*",
-            "/profile/\(username)*",
-            "/@\(username)*"
-        ],
-        callerReference: "interaction-\(UUID().uuidString)",
-        context: context
-    )
-}
-
-/// Invalidate arbitrary CloudFront cache paths on both distributions.
-func invalidateCache(paths: [String], callerReference: String, context: LambdaContext) async {
-    guard !paths.isEmpty else { return }
-
-    if !distributionId.isEmpty {
-        do {
-            let batch = CloudFrontClientTypes.InvalidationBatch(
-                callerReference: callerReference,
-                paths: CloudFrontClientTypes.Paths(
-                    items: paths,
-                    quantity: Int(paths.count)
-                )
-            )
-            _ = try await cfClient.createInvalidation(input: CreateInvalidationInput(
-                distributionId: distributionId,
-                invalidationBatch: batch
-            ))
-        } catch {
-            context.logger.error("Failed to invalidate activity CF cache: \(error)")
-        }
-    }
-
-    if !proxyDistributionId.isEmpty {
-        do {
-            let batch = CloudFrontClientTypes.InvalidationBatch(
-                callerReference: "\(callerReference)-h",
-                paths: CloudFrontClientTypes.Paths(
-                    items: paths,
-                    quantity: Int(paths.count)
-                )
-            )
-            _ = try await cfClient.createInvalidation(input: CreateInvalidationInput(
-                distributionId: proxyDistributionId,
-                invalidationBatch: batch
-            ))
-        } catch {
-            context.logger.error("Failed to invalidate happitec CF cache: \(error)")
-        }
-    }
 }
 
 // MARK: - Accept Handling
@@ -1177,9 +1106,6 @@ func handleAcceptQuoteRequest(
         }
         context.logger.info("Update activity for status \(parsed.statusId) enqueued to \(followers.count) followers")
     }
-
-    // Invalidate cached pages so the approved quote is visible
-    await invalidateStatusCache(username: parsed.username, statusId: parsed.statusId, context: context)
 
     context.logger.info("Quote approval accepted for status \(parsed.statusId) by \(actorUri)")
 
@@ -1446,7 +1372,7 @@ func handleQuoteRequest(
     // If accepted, increment the quotes count on the quoted status
     if accepted {
         try await store.incrementQuotesCount(username: parsed.username, statusId: parsed.statusId)
-        await invalidateStatusCache(username: parsed.username, statusId: parsed.statusId, context: context)
+
     }
 
     context.logger.info("QuoteRequest \(accepted ? "accepted" : "rejected") from \(actorUri) for \(quotedStatusUri), \(responseType) enqueued to \(targetInbox)")

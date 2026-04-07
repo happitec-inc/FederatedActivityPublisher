@@ -1,6 +1,5 @@
 import AWSLambdaEvents
 import AWSLambdaRuntime
-import AWSCloudFront
 import AWSSSM
 import ActivityPubCore
 import Foundation
@@ -15,15 +14,12 @@ guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] el
 guard let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] else {
     fatalError("HANDLE_DOMAIN environment variable is required")
 }
-let distributionId = ProcessInfo.processInfo.environment["CLOUDFRONT_DISTRIBUTION_ID"] ?? ""
-let proxyDistributionId = ProcessInfo.processInfo.environment["PROXY_DISTRIBUTION_ID"] ?? ""
 let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "/activity/stage/keys/"
 let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw
 
 let store = try await DynamoDBStore()
 let sqsClient = try await SQSDeliveryClient()
 let ssmClient = try await SSMClient()
-let cfClient = try await CloudFrontClient()
 
 /// Cached signing key -- initialized once per Lambda cold start.
 nonisolated(unsafe) var cachedSigningKey: String?
@@ -365,46 +361,7 @@ let runtime = LambdaRuntime {
             context.logger.info("QuoteRequest enqueued for \(quotedUri) to \(targetInbox)")
         }
 
-        // 13. CloudFront invalidation for outbox + profile page
-        if !distributionId.isEmpty {
-            let activityPaths = [
-                "/users/\(username)/outbox*",
-                "/profile/\(username)*"
-            ]
-            let invalidation = CloudFrontClientTypes.InvalidationBatch(
-                callerReference: "post-\(statusId)",
-                paths: CloudFrontClientTypes.Paths(
-                    items: activityPaths,
-                    quantity: Int(activityPaths.count)
-                )
-            )
-            _ = try? await cfClient.createInvalidation(input: CreateInvalidationInput(
-                distributionId: distributionId,
-                invalidationBatch: invalidation
-            ))
-
-            // Also invalidate the happitec.com CloudFront distribution (proxies same paths)
-            if !proxyDistributionId.isEmpty {
-                let happitecPaths = [
-                    "/users/\(username)/outbox*",
-                    "/profile/\(username)*",
-                    "/@\(username)*"
-                ]
-                let happitecInvalidation = CloudFrontClientTypes.InvalidationBatch(
-                    callerReference: "post-happitec-\(statusId)",
-                    paths: CloudFrontClientTypes.Paths(
-                        items: happitecPaths,
-                        quantity: Int(happitecPaths.count)
-                    )
-                )
-                _ = try? await cfClient.createInvalidation(input: CreateInvalidationInput(
-                    distributionId: proxyDistributionId,
-                    invalidationBatch: happitecInvalidation
-                ))
-            }
-        }
-
-        // 14. Return status response
+        // 13. Return status response
         let response = buildStatusResponse(status: status, serverDomain: serverDomain)
 
         return APIGatewayResponse(

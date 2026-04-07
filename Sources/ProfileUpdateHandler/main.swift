@@ -1,6 +1,5 @@
 import AWSLambdaEvents
 import AWSLambdaRuntime
-import AWSCloudFront
 import AWSS3
 import AWSSSM
 import ActivityPubCore
@@ -17,8 +16,6 @@ guard let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] el
     fatalError("HANDLE_DOMAIN environment variable is required")
 }
 let mediaBucketName = ProcessInfo.processInfo.environment["MEDIA_BUCKET_NAME"] ?? ""
-let distributionId = ProcessInfo.processInfo.environment["CLOUDFRONT_DISTRIBUTION_ID"] ?? ""
-let proxyDistributionId = ProcessInfo.processInfo.environment["PROXY_DISTRIBUTION_ID"] ?? ""
 let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "/activity/stage/keys/"
 let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw
 
@@ -26,7 +23,6 @@ let store = try await DynamoDBStore()
 let s3Client = try await S3Client()
 let sqsClient = try await SQSDeliveryClient()
 let ssmClient = try await SSMClient()
-let cfClient = try await CloudFrontClient()
 
 /// Maximum file size for avatar and header images (2 MB).
 let maxImageSize = 2 * 1024 * 1024
@@ -296,48 +292,7 @@ let runtime = LambdaRuntime {
             context.logger.info("Enqueued \(jobs.count) Update delivery jobs for \(username) (\(followers.count) followers)")
         }
 
-        // 13. Invalidate CloudFront cache
-        if !distributionId.isEmpty {
-            var invalidationPaths = [
-                "/users/\(username)",
-                "/.well-known/webfinger*",
-            ]
-            if newAvatarUrl != nil {
-                invalidationPaths.append("/media/avatars/\(username)")
-            }
-            if newHeaderUrl != nil {
-                invalidationPaths.append("/media/headers/\(username)")
-            }
-
-            let invalidation = CloudFrontClientTypes.InvalidationBatch(
-                callerReference: "profile-update-\(updateId)",
-                paths: CloudFrontClientTypes.Paths(
-                    items: invalidationPaths,
-                    quantity: Int(invalidationPaths.count)
-                )
-            )
-            _ = try? await cfClient.createInvalidation(input: CreateInvalidationInput(
-                distributionId: distributionId,
-                invalidationBatch: invalidation
-            ))
-
-            // Also invalidate the happitec.com CloudFront distribution (proxies same paths)
-            if !proxyDistributionId.isEmpty {
-                let happitecInvalidation = CloudFrontClientTypes.InvalidationBatch(
-                    callerReference: "profile-update-happitec-\(updateId)",
-                    paths: CloudFrontClientTypes.Paths(
-                        items: invalidationPaths,
-                        quantity: Int(invalidationPaths.count)
-                    )
-                )
-                _ = try? await cfClient.createInvalidation(input: CreateInvalidationInput(
-                    distributionId: proxyDistributionId,
-                    invalidationBatch: happitecInvalidation
-                ))
-            }
-        }
-
-        // 14. Return response
+        // 13. Return response
         return APIGatewayResponse(
             statusCode: .ok,
             headers: ["content-type": "application/json"],
