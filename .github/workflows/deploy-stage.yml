@@ -40,8 +40,8 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED"
 
-          # If infrastructure files changed, full pipeline
-          if echo "$CHANGED" | grep -qE '^(Package\.(swift|resolved)|docker/|activity-app/|\.github/)'; then
+          # If infrastructure or frontend files changed, full pipeline
+          if echo "$CHANGED" | grep -qE '^(Package\.(swift|resolved)|docker/|activity-app/|\.github/|frontend/)'; then
             echo "path=full" >> "$GITHUB_OUTPUT"
             echo "Infrastructure files changed — full pipeline"
             exit 0
@@ -207,7 +207,7 @@ jobs:
       name: stage
       url: https://stage.${{ vars.SERVER_DOMAIN || 'activity.example.com' }}
     steps:
-      - name: Clean workspace (self-hosted, prod only)
+      - name: Clean workspace (self-hosted)
         if: ${{ vars.RUNNER_LABELS_LINUX }}
         run: |
           sudo rm -rf .build/ || true
