@@ -8,7 +8,7 @@
 
 This plan addresses 12 audit findings (4 blockers, 8 friction items) that prevent external users from forking and deploying FederatedActivityPublisher without manual find-and-replace. Every change is a no-op for the happitec-inc deployment when the correct repo variables are set. No functionality changes.
 
-**Key design decision:** Rather than replacing hardcoded domains with `example.com` (which makes the project unusable for everyone), we use **build-time variable substitution**. Template files contain `{{SERVER_DOMAIN}}` / `{{HANDLE_DOMAIN}}` placeholders that get substituted from repo variables before compile/deploy. The project stays functional for happitec-inc without changes, and forks set their own variables.
+**Key design decision:** Rather than replacing hardcoded domains with `example.com` (which makes the project unusable for everyone), we use **build-time variable substitution**. Documentation files contain `{{SERVER_DOMAIN}}` / `{{HANDLE_DOMAIN}}` placeholders that get substituted from repo variables in CI. The OpenAPI spec uses syntactically valid `api.example.com` defaults so `swift build` works immediately for forks — CI substitutes the real domain before building. The project stays functional for happitec-inc without changes, and forks set their own variables.
 
 ## Prerequisites
 
@@ -61,8 +61,8 @@ FILES=(
 for file in "${FILES[@]}"; do
   if [ -f "$file" ]; then
     sed -i.bak \
-      -e "s/{{SERVER_DOMAIN}}/$SERVER_DOMAIN/g" \
-      -e "s/{{HANDLE_DOMAIN}}/$HANDLE_DOMAIN/g" \
+      -e "s|{{SERVER_DOMAIN}}|$SERVER_DOMAIN|g" \
+      -e "s|{{HANDLE_DOMAIN}}|$HANDLE_DOMAIN|g" \
       "$file"
     rm -f "$file.bak"
     echo "Substituted: $file"
@@ -172,30 +172,55 @@ Remove `region = "us-east-1"` from `activity-bootstrap/samconfig.toml` and `acti
 
 ### Consolidate to one copy
 
-There are currently two copies of the OpenAPI spec:
+There are currently two identical copies of the OpenAPI spec:
 - `openapi.yaml` (root — source of truth)
 - `Sources/APIClient/openapi.yaml` (consumed by swift-openapi-generator)
 
-Delete `Sources/APIClient/openapi.yaml` and configure the openapi-generator plugin to read from the root copy. If the plugin requires the file at a specific path, add a build step that copies root → Sources/APIClient/ before compile.
+The swift-openapi-generator plugin discovers `openapi.yaml` by co-location in the target's `Sources/` directory. It has no config option to point elsewhere. Replace the duplicate with a **symlink**:
 
-### Replace domains with placeholders
+```bash
+cd Sources/APIClient
+rm openapi.yaml
+ln -s ../../openapi.yaml openapi.yaml
+```
+
+Verify the symlink works with `swift build --target APIClient`. If symlinks cause issues with the plugin, fall back to a pre-build copy step in CI.
+
+### Replace domains with valid defaults
+
+The OpenAPI spec must contain syntactically valid URLs at all times so `swift build` works for forks without any setup. Use `api.example.com` as the committed default — a valid, reserved domain.
 
 In `openapi.yaml`:
 
 - Title: `activity.happitec.com` → `FederatedActivityPublisher`
 - Description: `Serverless ActivityPub server for happitec-inc` → `Serverless ActivityPub server. A project by Happitec.`
-- Server URLs: Use `{{SERVER_DOMAIN}}` placeholders:
+- Server URLs: Use valid example defaults that CI substitutes:
   ```yaml
   servers:
-    - url: https://{{SERVER_DOMAIN}}
-      description: Production (federation)
-    - url: https://stage.{{SERVER_DOMAIN}}
+    - url: https://api.example.com
+      description: Production (federation) — set SERVER_DOMAIN repo variable
+    - url: https://stage.api.example.com
       description: Stage (federation)
+    - url: https://client.api.example.com
+      description: Production (client API)
+    - url: https://client-stage.api.example.com
+      description: Stage (client API)
   ```
-- WebFinger examples: `acct:myactor@{{HANDLE_DOMAIN}}`
+- WebFinger examples: `acct:myactor@example.com`
 - NodeInfo software name example: `federated-activity-publisher`
 
-The `scripts/substitute-variables.sh` script (Task 0) substitutes these before build.
+### Build-time substitution
+
+The `scripts/substitute-variables.sh` script (Task 0) replaces the `api.example.com` defaults with real values from repo variables before the code generator runs. Add `openapi.yaml` to the FILES array in the script, and add substitution patterns for the server URLs:
+
+```bash
+sed -i.bak \
+  -e "s|api.example.com|$SERVER_DOMAIN|g" \
+  -e "s|myactor@example.com|myactor@$HANDLE_DOMAIN|g" \
+  "$file"
+```
+
+This runs in the `build.yml` workflow before `swift package archive`.
 
 ---
 
@@ -385,7 +410,7 @@ A fresh fork should be able to:
 
 - 1 new script (`scripts/substitute-variables.sh`)
 - 5 Swift source files (Package.swift, RegisterPasskey.swift, ActivityProvisioner.swift, NodeInfoHandler, InstanceHandler)
-- 1 OpenAPI spec (consolidate to root only)
+- 1 OpenAPI spec (root copy, symlink from Sources/APIClient/)
 - 10 GitHub workflows
 - 4 SAM templates + 2 SAM configs
 - ~14 documentation files (README, AGENTS, DocC articles with placeholders)
