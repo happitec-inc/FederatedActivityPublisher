@@ -99,4 +99,4 @@ jobs:
           TEST_BEARER_TOKEN: ${{ steps.api.outputs.bearer }}
           TEST_HANDLE_DOMAIN: ${{ inputs.environment == 'prod' && vars.HANDLE_DOMAIN || format('{0}.{1}', inputs.environment, vars.HANDLE_DOMAIN) }}
           LD_LIBRARY_PATH: /usr/local/lib/swift/linux
-        run: swift test --filter IntegrationTests
+        run: cd integration-tests && swift test

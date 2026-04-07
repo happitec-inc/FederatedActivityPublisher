@@ -478,11 +478,11 @@ jobs:
           TEST_HANDLE_DOMAIN: ${{ format('{0}.{1}', 'stage', vars.HANDLE_DOMAIN) }}
         run: |
           docker run --rm \
-            -v "$(pwd):/workspace" \
+            -v "$(pwd)/integration-tests:/workspace" \
             -w /workspace \
             -e TEST_API_URL \
             -e TEST_CLIENT_API_URL \
             -e TEST_BEARER_TOKEN \
             -e TEST_HANDLE_DOMAIN \
             swift-al2023:6.3 \
-            swift test --filter IntegrationTests
+            swift test

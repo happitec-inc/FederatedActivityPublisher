@@ -243,13 +243,7 @@ let package = Package(
         ),
 
         // Integration tests (require deployed stack + TEST_API_URL env var)
-        .testTarget(
-            name: "IntegrationTests",
-            dependencies: [
-                "APIClient",
-                .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
-                .product(name: "OpenAPIURLSession", package: "swift-openapi-urlsession"),
-            ]
-        ),
+        // Integration tests moved to integration-tests/Package.swift
+        // to avoid linking all 18 handler targets into the test binary
     ]
 )
