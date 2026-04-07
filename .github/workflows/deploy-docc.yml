@@ -32,7 +32,8 @@ jobs:
     steps:
       - name: Select Xcode with Swift 6.3
         run: |
-          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app /Applications/Xcode.app 2>/dev/null | head -1)
+          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -rV | head -1)
+          XCODE_PATH="${XCODE_PATH:-$(ls -d /Applications/Xcode.app 2>/dev/null)}"
           if [ -n "$XCODE_PATH" ]; then
             sudo xcode-select -s "$XCODE_PATH"
             echo "Selected: $XCODE_PATH"
