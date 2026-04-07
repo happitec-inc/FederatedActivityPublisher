@@ -21,7 +21,7 @@ jobs:
     runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
     environment:
       name: production
-      url: https://activity.happitec.com
+      url: https://${{ vars.SERVER_DOMAIN || 'activity.example.com' }}
     steps:
       - name: Clean workspace (self-hosted)
         if: ${{ vars.RUNNER_LABELS_LINUX }}
