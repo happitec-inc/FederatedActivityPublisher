@@ -38,7 +38,7 @@ import Foundation
     switch response {
     case .ok(let ok):
         let info = try ok.body.json
-        #expect(info.software.name == "activity-happitec")
+        #expect(info.software.name == "federated-activity-publisher")
         #expect(info.protocols == ["activitypub"])
         #expect(info.openRegistrations == false)
     default:
