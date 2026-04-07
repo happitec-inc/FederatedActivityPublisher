@@ -73,6 +73,9 @@ jobs:
     needs: detect
     if: needs.detect.outputs.path == 'fast'
     runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    environment:
+      name: stage
+      url: https://stage.activity.happitec.com
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -200,6 +203,9 @@ jobs:
     needs: detect
     if: needs.detect.outputs.path == 'full'
     runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    environment:
+      name: stage
+      url: https://stage.activity.happitec.com
     steps:
       - name: Clean workspace (self-hosted, prod only)
         if: ${{ vars.RUNNER_LABELS_LINUX }}
