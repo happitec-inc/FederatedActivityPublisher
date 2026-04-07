@@ -84,8 +84,8 @@ Resources:
     Properties:
       CachePolicyConfig:
         Name: !Sub "activity-outbox-cache-${Stage}"
-        DefaultTTL: 31536000
-        MaxTTL: 31536000
+        DefaultTTL: 3600
+        MaxTTL: 3600
         MinTTL: 0
         ParametersInCacheKeyAndForwardedToOrigin:
           CookiesConfig:
@@ -105,8 +105,8 @@ Resources:
     Properties:
       CachePolicyConfig:
         Name: !Sub "activity-long-cache-${Stage}"
-        DefaultTTL: 31536000
-        MaxTTL: 31536000
+        DefaultTTL: 3600
+        MaxTTL: 3600
         MinTTL: 0
         ParametersInCacheKeyAndForwardedToOrigin:
           CookiesConfig:
