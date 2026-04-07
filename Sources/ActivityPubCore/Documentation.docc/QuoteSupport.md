@@ -51,9 +51,9 @@ When a QuoteRequest is accepted, the Accept activity includes a `result` field c
 ```json
 {
   "type": "Accept",
-  "actor": "https://activity.happitec.com/users/appbot",
+  "actor": "https://example.com/users/appbot",
   "object": { "type": "QuoteRequest", ... },
-  "result": "https://activity.happitec.com/users/appbot/quote_authorizations/01JQXYZ..."
+  "result": "https://example.com/users/appbot/quote_authorizations/01JQXYZ..."
 }
 ```
 

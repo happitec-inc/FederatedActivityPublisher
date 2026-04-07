@@ -17,8 +17,7 @@ on:
 
 jobs:
   deploy:
-    # runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
-    runs-on: linux_large
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -31,7 +30,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: SAM build
         run: sam build --template-file activity-environment/template.yaml
@@ -44,7 +43,7 @@ jobs:
             --capabilities CAPABILITY_IAM \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
-            --region us-east-1 \
+            --region ${{ vars.AWS_REGION || 'us-east-1' }} \
             --parameter-overrides \
               Stage=${{ inputs.stage }}
 
@@ -55,4 +54,4 @@ jobs:
             --stack-name "activity-environment-${{ inputs.stage }}" \
             --query "Stacks[0].Outputs[].[OutputKey, OutputValue]" \
             --output table \
-            --region us-east-1 >> $GITHUB_STEP_SUMMARY
+            --region ${{ vars.AWS_REGION || 'us-east-1' }} >> $GITHUB_STEP_SUMMARY

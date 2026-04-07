@@ -40,7 +40,7 @@ example.com (Route 53 -> CloudFront -> API Gateway -> Lambda)
 - WebFinger: must be proxied from `example.com/.well-known/webfinger` to `activity.example.com`
 - Profile pages: `example.com/@user` must rewrite/redirect to `activity.example.com/profile/user`
 
-This is what happitec.com uses. It requires additional infrastructure on the handle domain.
+This mode is useful when your ActivityPub server runs on a subdomain. It requires additional infrastructure on the handle domain.
 
 ### Setup
 

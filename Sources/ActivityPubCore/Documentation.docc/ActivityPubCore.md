@@ -1,6 +1,6 @@
 # ``ActivityPubCore``
 
-A serverless ActivityPub federation server for happitec-inc brand accounts, built with Swift and deployed on AWS Lambda.
+A serverless ActivityPub federation server built with Swift and deployed on AWS Lambda. A project by Happitec.
 
 @Metadata {
     @DisplayName("FederatedActivityPublisher")
@@ -8,7 +8,7 @@ A serverless ActivityPub federation server for happitec-inc brand accounts, buil
 
 ## Overview
 
-FederatedActivityPublisher is a multi-account ActivityPub server running entirely on AWS serverless infrastructure. The `ActivityPubCore` module is the shared library that powers `activity.happitec.com`, hosting brand accounts for happitec-inc apps and federating with Mastodon, GoToSocial, Misskey, and other ActivityPub-compatible servers.
+FederatedActivityPublisher is a multi-account ActivityPub server running entirely on AWS serverless infrastructure. The `ActivityPubCore` module is the shared library that powers the server, federating with Mastodon, GoToSocial, Misskey, and other ActivityPub-compatible servers. A project by Happitec.
 
 The server is designed for zero cost at rest -- you only pay when posting or receiving traffic. All compute runs on AWS Lambda, data lives in DynamoDB, media is stored in S3 and served through CloudFront, and delivery fan-out uses SQS.
 

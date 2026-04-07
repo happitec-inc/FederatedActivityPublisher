@@ -11,8 +11,8 @@ struct RegisterPasskey: AsyncParsableCommand {
     @Option(help: "Actor username")
     var username: String
 
-    @Option(help: "Server domain")
-    var domain: String = "happitec.com"
+    @Option(help: "Server domain (e.g. example.com)")
+    var domain: String
 
     @Option(name: .customLong("table-name"), help: "DynamoDB table name (overrides TABLE_NAME env)")
     var tableName: String?
