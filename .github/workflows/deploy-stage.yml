@@ -1,0 +1,446 @@
+name: Deploy Stage
+run-name: "Deploy Stage (${{ github.event.head_commit.message }})"
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  STAGE: stage
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      path: ${{ steps.decide.outputs.path }}
+      targets: ${{ steps.decide.outputs.targets }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Decide deployment path
+        id: decide
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "path=full" >> "$GITHUB_OUTPUT"
+            echo "Manual trigger — full pipeline"
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # If infrastructure files changed, full pipeline
+          if echo "$CHANGED" | grep -qE '^(Package\.(swift|resolved)|docker/|activity-app/|\.github/)'; then
+            echo "path=full" >> "$GITHUB_OUTPUT"
+            echo "Infrastructure files changed — full pipeline"
+            exit 0
+          fi
+
+          # Check if any source files changed
+          TARGETS=$(echo "$CHANGED" | bash scripts/detect-changed-targets.sh)
+
+          if [ "$TARGETS" = "none" ]; then
+            echo "path=skip" >> "$GITHUB_OUTPUT"
+            echo "No deployable changes"
+            exit 0
+          fi
+
+          if [ "$TARGETS" = "all" ]; then
+            echo "path=full" >> "$GITHUB_OUTPUT"
+            echo "Core dependency changed — full pipeline"
+            exit 0
+          fi
+
+          echo "path=fast" >> "$GITHUB_OUTPUT"
+          echo "targets<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$TARGETS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "Fast path: $TARGETS"
+
+  # === FAST PATH: selective build + direct Lambda update ===
+  fast-deploy:
+    needs: detect
+    if: needs.detect.outputs.path == 'fast'
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - name: Substitute domain variables
+        run: |
+          SERVER_DOMAIN="${{ vars.SERVER_DOMAIN }}" \
+          HANDLE_DOMAIN="${{ vars.HANDLE_DOMAIN }}" \
+          bash scripts/substitute-variables.sh
+
+      - name: Install Docker
+        run: |
+          if command -v docker &>/dev/null; then
+            echo "Docker already installed"
+          else
+            curl -fsSL https://get.docker.com | sudo sh
+          fi
+          sudo chmod 666 /var/run/docker.sock
+
+      - name: Cache Docker image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/docker-image.tar
+          key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
+
+      - name: Load or build AL2023 Swift Docker image
+        run: |
+          if [ -f /tmp/docker-image.tar ]; then
+            echo "Loading cached Docker image"
+            docker load < /tmp/docker-image.tar
+          else
+            echo "Building Docker image"
+            docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
+            docker save swift-al2023:6.3 > /tmp/docker-image.tar
+          fi
+
+      - name: Cache Swift build artifacts
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: swift-build-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            swift-build-${{ hashFiles('**/Package.resolved') }}-
+            swift-build-
+
+      - name: Build changed targets in Docker
+        run: |
+          TARGETS="${{ needs.detect.outputs.targets }}"
+          TARGETS_ARGS=$(echo "$TARGETS" | tr '\n' ' ')
+          echo "Building: $TARGETS_ARGS"
+          docker run --rm \
+            -v "$(pwd):/workspace" \
+            -w /workspace \
+            swift-al2023:6.3 \
+            bash scripts/build-selective.sh $TARGETS_ARGS
+
+          sudo chown -R $(id -u):$(id -g) .build
+
+      - name: Install AWS CLI
+        run: |
+          if ! command -v aws &>/dev/null; then
+            ARCH=$(uname -m)
+            if [ "$ARCH" = "aarch64" ]; then
+              curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
+            else
+              curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            fi
+            sudo apt-get install -y unzip 2>/dev/null || true
+            unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install
+            rm -rf /tmp/awscliv2.zip /tmp/aws
+          fi
+          aws --version
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update Lambda functions directly
+        run: |
+          FUNCTIONS_STACK_ARN=$(aws cloudformation describe-stack-resource \
+            --stack-name "activity-app-stage" \
+            --logical-resource-id FunctionsStack \
+            --query "StackResourceDetail.PhysicalResourceId" \
+            --output text --region $AWS_REGION)
+
+          FUNCTION_MAP=$(aws cloudformation list-stack-resources \
+            --stack-name "$FUNCTIONS_STACK_ARN" \
+            --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].[LogicalResourceId,PhysicalResourceId]" \
+            --output text --region $AWS_REGION)
+
+          TARGETS="${{ needs.detect.outputs.targets }}"
+          OUTPUT_BASE=".build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager"
+
+          while IFS= read -r TARGET; do
+            [ -z "$TARGET" ] && continue
+            LOGICAL_ID="${TARGET/Handler/Function}"
+            FUNCTION_NAME=$(echo "$FUNCTION_MAP" | grep "^${LOGICAL_ID}" | awk '{print $2}')
+
+            if [ -z "$FUNCTION_NAME" ]; then
+              echo "WARNING: Could not find Lambda for $TARGET (logical: $LOGICAL_ID)"
+              continue
+            fi
+
+            ZIP_PATH="$OUTPUT_BASE/$TARGET/$TARGET.zip"
+            if [ ! -f "$ZIP_PATH" ]; then
+              echo "WARNING: No zip found at $ZIP_PATH"
+              continue
+            fi
+
+            echo "Updating $FUNCTION_NAME from $ZIP_PATH..."
+            aws lambda update-function-code \
+              --function-name "$FUNCTION_NAME" \
+              --zip-file "fileb://$ZIP_PATH" \
+              --region $AWS_REGION \
+              --output text --query 'FunctionName'
+          done <<< "$TARGETS"
+
+  # === FULL PATH: build all + SAM deploy ===
+  build:
+    needs: detect
+    if: needs.detect.outputs.path == 'full'
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    steps:
+      - name: Clean workspace (self-hosted, prod only)
+        if: ${{ vars.RUNNER_LABELS_LINUX }}
+        run: |
+          sudo rm -rf .build/ || true
+          sudo git clean -fdx -e .git || true
+          docker container prune -f || true
+          docker builder prune -af --filter "until=24h" || true
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - name: Substitute domain variables
+        run: |
+          SERVER_DOMAIN="${{ vars.SERVER_DOMAIN }}" \
+          HANDLE_DOMAIN="${{ vars.HANDLE_DOMAIN }}" \
+          bash scripts/substitute-variables.sh
+
+      - name: Install Swift dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils gcc g++ libc6-dev libcurl4-openssl-dev libssl-dev libxml2-dev pkg-config
+
+      - name: Install Swift
+        run: |
+          if swift --version 2>/dev/null | grep -q "6.3"; then
+            echo "Swift 6.3 already installed"
+          else
+            ARCH=$(uname -m)
+            if [ "$ARCH" = "aarch64" ]; then
+              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404-aarch64/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04-aarch64.tar.gz"
+            else
+              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04.tar.gz"
+            fi
+            curl -fsSL "$SWIFT_URL" | sudo tar xz --strip-components=2 -C /usr/local
+          fi
+          swift --version
+
+      - name: Install zip
+        run: which zip || sudo apt-get install -y zip
+
+      - name: Install Docker
+        run: |
+          if command -v docker &>/dev/null; then
+            echo "Docker already installed"
+          else
+            curl -fsSL https://get.docker.com | sudo sh
+          fi
+          sudo chmod 666 /var/run/docker.sock
+          docker --version
+
+      - name: Cache Docker image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/docker-image.tar
+          key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
+
+      - name: Load or build AL2023 Swift Docker image
+        run: |
+          if [ -f /tmp/docker-image.tar ]; then
+            echo "Loading cached Docker image"
+            docker load < /tmp/docker-image.tar
+          else
+            echo "Building Docker image"
+            docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
+            docker save swift-al2023:6.3 > /tmp/docker-image.tar
+          fi
+
+      - name: Cache Swift build artifacts
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: swift-build-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
+          restore-keys: |
+            swift-build-${{ hashFiles('**/Package.resolved') }}-
+            swift-build-
+
+      - name: Build Lambda zip
+        run: swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3 --disable-docker-image-update
+
+      - name: Install SAM CLI
+        uses: ./.github/actions/setup-sam-portable
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package with SAM
+        run: |
+          sam package \
+            --template-file activity-app/template.yaml \
+            --output-template-file packaged.yaml \
+            --resolve-s3 \
+            --region $AWS_REGION
+
+      - name: Deploy with SAM
+        run: |
+          sam deploy \
+            --template-file packaged.yaml \
+            --stack-name "activity-app-${{ env.STAGE }}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --region $AWS_REGION \
+            --parameter-overrides \
+              Stage=${{ env.STAGE }} \
+              EnvironmentStackName=activity-environment-${{ env.STAGE }} \
+              BootstrapStackName=activity-bootstrap \
+              ServerDomain=${{ vars.SERVER_DOMAIN }} \
+              HandleDomain=${{ vars.HANDLE_DOMAIN }} \
+              ProxyDistributionId=${{ vars.PROXY_DISTRIBUTION_ID }} \
+              ActivityDistributionId=${{ vars.ACTIVITY_DISTRIBUTION_ID_STAGE }} \
+              ClientApiDomain=${{ vars.CLIENT_API_DOMAIN_STAGE }}
+
+      - name: Upload frontend assets
+        run: |
+          MEDIA_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "activity-environment-${{ env.STAGE }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='MediaBucketName'].OutputValue" \
+            --output text \
+            --region $AWS_REGION 2>/dev/null || echo "")
+          if [ -n "$MEDIA_BUCKET" ] && [ "$MEDIA_BUCKET" != "None" ]; then
+            aws s3 sync frontend/ "s3://$MEDIA_BUCKET/media/frontend/" \
+              --cache-control "public, max-age=31536000, immutable"
+            echo "Uploaded frontend assets to s3://$MEDIA_BUCKET/media/frontend/"
+          else
+            echo "Warning: Could not determine media bucket name, skipping frontend upload"
+          fi
+
+      - name: Print stack outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "activity-app-${{ env.STAGE }}" \
+            --query "Stacks[0].Outputs" \
+            --output table \
+            --region $AWS_REGION >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+  # === INTEGRATION TESTS: runs after either path ===
+  integration-tests:
+    needs: [detect, fast-deploy, build]
+    if: |
+      always() &&
+      needs.detect.outputs.path != 'skip' &&
+      (needs.fast-deploy.result == 'success' || needs.build.result == 'success')
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Docker
+        run: |
+          if command -v docker &>/dev/null; then
+            echo "Docker already installed"
+          else
+            curl -fsSL https://get.docker.com | sudo sh
+          fi
+          sudo chmod 666 /var/run/docker.sock
+
+      - name: Cache Docker image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/docker-image.tar
+          key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
+
+      - name: Load or build AL2023 Swift Docker image
+        run: |
+          if [ -f /tmp/docker-image.tar ]; then
+            echo "Loading cached Docker image"
+            docker load < /tmp/docker-image.tar
+          else
+            echo "Building Docker image"
+            docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
+            docker save swift-al2023:6.3 > /tmp/docker-image.tar
+          fi
+
+      - name: Install AWS CLI
+        run: |
+          if ! command -v aws &>/dev/null; then
+            ARCH=$(uname -m)
+            if [ "$ARCH" = "aarch64" ]; then
+              curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
+            else
+              curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            fi
+            sudo apt-get install -y unzip 2>/dev/null || true
+            unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install
+            rm -rf /tmp/awscliv2.zip /tmp/aws
+          fi
+          aws --version
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Get stack outputs
+        id: stack
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name "activity-app-stage" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+            --output text --region ${{ vars.AWS_REGION || 'us-east-1' }})
+          CLIENT_API_URL=$(aws cloudformation describe-stacks \
+            --stack-name "activity-app-stage" \
+            --query "Stacks[0].Outputs[?OutputKey=='ClientApiUrl'].OutputValue" \
+            --output text --region ${{ vars.AWS_REGION || 'us-east-1' }})
+          echo "api_url=$API_URL" >> "$GITHUB_OUTPUT"
+          echo "client_api_url=$CLIENT_API_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Get bearer token from SSM
+        id: token
+        run: |
+          TOKEN_VALUE=$(aws ssm get-parameter \
+            --name "/activity/stage/keys/client-token" \
+            --with-decryption --query "Parameter.Value" --output text \
+            --region ${{ vars.AWS_REGION || 'us-east-1' }} 2>/dev/null || echo "")
+          if [ -n "$TOKEN_VALUE" ]; then
+            BEARER=$(echo "$TOKEN_VALUE" | cut -d: -f2)
+            echo "bearer=$BEARER" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run integration tests in Docker
+        env:
+          TEST_API_URL: ${{ steps.stack.outputs.api_url }}
+          TEST_CLIENT_API_URL: ${{ steps.stack.outputs.client_api_url }}
+          TEST_BEARER_TOKEN: ${{ steps.token.outputs.bearer }}
+          TEST_HANDLE_DOMAIN: ${{ format('{0}.{1}', 'stage', vars.HANDLE_DOMAIN) }}
+        run: |
+          docker run --rm \
+            -v "$(pwd):/workspace" \
+            -w /workspace \
+            -e TEST_API_URL \
+            -e TEST_CLIENT_API_URL \
+            -e TEST_BEARER_TOKEN \
+            -e TEST_HANDLE_DOMAIN \
+            swift-al2023:6.3 \
+            swift test --filter IntegrationTests
