@@ -37,9 +37,9 @@ These estimates assume:
 ### Cost Optimization Notes
 
 - **DynamoDB on-demand billing** means zero cost when idle. No provisioned capacity to pay for.
-- **CloudFront cache-until-invalidated** strategy means most read requests never reach Lambda. A post with 100,000 followers creates 100,000 delivery Lambda invocations but only one CloudFront invalidation -- subsequent reads are all edge-cached.
+- **CloudFront TTL-based caching** means most read requests never reach Lambda. A post with 100,000 followers creates 100,000 delivery Lambda invocations, and the outbox cache expires naturally within its TTL (1 hour) -- no invalidation API calls needed.
 - **Lambda ARM64 (Graviton)** is ~20% cheaper than x86_64.
 - **S3 media** has no public access -- CloudFront OAC serves files with immutable cache headers, so each media file is typically fetched from S3 only once per edge location.
-- **SSM Parameter Store Standard tier** is free for storage. You pay only for `GetParameter` API calls at $0.05 per 10,000 calls.
+- **SSM Parameter Store Standard tier** is free for storage. You pay only for `GetParameter` API calls at $0.05 per 10,000 calls. With bearer tokens now stored in DynamoDB, SSM reads are limited to keypair lookups during delivery signing and legacy token fallback.
 - **ACM certificates** are free when used with CloudFront.
 - **Free tier credits** (first 12 months of an AWS account) cover 1M Lambda invocations, 25 GB DynamoDB storage, 5 GB S3 storage, and more. In practice, a small ActivityPub server can run within the free tier for the first year.

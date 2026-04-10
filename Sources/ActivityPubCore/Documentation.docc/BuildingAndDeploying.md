@@ -4,45 +4,54 @@ Build Lambda binaries with Docker, deploy with SAM, and manage CI/CD pipelines.
 
 ## Overview
 
-The project builds Swift Lambda binaries targeting Amazon Linux 2023 (ARM64). A custom Docker image handles cross-compilation, and SAM CLI manages packaging and CloudFormation deployment. Four GitHub Actions workflows automate the full lifecycle from deployment through documentation publishing.
+The project builds Swift Lambda binaries targeting Amazon Linux 2023 (ARM64). A custom Docker image handles cross-compilation, and SAM CLI manages packaging and CloudFormation deployment. Eight GitHub Actions workflows automate the full lifecycle from deployment through documentation publishing.
 
 ## GitHub Actions Workflows
 
-### Deploy App Stack (`app.yml`)
+### Deploy Stage (`deploy-stage.yml`)
 
-The primary deployment workflow. Builds all Swift Lambda handlers inside a Docker container, deploys the app CloudFormation stack via SAM, and uploads frontend assets to S3.
+The primary stage deployment workflow with a forking path: a **detect** job analyzes which files changed and routes to either a fast or full pipeline.
+
+**Fast path** (~2.5 min with cache): When only individual Lambda handler source files changed (not `ActivityPubCore`, `Package.swift`, templates, or workflows), the workflow builds only the affected targets, bundles OpenSSL libraries, and updates each Lambda function directly via `aws lambda update-function-code`. No SAM deploy, no CloudFormation changeset.
+
+**Full path** (~5-10 min): When core dependencies, templates, workflows, or the Dockerfile changed, the workflow builds all Lambda handlers via `swift package archive`, bundles OpenSSL, and deploys via SAM with nested stacks (`CAPABILITY_AUTO_EXPAND`).
+
+After either path completes, integration tests run automatically in a Docker container against the deployed stage stack.
 
 **Triggers:**
-- Push to `main` -- deploys to **stage**
-- GitHub Release (non-prerelease, `v`-prefixed tag) -- deploys to **prod**
-- Manual dispatch (`workflow_dispatch`) -- caller selects stage or prod
-
-**What it creates or modifies:**
-- All Lambda functions (PostHandler, InboxHandler, ActorHandler, WebFingerHandler, etc.)
-- API Gateway (federation API and client API)
-- CloudFront distribution with cache behaviors
-- Route 53 DNS record for `{{SERVER_DOMAIN}}` or `stage.{{SERVER_DOMAIN}}`
-- CloudFront cache policies and origin request policies
-- S3 bucket policy for media OAC access
-- Frontend assets (`latex.css`) uploaded to the environment S3 media bucket
+- Push to `main` -- deploys to **stage** (auto-detects fast vs full)
+- Manual dispatch (`workflow_dispatch`) -- always takes the full path
 
 **Required secrets:**
 - `AWS_ACCESS_KEY_ID` -- IAM access key for deployment
 - `AWS_SECRET_ACCESS_KEY` -- IAM secret key for deployment
 
-**Required repository variables:**
-- `PROXY_DISTRIBUTION_ID` -- CloudFront distribution ID for a parent-domain proxy (used for cross-invalidation)
-
-**Key steps:**
+**Key steps (full path):**
 1. Clean workspace (self-hosted runners only)
-2. Install Swift 6.3 on the runner if not already present
-3. Build or reuse a cached Docker image from `docker/Dockerfile.al2023-swift` (keyed by Dockerfile SHA-256 hash)
-4. Build Lambda zip archives via `swift package archive`
-5. Deploy with `sam deploy`
-6. Upload frontend assets to S3 with immutable cache headers
-7. Print stack outputs to the GitHub Actions summary
+2. Run `scripts/substitute-variables.sh` to replace domain placeholders in templates
+3. Install Swift 6.3 on the runner if not already present
+4. Build or reuse a cached Docker image from `docker/Dockerfile.al2023-swift`
+5. Build Lambda zip archives via `swift package archive`
+6. Bundle OpenSSL libraries (`libcrypto.so.3`, `libssl.so.3`) into each Lambda zip
+7. Deploy with `sam deploy` using `CAPABILITY_IAM CAPABILITY_AUTO_EXPAND`
+8. Upload frontend assets to S3 with immutable cache headers
+9. Run integration tests in Docker against the deployed stack
 
 See <doc:ArchitectureOverview> for a diagram of the resources this stack creates.
+
+### Deploy Prod (`deploy-prod.yml`)
+
+Production deployment workflow. Always takes the full build-and-deploy path (no fast path).
+
+**Triggers:**
+- GitHub Release (non-prerelease, `v`-prefixed tag) -- deploys to **prod**
+- Manual dispatch (`workflow_dispatch`)
+
+The build steps are identical to the full path in `deploy-stage.yml`. Deploys to the `production` GitHub deployment environment.
+
+**Required secrets:**
+- `AWS_ACCESS_KEY_ID` -- IAM access key for deployment
+- `AWS_SECRET_ACCESS_KEY` -- IAM secret key for deployment
 
 ### Deploy DocC Documentation (`deploy-docc.yml`)
 
@@ -94,7 +103,7 @@ Creates per-stage persistent resources that the app stack depends on.
 - Manual dispatch only -- caller selects `stage` or `prod`
 
 **What it creates or modifies:**
-- DynamoDB table for actor data, posts, followers, and federation state
+- DynamoDB table for actor data, posts, followers, bearer tokens, and federation state
 - S3 media bucket for uploaded images and frontend assets
 - SQS queue for asynchronous activity delivery
 - SSM Parameter Store prefix for actor signing keys
@@ -102,6 +111,30 @@ Creates per-stage persistent resources that the app stack depends on.
 **Required secrets:**
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
+
+### Unit Tests (`test.yml`)
+
+Runs the `ActivityPubCoreTests` unit test suite on every pull request.
+
+**Triggers:**
+- Pull request targeting `main`
+- Manual dispatch
+
+### Provision Actor (`provision-actor.yml`)
+
+Creates a new ActivityPub actor account with an RSA keypair and per-account bearer token stored in DynamoDB.
+
+**Triggers:**
+- Manual dispatch -- caller provides username, display name, optional summary, and target stage
+
+The bearer token is displayed in the workflow summary. Each account gets its own token stored as a `TOKEN#<sha256-hash>` record in DynamoDB, so multiple accounts can post independently.
+
+### Run Integration Tests (`run-integration-tests.yml`)
+
+Runs integration tests in a Docker container against a deployed stack. Tests are in the separate `integration-tests/` Swift package.
+
+**Triggers:**
+- Manual dispatch -- caller selects the target environment (stage or prod)
 
 ## Deployment Order
 
@@ -138,14 +171,14 @@ Or trigger the `environment.yml` workflow manually, selecting the desired stage.
 
 ### 4. App Stack (per stage)
 
-Deploy the app stack, which references both the bootstrap and environment stacks.
+Deploy the app stack, which references both the bootstrap and environment stacks. The app template uses nested stacks, so `CAPABILITY_AUTO_EXPAND` is required.
 
 ```bash
 cd activity-app
 sam deploy \
   --stack-name activity-app-stage \
   --resolve-s3 \
-  --capabilities CAPABILITY_IAM \
+  --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
   --parameter-overrides \
     Stage=stage \
     EnvironmentStackName=activity-environment-stage \
@@ -155,7 +188,7 @@ sam deploy \
     ProxyDistributionId=YOUR_DISTRIBUTION_ID
 ```
 
-After the first manual deploy, pushes to `main` automatically deploy to stage via the `app.yml` workflow.
+After the first manual deploy, pushes to `main` automatically deploy to stage via the `deploy-stage.yml` workflow.
 
 ### 5. Actor Provisioning
 
@@ -178,19 +211,36 @@ Set these repository variables so the CI/CD workflows can reference them:
 
 | Variable | Purpose | Example |
 |---|---|---|
-| `PROXY_DISTRIBUTION_ID` | CloudFront distribution ID for parent-domain proxy (cross-invalidation) | `E1234567890ABC` |
-
-The `ACTIVITY_API_DOMAIN` and `ACTIVITY_CDN_DOMAIN` values are derived from stack outputs automatically.
+| `SERVER_DOMAIN` | Your ActivityPub server domain | `example.com` |
+| `HANDLE_DOMAIN` | Your handle domain (same as server in simple mode) | `example.com` |
+| `PROXY_DISTRIBUTION_ID` | CloudFront distribution ID for parent-domain proxy (split mode only) | `E1234567890ABC` |
+| `ACTIVITY_DISTRIBUTION_ID_STAGE` | CloudFront distribution ID for the stage activity server | `E9876543210XYZ` |
+| `ACTIVITY_DISTRIBUTION_ID_PROD` | CloudFront distribution ID for the prod activity server | `EABCDEF1234567` |
+| `CLIENT_API_DOMAIN_STAGE` | Execute-api domain for stage Client API Gateway (enables same-origin routing) | `abc123.execute-api.us-east-1.amazonaws.com` |
+| `CLIENT_API_DOMAIN_PROD` | Execute-api domain for prod Client API Gateway | `def456.execute-api.us-east-1.amazonaws.com` |
+| `AWS_REGION` | AWS region for all deployments (default: `us-east-1`) | `us-east-1` |
+| `RUNNER_LABELS_LINUX` | Runner labels for Linux jobs (default: `ubuntu-latest`) | `["self-hosted", "linux"]` |
+| `RUNNER_LABELS_MACOS` | Runner labels for macOS jobs (default: `macos-26`) | `["self-hosted", "macOS"]` |
 
 ## CI/CD Pipeline
 
 ### Stage Deployment
 
-Every push to `main` triggers the `app.yml` workflow targeting **stage**. The workflow builds all Lambda handlers, deploys to CloudFormation, uploads frontend assets, and prints stack outputs.
+Every push to `main` triggers the `deploy-stage.yml` workflow. A detect job analyzes the changed files and picks the appropriate path:
+
+- **Fast path**: Only specific Lambda handlers changed. Builds those targets selectively, bundles OpenSSL, and updates the Lambda functions directly via API. Takes ~2.5 minutes with a warm cache.
+- **Full path**: Core library, templates, Package.swift, Dockerfile, or workflows changed. Builds all handlers, bundles OpenSSL, and deploys the full nested stack via SAM. Takes ~5-10 minutes.
+- **Skip**: No deployable changes (e.g., docs-only PRs).
+
+After either deployment path succeeds, integration tests run automatically against the deployed stage stack in a Docker container.
+
+GitHub deployment environments are tracked: the stage environment URL is `https://stage.{{SERVER_DOMAIN}}`.
 
 ### Production Deployment
 
-Creating a GitHub Release with a `v`-prefixed tag (e.g., `v1.2.0`) triggers the `app.yml` workflow targeting **prod**. The release must not be marked as a prerelease. You can also trigger a prod deploy manually via `workflow_dispatch`.
+Creating a GitHub Release with a `v`-prefixed tag (e.g., `v1.2.0`) triggers the `deploy-prod.yml` workflow. The release must not be marked as a prerelease. You can also trigger a prod deploy manually via `workflow_dispatch`. Production always takes the full build path.
+
+The production environment URL is `https://{{SERVER_DOMAIN}}`.
 
 ### Documentation Deployment
 
@@ -198,15 +248,27 @@ Every push to `main` also triggers the `deploy-docc.yml` workflow, which builds 
 
 ### Docker Image Caching
 
-The `app.yml` workflow caches the Docker build image by tagging it with the first 12 characters of the Dockerfile's SHA-256 hash. If the Dockerfile has not changed since the last build, the cached image is reused. On GitHub-hosted runners there is no persistent Docker cache, so the image is always rebuilt. On self-hosted runners, the cache persists across workflow runs.
+Both deployment workflows cache the Docker build image using GitHub Actions `actions/cache`. The image is saved to `/tmp/docker-image.tar` and keyed by the Dockerfile's content hash. On cache hit, the image is loaded directly; on miss, it is built and saved for next time.
+
+### Swift Build Caching
+
+The `.build` directory is cached across workflow runs, keyed by `Package.resolved` content and commit SHA. This significantly speeds up incremental builds, especially on the fast path where only a few targets need recompilation.
+
+### OpenSSL Bundling
+
+Lambda functions require OpenSSL libraries (`libcrypto.so.3`, `libssl.so.3`) that are not available in the Lambda runtime. Both deployment workflows extract these libraries from the AL2023 Swift Docker image and bundle them into each Lambda zip file. The Lambda environment variable `LD_LIBRARY_PATH` is set to `/var/task/lib` so the bundled libraries are found at runtime.
 
 ### Frontend Assets
 
-The `app.yml` workflow uploads files from the `frontend/` directory to the environment S3 media bucket on every deploy, with `Cache-Control: public, max-age=31536000, immutable` headers. This includes `latex.css` for rendering mathematical notation in posts.
+Both deployment workflows upload files from the `frontend/` directory to the environment S3 media bucket, with `Cache-Control: public, max-age=31536000, immutable` headers. This includes `latex.css` for rendering mathematical notation in posts.
 
-### CloudFront Cache Invalidation
+### Variable Substitution
 
-You do not need to manually invalidate CloudFront caches after deployment. The `PostHandler` and `ProfileUpdateHandler` Lambdas automatically issue CloudFront invalidations when content changes, targeting both the server domain distribution and the parent domain distribution (if configured).
+Before building, both deployment workflows run `scripts/substitute-variables.sh`, which replaces `{{SERVER_DOMAIN}}` and `{{HANDLE_DOMAIN}}` placeholders in SAM templates with the actual values from GitHub repository variables. This keeps the templates portable across different deployments.
+
+### CloudFront Cache Expiry
+
+CloudFront caches expire based on TTL values configured in the CDN stack's cache policies. There are no programmatic invalidations -- the Lambda handlers do not call `CreateInvalidation`. This simplifies the Lambda IAM permissions and avoids the cost and latency of invalidation API calls.
 
 ## Runner Configuration
 

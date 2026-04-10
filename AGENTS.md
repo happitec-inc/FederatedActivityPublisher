@@ -4,9 +4,9 @@ Guide for creating and managing bot accounts on your ActivityPub server.
 
 ## Prerequisites
 
-- AWS CLI configured with access to the `us-east-1` region
+- AWS CLI configured with access to your AWS region (default: `us-east-1`)
 - The `ActivityProvisioner` CLI built (or access to the Linux runner VM)
-- Bearer token stored in SSM for the account you want to post as
+- Bearer token for the account you want to post as (stored in DynamoDB, created during provisioning)
 
 ## Creating a New Account
 
@@ -39,9 +39,7 @@ Instead of running the CLI directly, use the **Provision Actor** workflow:
 4. Choose the target stage
 5. Run the workflow
 
-The workflow summary shows the SSM parameter path. Retrieve the token with the AWS CLI command shown in the summary.
-
-Note: this overwrites the shared client-token parameter. Only one account can post at a time per environment (see Limitations).
+The workflow summary displays the bearer token (copy it immediately -- it cannot be retrieved later). Each account gets its own independent token stored in DynamoDB, so multiple accounts can post without interference.
 
 ### Running locally with AWS credentials
 
@@ -70,20 +68,31 @@ Requirements: Swift 6.3 (macOS or Linux), network access to AWS APIs.
 
 ### 2. Create a bearer token for posting
 
-Store a bearer token in SSM. The format is `username:token` — the token can be any random string.
+Store a per-account bearer token in DynamoDB. The token is hashed with SHA-256 so the raw value is never persisted.
 
 ```bash
 TOKEN=$(openssl rand -hex 32)
-aws ssm put-parameter \
-  --name "/activity/prod/keys/client-token" \
-  --type SecureString \
-  --value "myapp:$TOKEN" \
-  --overwrite \
+TOKEN_HASH=$(echo -n "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
+TTL=$(( $(date +%s) + 31536000 ))  # 1 year
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+aws dynamodb put-item \
+  --table-name "activity-prod" \
+  --item "{
+    \"PK\": {\"S\": \"TOKEN#${TOKEN_HASH}\"},
+    \"SK\": {\"S\": \"META\"},
+    \"username\": {\"S\": \"myapp\"},
+    \"scope\": {\"S\": \"read write\"},
+    \"createdAt\": {\"S\": \"${NOW}\"},
+    \"ttl\": {\"N\": \"${TTL}\"},
+    \"description\": {\"S\": \"manual provisioning\"}
+  }" \
   --region us-east-1
 echo "Bearer token: $TOKEN"
 ```
 
-Note: the `/activity/prod/keys/client-token` parameter is shared — it holds credentials for one account at a time. To support multiple accounts posting independently, each needs its own token parameter (requires code changes to support per-account token paths).
+Each account gets its own token. Multiple accounts can post independently.
+
+> Note: The Provision Actor workflow handles token creation automatically. The manual approach above is only needed when provisioning via CLI.
 
 ### 3. Verify the account
 
@@ -278,8 +287,7 @@ Replace `{stage}` with `prod` or `stage` as appropriate.
 
 ## Limitations
 
-- One bearer token per environment (shared `/activity/{stage}/keys/client-token` parameter)
-- No OAuth2 yet — tokens are pre-shared, not obtainable via login flow
+- No OAuth2 yet -- tokens are pre-shared per-account in DynamoDB, not obtainable via login flow
 - API Gateway payload limit is 6 MB (covers most images, not video)
 - No post editing or deletion API (federation supports it, client API doesn't expose it yet)
 - No scheduled posts, polls, or direct messages

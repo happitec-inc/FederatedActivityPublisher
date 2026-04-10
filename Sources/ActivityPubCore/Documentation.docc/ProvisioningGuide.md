@@ -17,7 +17,7 @@ Use the **Provision Actor** GitHub Actions workflow:
 This creates:
 - A 2048-bit RSA keypair (private key stored in SSM at `/activity/{stage}/keys/{username}`)
 - An actor record in DynamoDB with the profile, inbox/outbox URLs, and public key
-- A bearer token stored in SSM at `/activity/{stage}/keys/client-token`
+- A per-account bearer token stored as a `TOKEN#<sha256-hash>` record in DynamoDB
 
 ### CLI alternative
 
@@ -52,22 +52,9 @@ CloudFront caching may delay visibility by up to an hour. If you get 404s, wait 
 
 ## Step 3: Get the bearer token
 
-The provisioning workflow stores a bearer token in SSM. Retrieve it:
+The provisioning workflow displays the bearer token in the **workflow summary** after the run completes. The raw token is shown once and cannot be retrieved later (only its SHA-256 hash is stored in DynamoDB).
 
-```bash
-aws ssm get-parameter \
-  --name "/activity/prod/keys/client-token" \
-  --with-decryption \
-  --query "Parameter.Value" \
-  --output text \
-  --region us-east-1
-```
-
-The value is in `username:token` format. The part after the colon is your bearer token.
-
-**Important:** There is one shared token per environment. Provisioning a new actor overwrites the previous token. If you have multiple actors, you'll need to swap the token in SSM before posting as each one (see the logos autoposter script for an example of this pattern).
-
-> **Note:** Token storage is a work in progress. The current single-token-per-environment model via SSM is a temporary approach. A future update will move to per-account tokens stored in DynamoDB, which aligns with the longer-term OAuth implementation. See the tracking issue for details.
+Each account gets its own independent token. Provisioning a new actor does not affect existing accounts' tokens.
 
 ## Step 4: Test posting
 
@@ -132,12 +119,6 @@ set -euo pipefail
 # Config — edit these
 API_URL="https://your-client-api-domain.execute-api.us-east-1.amazonaws.com/prod"
 TOKEN="your-bearer-token"
-USERNAME="dailydigest"
-
-# If sharing the SSM token with other accounts, swap it in first:
-# TOKEN_PARAM="/activity/prod/keys/client-token"
-# ORIGINAL_TOKEN=$(aws ssm get-parameter --name "$TOKEN_PARAM" --with-decryption --query "Parameter.Value" --output text --region us-east-1)
-# aws ssm put-parameter --name "$TOKEN_PARAM" --type SecureString --value "$USERNAME:$TOKEN" --overwrite --region us-east-1 > /dev/null
 
 # Generate your content
 POST_TEXT="Automated post at $(date '+%Y-%m-%d %H:%M')"
@@ -150,9 +131,6 @@ RESPONSE=$(curl -s -X POST "$API_URL/api/v1/statuses" \
 
 POST_URL=$(echo "$RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('url','UNKNOWN'))" 2>/dev/null)
 echo "$(date '+%Y-%m-%d %H:%M:%S') Posted: $POST_URL"
-
-# If you swapped the token, restore the original:
-# aws ssm put-parameter --name "$TOKEN_PARAM" --type SecureString --value "$ORIGINAL_TOKEN" --overwrite --region us-east-1 > /dev/null
 ```
 
 Add to crontab (e.g. every hour):
