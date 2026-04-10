@@ -39,14 +39,31 @@ This will:
 
 ### Setting Up Bearer Tokens
 
-The client posting API (`POST /api/v1/statuses`, `POST /api/v2/media`, `PATCH /api/v1/accounts/update_credentials`) uses bearer token authentication. Tokens are stored in SSM Parameter Store in the format `username:token`:
+The client posting API (`POST /api/v1/statuses`, `POST /api/v2/media`, `PATCH /api/v1/accounts/update_credentials`) uses bearer token authentication. Tokens are stored as per-account records in DynamoDB, keyed by the SHA-256 hash of the raw token:
 
 ```bash
-aws ssm put-parameter \
-  --name "/activity/prod/keys/client-token" \
-  --type SecureString \
-  --value "randomforms:your-secret-token-here"
+TOKEN=$(openssl rand -hex 32)
+TOKEN_HASH=$(echo -n "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
+TTL=$(( $(date +%s) + 31536000 ))  # 1 year
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+aws dynamodb put-item \
+  --table-name "activity-prod" \
+  --item "{
+    \"PK\": {\"S\": \"TOKEN#${TOKEN_HASH}\"},
+    \"SK\": {\"S\": \"META\"},
+    \"username\": {\"S\": \"randomforms\"},
+    \"scope\": {\"S\": \"read write\"},
+    \"createdAt\": {\"S\": \"${NOW}\"},
+    \"ttl\": {\"N\": \"${TTL}\"},
+    \"description\": {\"S\": \"manual provisioning\"}
+  }" \
+  --region us-east-1
+echo "Bearer token: $TOKEN"
 ```
+
+The raw token is never stored -- only its SHA-256 hash appears in DynamoDB. Each account gets its own independent token, so multiple actors can post without interference.
+
+> Note: The Provision Actor workflow (`provision-actor.yml`) handles token creation automatically and displays the raw token in the workflow summary. The manual approach above is only needed when provisioning via CLI.
 
 When calling the client API, include the token in the Authorization header:
 
@@ -54,7 +71,7 @@ When calling the client API, include the token in the Authorization header:
 Authorization: Bearer your-secret-token-here
 ```
 
-The server validates the token against SSM using constant-time comparison to prevent timing attacks.
+The server looks up the token in DynamoDB first. If not found, it falls back to the legacy SSM parameter at `/activity/{stage}/keys/client-token` for backward compatibility.
 
 ### Updating Profile Fields
 

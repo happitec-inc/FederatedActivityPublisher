@@ -106,9 +106,9 @@ function handler(event) {
 }
 ```
 
-**Cross-distribution cache invalidation** (optional):
+**Cross-distribution routing** (optional):
 
-If you set `PROXY_DISTRIBUTION_ID` to the CloudFront distribution ID of your handle domain's CDN, the PostHandler and ProfileUpdateHandler will invalidate cached paths on that distribution when new content is published.
+If you set `PROXY_DISTRIBUTION_ID` as a repository variable, it is passed to the app stack template for reference. Note that CloudFront cache expiry is now handled entirely by TTL values -- there are no programmatic invalidations from Lambda handlers.
 
 ### Diagram
 

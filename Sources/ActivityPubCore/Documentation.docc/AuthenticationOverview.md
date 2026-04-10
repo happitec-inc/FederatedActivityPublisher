@@ -16,4 +16,16 @@ For outbound delivery, the deliver Lambda signs each request using the local act
 
 ### Bearer Token Authentication (Client API)
 
-The client API endpoints (posting statuses, uploading media, updating profiles) require a bearer token in the Authorization header. The ``authenticateBearer(authHeader:ssmKeyPrefix:ssmClient:)`` function validates the token against a per-actor secret stored in SSM Parameter Store and returns a ``BearerAuthResult`` identifying the authenticated username. Invalid or missing tokens produce a ``BearerAuthError``.
+The client API endpoints (posting statuses, uploading media, updating profiles) require a bearer token in the Authorization header. The ``authenticateBearer(authHeader:store:ssmKeyPrefix:ssmClient:)`` function validates the token using a two-phase lookup:
+
+1. **DynamoDB lookup (primary)**: The raw token is hashed with SHA-256, and the hash is used to query a `TOKEN#<hash>` record in DynamoDB. The raw token is never stored -- only its hash appears in the database. Each token record includes the username, scope, creation timestamp, and an optional TTL for automatic expiry.
+
+2. **SSM fallback (legacy)**: If no DynamoDB token record is found, the function falls back to checking the legacy `client-token` SSM parameter in `username:token` format. SSM fallback hits are logged so that migration progress can be monitored.
+
+The ``BearerAuthResult`` returned on success includes the authenticated username and scope (e.g., `"read write"`). Invalid or missing tokens produce a ``BearerAuthError``.
+
+Per-account tokens stored in DynamoDB mean multiple actors can post independently without sharing or swapping a single SSM parameter. The Provision Actor workflow (`provision-actor.yml`) automatically creates a DynamoDB token record for each new account.
+
+### Session Authentication (Web UI)
+
+The ``authenticateRequest(authHeader:cookies:store:ssmKeyPrefix:ssmClient:signingKey:serverDomain:)`` function supports both bearer tokens and session cookies. It checks the Authorization header first (bearer token via the DynamoDB/SSM path above), then falls back to a `session` cookie containing a signed JWT. The ``RequestAuthResult`` includes the ``AuthMethod`` (`.bearer` or `.session`) so callers can vary their response format -- JSON for API clients, redirects for browsers.

@@ -36,8 +36,9 @@ Under **Settings > Secrets and variables > Actions > Variables**, add:
 |----------|-------|----------|
 | `SERVER_DOMAIN` | Your server domain (e.g. `example.com`) | Yes |
 | `HANDLE_DOMAIN` | Your handle domain (e.g. `example.com`) | Yes |
+| `AWS_REGION` | AWS region for deployments (e.g. `us-east-1`) | No (defaults to `us-east-1`) |
 | `RUNNER_LABELS_LINUX` | JSON array of runner labels (e.g. `["self-hosted", "linux"]`) | No (defaults to `ubuntu-latest`) |
-| `PROXY_DISTRIBUTION_ID` | CloudFront distribution ID for cross-invalidation | No (only for split DNS) |
+| `PROXY_DISTRIBUTION_ID` | CloudFront distribution ID for parent-domain proxy | No (only for split DNS) |
 
 For simple DNS mode (recommended), set `SERVER_DOMAIN` and `HANDLE_DOMAIN` to the same value.
 
@@ -81,12 +82,11 @@ The environment stack creates DynamoDB, S3, and SQS resources.
 
 ## Step 7: Deploy the app stack
 
-The app stack deploys all Lambda functions, API Gateway, and CloudFront.
+The app stack deploys all Lambda functions (with OpenSSL bundled), API Gateway, and CloudFront using nested stacks.
 
-1. Go to **Actions > Deploy App Stack**
+1. Go to **Actions > Deploy Stage**
 2. Click **Run workflow**
-3. Choose `stage`
-4. Run the workflow
+3. Run the workflow (first manual run takes the full path)
 
 This is the longest step (~5-10 minutes). It builds Swift Lambda functions in Docker, packages them, and deploys via SAM.
 
@@ -106,14 +106,16 @@ If these return valid JSON, the server is running.
 
 ## Step 9: Provision your first actor
 
-### Option A: GitHub Actions workflow
+### Option A: GitHub Actions workflow (recommended)
 
 1. Go to **Actions > Provision Actor**
 2. Click **Run workflow**
 3. Enter username, display name, and optional summary
 4. Choose the stage
 5. Run the workflow
-6. **Retrieve the bearer token** using the AWS CLI command shown in the workflow summary
+6. **Copy the bearer token** from the workflow summary -- it is displayed once and cannot be retrieved later
+
+The workflow creates the actor profile in DynamoDB, generates an RSA keypair in SSM, and stores a per-account bearer token as a `TOKEN#<sha256-hash>` record in DynamoDB. Each account gets its own independent token.
 
 ### Option B: CLI on a machine with Swift and AWS credentials
 
@@ -126,13 +128,22 @@ swift run ActivityProvisioner \
   --server-domain example.com \
   --handle-domain example.com
 
-# Create a bearer token
+# Create a per-account bearer token in DynamoDB
 TOKEN=$(openssl rand -hex 32)
-aws ssm put-parameter \
-  --name "/activity/stage/keys/client-token" \
-  --type SecureString \
-  --value "mybot:$TOKEN" \
-  --overwrite \
+TOKEN_HASH=$(echo -n "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
+TTL=$(( $(date +%s) + 31536000 ))  # 1 year
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+aws dynamodb put-item \
+  --table-name "activity-stage" \
+  --item "{
+    \"PK\": {\"S\": \"TOKEN#${TOKEN_HASH}\"},
+    \"SK\": {\"S\": \"META\"},
+    \"username\": {\"S\": \"mybot\"},
+    \"scope\": {\"S\": \"read write\"},
+    \"createdAt\": {\"S\": \"${NOW}\"},
+    \"ttl\": {\"N\": \"${TTL}\"},
+    \"description\": {\"S\": \"manual provisioning\"}
+  }" \
   --region us-east-1
 echo "Bearer token: $TOKEN"
 ```
@@ -177,9 +188,9 @@ curl -X POST "$API_URL/api/v1/statuses" \
 Once you have verified everything works on `stage`:
 
 1. Re-run the environment workflow with `prod`
-2. Re-run the app workflow with `prod`
-3. Re-provision your actor with `--stage prod`
-4. Or: create a GitHub release with a `v`-prefixed tag (e.g. `v1.0.0`) to trigger a prod deploy automatically
+2. Set `ACTIVITY_DISTRIBUTION_ID_PROD` and `CLIENT_API_DOMAIN_PROD` repository variables after the first prod deploy
+3. Create a GitHub release with a `v`-prefixed tag (e.g. `v1.0.0`) to trigger a prod deploy via `deploy-prod.yml`
+4. Re-provision your actor with `--stage prod` (or re-run the Provision Actor workflow targeting prod)
 
 ## Troubleshooting
 
