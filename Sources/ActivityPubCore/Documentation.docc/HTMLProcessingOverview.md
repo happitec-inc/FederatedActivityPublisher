@@ -12,7 +12,7 @@ When a remote server sends a Create activity containing a Note, the HTML content
 
 ### Outbound Text-to-HTML Conversion
 
-When a local actor posts through the client API, the content arrives as plain text. The ``convertTextToHTML(_:)`` function transforms this into valid HTML, handling paragraph breaks, linkifying URLs, and converting @-mentions and #-hashtags into proper links. The resulting HTML is what gets included in the ActivityPub Note object and delivered to followers.
+When a local actor posts through the client API, the content arrives as plain text or markdown. The ``convertTextToHTML(_:)`` function first parses the input using [swift-markdown](https://github.com/swiftlang/swift-markdown) to check for markdown formatting. If the input contains markdown syntax (bold, italic, links, headers, lists, code blocks, etc.), it is rendered to HTML via a custom `ActivityPubHTMLVisitor`. If the input is plain text with no markdown formatting, it falls through to the legacy plain-text path which handles paragraph breaks, URL autolinking, and @-mention / #-hashtag conversion. The resulting HTML is what gets included in the ActivityPub Note object and delivered to followers.
 
 ### Profile Field Formatting
 

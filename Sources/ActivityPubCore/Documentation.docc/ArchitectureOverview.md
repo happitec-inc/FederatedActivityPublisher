@@ -28,7 +28,7 @@ flowchart TB
     end
 
     subgraph "activity-app-{stage}"
-        CF["CloudFront<br/>(OAC for S3, cache-until-invalidated)"]
+        CF["CloudFront<br/>(OAC for S3, TTL-based)"]
         APIGW_S["API Gateway<br/>(federation)"]
         NI["nodeinfo"]
         WF["webfinger"]
@@ -91,14 +91,13 @@ flowchart TB
     APIGW_C --> PROFILE_UPDATE
     POST --> DDB
     POST --> SQS
-    POST -.->|"CloudFront invalidation"| CF
     MEDIA -->|"PutObject (write-only)"| S3
     MEDIA --> DDB
 ```
 
 ### Request Flow: Posting a Status
 
-When an author posts content through the client API, the status is written to DynamoDB, delivery jobs are enqueued to SQS for each follower, and the CloudFront cache is invalidated so the outbox reflects the new post.
+When an author posts content through the client API, the bearer token is validated against DynamoDB (with SSM fallback), the status is written to DynamoDB, and delivery jobs are enqueued to SQS for each follower. CloudFront TTLs handle cache expiry automatically -- no invalidation is needed.
 
 ```mermaid
 sequenceDiagram
@@ -107,17 +106,16 @@ sequenceDiagram
     participant P as post Lambda
     participant DB as DynamoDB
     participant Q as SQS
-    participant CF as CloudFront
     participant D as deliver Lambda
     participant SM as SSM Parameter Store
     participant R as Remote Server
 
     U->>CG: POST /api/v1/statuses {text, media_ids}
     CG->>P: Invoke
+    P->>DB: Validate bearer token (DynamoDB lookup)
     P->>DB: Write Status record
     P->>DB: Read follower inbox URLs
     P->>Q: Enqueue delivery jobs
-    P->>CF: CreateInvalidation /users/{name}/outbox*
     P-->>U: 200 Status JSON
 
     Q->>D: Delivery job {status_id, inbox_url}
@@ -182,15 +180,19 @@ The client API (for posting and media uploads) runs on a separate API Gateway do
 
 ### CloudFront Cache Strategy
 
-The server uses a cache-until-invalidated strategy. Between posts, all federation reads are served from the CloudFront edge at zero compute cost.
+The server uses a TTL-based caching strategy. There are no CloudFront invalidations -- cache expiry is handled entirely by TTL values. Federation reads are served from the CloudFront edge with minimal compute cost. Frequently-changing resources use short TTLs, while stable resources use longer ones.
 
-| Path Pattern | TTL | Invalidation Trigger |
+| Path Pattern | TTL | Notes |
 |---|---|---|
-| `/.well-known/nodeinfo`, `/nodeinfo/*` | 24h | Actor create/delete |
-| `/.well-known/webfinger*` | 24h | Actor create/delete |
-| `/users/*/outbox*` | 365d | New post |
-| `/users/*/statuses/*` | 365d | Post edit/delete |
-| `/users/*` (actor profile) | 24h | Profile update |
-| `/users/*/followers*` | 1h | Follow/unfollow |
-| `/media/*` | 365d (immutable) | Never |
-| `POST /users/*/inbox` | No cache | -- |
+| `/.well-known/nodeinfo`, `/nodeinfo/*` | 24h | Server metadata, changes rarely |
+| `/.well-known/webfinger*` | 24h | Actor discovery |
+| `/users/*/outbox*` | 1h | New posts visible within an hour |
+| `/users/*/statuses/*` | 1h | Individual posts |
+| `/users/*` (actor profile) | 24h | Profile data |
+| `/users/*/followers*`, `/users/*/following*` | 1h | Follower/following counts |
+| `/users/*/collections/featured`, `/users/*/collections/tags` | 24h | Pinned posts, featured tags |
+| `/api/v1/instance`, `/api/v2/instance` | 24h | Instance metadata |
+| `/media/*` | 1h | S3 media via OAC (immutable keys) |
+| `POST /users/*/inbox` | No cache | Inbound federation (pass-through) |
+| `/api/v1/statuses`, `/api/v2/media`, `/api/v1/accounts/*` | No cache | Client API (pass-through) |
+| `/auth/*`, `/compose`, `/api/internal/*` | No cache | Session-based endpoints |

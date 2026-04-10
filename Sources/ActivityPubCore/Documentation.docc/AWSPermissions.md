@@ -52,16 +52,16 @@ The SAM CLI creates and updates CloudFormation stacks. The deploying IAM princip
 
 - `cloudfront:CreateDistribution`, `cloudfront:UpdateDistribution`, `cloudfront:DeleteDistribution`
 - `cloudfront:GetDistribution`, `cloudfront:GetDistributionConfig`
-- `cloudfront:CreateInvalidation` (used at runtime by post/profile-update Lambdas)
 - `cloudfront:CreateCachePolicy`, `cloudfront:DeleteCachePolicy`
 - `cloudfront:CreateOriginRequestPolicy`, `cloudfront:DeleteOriginRequestPolicy`
 - `cloudfront:CreateOriginAccessControl`, `cloudfront:DeleteOriginAccessControl`
+- `cloudfront:CreateFunction`, `cloudfront:UpdateFunction`, `cloudfront:DeleteFunction`, `cloudfront:PublishFunction` (for the `/@username` rewrite function)
 
 ### DynamoDB
 
 - `dynamodb:CreateTable`, `dynamodb:DeleteTable`, `dynamodb:DescribeTable`, `dynamodb:UpdateTable`
 - `dynamodb:UpdateContinuousBackups` (for enabling PITR on prod)
-- At runtime, Lambda roles need: `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:UpdateItem`, `dynamodb:DeleteItem`, `dynamodb:Query`
+- At runtime, Lambda roles need: `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:UpdateItem`, `dynamodb:DeleteItem`, `dynamodb:Query` (includes bearer token lookups via `TOKEN#` records)
 
 ### SQS
 

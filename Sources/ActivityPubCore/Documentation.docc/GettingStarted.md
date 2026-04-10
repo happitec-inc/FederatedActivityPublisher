@@ -25,12 +25,13 @@ swift package resolve
 ### Project Structure
 
 ```
-FederatedActivityPublisher/
+federated-activity-publisher/
   Sources/
     ActivityPubCore/        # Shared library (models, DB, crypto, delivery)
     WebFingerHandler/       # Lambda: GET /.well-known/webfinger
     ActorHandler/           # Lambda: GET /users/{username}
     NodeInfoHandler/        # Lambda: GET /.well-known/nodeinfo
+    InstanceHandler/        # Lambda: GET /api/v1/instance, /api/v2/instance
     OutboxHandler/          # Lambda: GET /users/{username}/outbox
     FollowersHandler/       # Lambda: GET /users/{username}/followers
     FollowingHandler/       # Lambda: GET /users/{username}/following
@@ -43,17 +44,31 @@ FederatedActivityPublisher/
     PostHandler/            # Lambda: POST /api/v1/statuses
     MediaUploadHandler/     # Lambda: POST /api/v2/media
     ProfileUpdateHandler/   # Lambda: PATCH /api/v1/accounts/update_credentials
+    AuthHandler/            # Lambda: session auth (login/logout/register)
+    ComposeHandler/         # Lambda: web compose UI
     ActivityProvisioner/    # CLI: seed actors and generate keypairs
-    APIClient/              # OpenAPI-generated client for integration tests
+    APIClient/              # OpenAPI-generated client (symlinks openapi.yaml from root)
   Tests/
     ActivityPubCoreTests/   # Unit tests
-    IntegrationTests/       # Requires deployed stack + TEST_API_URL env var
+  integration-tests/        # Separate Swift package for integration tests (runs in Docker)
+    Package.swift
+    Sources/
+    Tests/
+  openapi.yaml              # Single OpenAPI spec (symlinked into Sources/APIClient/)
   activity-app/
-    template.yaml           # SAM template: app stack (Lambdas, CloudFront, API GW)
+    template.yaml           # SAM template: root orchestrator (nested stacks)
+    functions/
+      template.yaml         # Nested stack: Lambda functions + API Gateway
+    cdn/
+      template.yaml         # Nested stack: CloudFront, cache policies, DNS
   activity-environment/
     template.yaml           # SAM template: environment stack (DynamoDB, SQS, S3)
   activity-bootstrap/
     template.yaml           # SAM template: bootstrap stack (Route 53, ACM)
+  scripts/
+    substitute-variables.sh # Domain variable substitution for portability
+    detect-changed-targets.sh # Selective build target detection
+    build-selective.sh      # Build individual Lambda targets
   docker/
     Dockerfile.al2023-swift # Docker image for building Lambda binaries
 ```
@@ -66,6 +81,10 @@ The deployment is split into three SAM templates, each managing a different life
 
 2. **Environment** (`activity-environment/template.yaml`) -- deployed per stage (prod, stage). Creates the DynamoDB table, SQS delivery queue with DLQ, S3 media bucket, and establishes the SSM parameter naming convention for actor keypairs.
 
-3. **App** (`activity-app/template.yaml`) -- deployed per stage by CI. Contains all Lambda functions, both API Gateways (federation and client), the CloudFront distribution, cache policies, and Route 53 DNS records. This is what gets redeployed on every code change.
+3. **App** (`activity-app/template.yaml`) -- deployed per stage by CI. This is a root orchestrator that delegates to two nested CloudFormation stacks:
+   - **FunctionsStack** (`activity-app/functions/template.yaml`) -- all Lambda functions and both API Gateways (federation and client)
+   - **CdnStack** (`activity-app/cdn/template.yaml`) -- CloudFront distribution, cache policies, origin access control, and Route 53 DNS records
+
+   The nested stack design separates compute from CDN configuration, allowing CloudFormation to resolve cross-resource references cleanly. This is what gets redeployed on every code change.
 
 This separation means you can redeploy application code without touching your data stores, and data stores without touching DNS/certificates.

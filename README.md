@@ -20,7 +20,7 @@ Three SAM/CloudFormation templates, parameterized by stage:
 |-------|---------|
 | `activity-bootstrap` | Route 53 hosted zone, ACM wildcard certificate |
 | `activity-environment-{stage}` | DynamoDB table, S3 media bucket, SQS delivery queue |
-| `activity-app-{stage}` | 14 Lambda handlers, API Gateway, CloudFront |
+| `activity-app-{stage}` | 17 Lambda handlers (nested FunctionsStack + CdnStack), API Gateway, CloudFront |
 
 In simple DNS mode, your domain points directly to the server. In split DNS mode, traffic is proxied through a parent domain's CloudFront distribution.
 
@@ -43,6 +43,9 @@ In simple DNS mode, your domain points directly to the server. In split DNS mode
 | MediaUploadHandler | `POST /api/v2/media` | Upload images |
 | ProfileUpdateHandler | `PATCH /api/v1/accounts/update_credentials` | Update profile |
 | ProfileHandler | `GET /profile/{proxy+}` | HTML profile and post pages |
+| InstanceHandler | `GET /api/v1/instance`, `/api/v2/instance` | Server metadata and capabilities |
+| AuthHandler | `GET /auth/*` | Session authentication (login/logout/register) |
+| ComposeHandler | `GET /compose` | Web compose UI |
 
 ## Cost
 
@@ -82,7 +85,7 @@ sam deploy \
   --template-file activity-app/template.yaml \
   --stack-name activity-app-stage \
   --resolve-s3 \
-  --capabilities CAPABILITY_IAM \
+  --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
   --parameter-overrides Stage=stage ...
 ```
 
@@ -94,8 +97,8 @@ These must be set for deployment workflows to succeed:
 
 | Secret | Used by | Description |
 |--------|---------|-------------|
-| `AWS_ACCESS_KEY_ID` | app, bootstrap, environment | IAM access key for SAM deployments |
-| `AWS_SECRET_ACCESS_KEY` | app, bootstrap, environment | IAM secret key for SAM deployments |
+| `AWS_ACCESS_KEY_ID` | deploy-stage, deploy-prod, bootstrap, environment | IAM access key for SAM deployments |
+| `AWS_SECRET_ACCESS_KEY` | deploy-stage, deploy-prod, bootstrap, environment | IAM secret key for SAM deployments |
 
 ### Optional GitHub Secrets
 
@@ -107,14 +110,15 @@ These must be set for deployment workflows to succeed:
 
 | Variable | Used by | Default | Description |
 |----------|---------|---------|-------------|
-| `SERVER_DOMAIN` | app, provision-actor | _(required)_ | Domain where the ActivityPub server runs. In simple mode, same as handle domain. In split mode, the subdomain (e.g. `activity.example.com`). |
-| `HANDLE_DOMAIN` | app, provision-actor | _(required)_ | Domain used in handles (`@user@example.com`). Permanent once federated. |
-| `RUNNER_LABELS_LINUX` | app, bootstrap, environment | `"ubuntu-latest"` | JSON array of runner labels, e.g. `["self-hosted", "linux"]` |
+| `SERVER_DOMAIN` | deploy-stage, deploy-prod, provision-actor | _(required)_ | Domain where the ActivityPub server runs. In simple mode, same as handle domain. In split mode, the subdomain (e.g. `activity.example.com`). |
+| `HANDLE_DOMAIN` | deploy-stage, deploy-prod, provision-actor | _(required)_ | Domain used in handles (`@user@example.com`). Permanent once federated. |
+| `RUNNER_LABELS_LINUX` | deploy-stage, deploy-prod, bootstrap, environment | `"ubuntu-latest"` | JSON array of runner labels, e.g. `["self-hosted", "linux"]` |
 | `RUNNER_LABELS_MACOS` | deploy-docc | `"macos-26"` | JSON array of runner labels for macOS jobs |
-| `PROXY_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for cross-distribution cache invalidation; leave empty if not using a parent domain proxy |
-| `ACTIVITY_DISTRIBUTION_ID` | app | _(empty)_ | CloudFront distribution ID for activity subdomain; passed as parameter to avoid circular dependency |
-| `CLIENT_API_DOMAIN_STAGE` | app | _(empty)_ | Execute-api domain for the stage Client API Gateway (e.g. `abc123.execute-api.us-east-1.amazonaws.com`). Enables same-origin routing through CloudFront. |
-| `CLIENT_API_DOMAIN_PROD` | app | _(empty)_ | Execute-api domain for the prod Client API Gateway. Same as stage but for the production stack. |
+| `PROXY_DISTRIBUTION_ID` | deploy-stage, deploy-prod | _(empty)_ | CloudFront distribution ID for cross-distribution routing; leave empty if not using a parent domain proxy |
+| `ACTIVITY_DISTRIBUTION_ID_STAGE` | deploy-stage | _(empty)_ | CloudFront distribution ID for the stage activity server; passed as parameter to avoid circular dependency |
+| `ACTIVITY_DISTRIBUTION_ID_PROD` | deploy-prod | _(empty)_ | CloudFront distribution ID for the prod activity server |
+| `CLIENT_API_DOMAIN_STAGE` | deploy-stage | _(empty)_ | Execute-api domain for the stage Client API Gateway (e.g. `abc123.execute-api.us-east-1.amazonaws.com`). Enables same-origin routing through CloudFront. |
+| `CLIENT_API_DOMAIN_PROD` | deploy-prod | _(empty)_ | Execute-api domain for the prod Client API Gateway. Same as stage but for the production stack. |
 | `AWS_REGION` | all | `us-east-1` | AWS region for all deployments |
 | `ENABLE_DOCC_DEPLOY` | deploy-docc | _(unset)_ | Set to `true` to enable DocC features (OG images, Mermaid diagrams) |
 | `DOCC_BASE_URL` | deploy-docc | `https://{owner}.github.io/FederatedActivityPublisher` | Base URL for DocC OG meta tags |

@@ -18,17 +18,18 @@ The server is designed for zero cost at rest -- you only pay when posting or rec
 - Full federation: follow, accept, create, like, boost, reply, delete, update
 - Media attachments (images, video, audio) with S3 storage and CloudFront CDN
 - HTTP Signature signing and verification (Cavage draft)
-- Cache-until-invalidated CloudFront strategy for near-zero compute on reads
-- Bearer token authentication for the client posting API
+- TTL-based CloudFront caching for near-zero compute on reads
+- Per-account bearer tokens stored in DynamoDB (with SSM fallback)
+- Markdown support in post content (via swift-markdown)
 - HTML sanitization for inbound content
 
 ### Architecture at a Glance
 
-The system uses a three-template SAM architecture:
+The system uses a three-template SAM architecture with nested stacks:
 
 - **Bootstrap** -- Route 53 hosted zone and ACM wildcard certificate (deployed once)
 - **Environment** -- DynamoDB table, SQS queues, S3 media bucket, SSM key prefix (per stage)
-- **App** -- All Lambda functions, API Gateways, and CloudFront distribution (per stage)
+- **App** -- Root orchestrator with nested FunctionsStack (Lambda + API Gateway) and CdnStack (CloudFront, cache policies, DNS) (per stage)
 
 See <doc:ArchitectureOverview> for detailed diagrams.
 
@@ -70,6 +71,9 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 - ``BearerTokenRecord``
 - ``authenticateBearer(authHeader:store:ssmKeyPrefix:ssmClient:)``
 - ``authenticateBearer(authHeader:ssmKeyPrefix:ssmClient:)``
+- ``authenticateRequest(authHeader:cookies:store:ssmKeyPrefix:ssmClient:signingKey:serverDomain:)``
+- ``RequestAuthResult``
+- ``AuthMethod``
 
 ### Content Processing
 

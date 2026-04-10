@@ -12,10 +12,12 @@ Rather than creating a separate table for each entity type, the server stores ac
 
 The primary entity types stored in the table are:
 
-- **Actors** -- local accounts with their display name, summary, avatar URL, keypair reference, and profile fields
-- **Statuses** -- posts authored by local actors, including content HTML, visibility, media attachment references, and reply metadata
+- **Actors** (`ACTOR#<username>`) -- local accounts with their display name, summary, avatar URL, keypair reference, and profile fields
+- **Statuses** (`ACTOR#<username>`, `STATUS#<id>`) -- posts authored by local actors, including content HTML, visibility, media attachment references, and reply metadata
 - **Followers** -- records linking a remote actor's inbox URL to a local actor, created when a Follow is accepted
 - **Remote Actors** -- cached copies of remote actor documents fetched during signature verification, avoiding repeated HTTP lookups
+- **Bearer Tokens** (`TOKEN#<sha256-hash>`) -- per-account authentication tokens for the client API. The raw token is never stored; only its SHA-256 hash appears as the partition key. Each record includes the username, scope, creation timestamp, and an optional TTL for automatic expiry via DynamoDB's TTL mechanism
+- **Registration Tokens** (`REGISTRATION_TOKEN#<token>`) -- short-lived tokens (15-minute TTL) used during the web registration flow
 
 ### Timestamps and Ordering
 
