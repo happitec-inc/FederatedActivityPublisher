@@ -36,6 +36,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.7.0"),
         .package(url: "https://github.com/apple/swift-openapi-urlsession", from: "1.0.0"),
         .package(url: "https://github.com/elementary-swift/elementary.git", from: "0.7.0"),
+        .package(url: "https://github.com/swiftlang/swift-markdown", from: "0.5.0"),
         .package(url: "https://github.com/swiftlang/swift-docc-plugin.git", from: "1.0.0"),
     ],
     targets: [
@@ -48,6 +49,7 @@ let package = Package(
                 .product(name: "AWSSSM", package: "aws-sdk-swift"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
+                .product(name: "Markdown", package: "swift-markdown"),
             ]
         ),
 
