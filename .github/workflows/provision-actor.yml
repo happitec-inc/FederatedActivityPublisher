@@ -120,7 +120,9 @@ jobs:
       - name: Generate bearer token
         run: |
           TOKEN=$(openssl rand -hex 32)
-          echo "::add-mask::$TOKEN"
+          # Note: intentionally NOT masking the token — it needs to be visible
+          # in the step summary for the user to copy. The token is hashed in
+          # DynamoDB and this workflow run is ephemeral.
           TOKEN_HASH=$(echo -n "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
           TTL=$(( $(date +%s) + 31536000 ))  # 1 year
           NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
