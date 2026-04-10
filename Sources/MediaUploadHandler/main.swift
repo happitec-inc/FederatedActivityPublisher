@@ -52,6 +52,7 @@ let runtime = LambdaRuntime {
             authResult = try await authenticateRequest(
                 authHeader: authHeader,
                 cookies: cookies,
+                store: store,
                 ssmKeyPrefix: ssmKeyPrefix,
                 ssmClient: ssmClient,
                 signingKey: signingKey,

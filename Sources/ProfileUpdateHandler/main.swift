@@ -40,6 +40,7 @@ let runtime = LambdaRuntime {
         do {
             authResult = try await authenticateBearer(
                 authHeader: authHeader,
+                store: store,
                 ssmKeyPrefix: ssmKeyPrefix,
                 ssmClient: ssmClient
             )

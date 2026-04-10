@@ -67,6 +67,8 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 - ``KeyManagerError``
 - ``BearerAuthResult``
 - ``BearerAuthError``
+- ``BearerTokenRecord``
+- ``authenticateBearer(authHeader:store:ssmKeyPrefix:ssmClient:)``
 - ``authenticateBearer(authHeader:ssmKeyPrefix:ssmClient:)``
 
 ### Content Processing
