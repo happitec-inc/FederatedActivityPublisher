@@ -45,6 +45,7 @@ See <doc:ArchitectureOverview> for detailed diagrams.
 ### Operations
 
 - <doc:ProvisioningAccounts>
+- <doc:ProvisioningGuide>
 - <doc:AWSPermissions>
 - <doc:CostEstimates>
 
