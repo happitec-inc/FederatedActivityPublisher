@@ -237,6 +237,7 @@ let package = Package(
             name: "ActivityPubCoreTests",
             dependencies: [
                 "ActivityPubCore",
+                .product(name: "AWSDynamoDB", package: "aws-sdk-swift"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
             ]

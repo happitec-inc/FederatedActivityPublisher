@@ -121,11 +121,20 @@ jobs:
         run: |
           TOKEN=$(openssl rand -hex 32)
           echo "::add-mask::$TOKEN"
-          aws ssm put-parameter \
-            --name "/activity/${{ inputs.stage }}/keys/client-token" \
-            --type SecureString \
-            --value "${{ inputs.username }}:$TOKEN" \
-            --overwrite \
+          TOKEN_HASH=$(echo -n "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
+          TTL=$(( $(date +%s) + 31536000 ))  # 1 year
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          aws dynamodb put-item \
+            --table-name "activity-${{ inputs.stage }}" \
+            --item "{
+              \"PK\": {\"S\": \"TOKEN#${TOKEN_HASH}\"},
+              \"SK\": {\"S\": \"META\"},
+              \"username\": {\"S\": \"${{ inputs.username }}\"},
+              \"scope\": {\"S\": \"read write\"},
+              \"createdAt\": {\"S\": \"${NOW}\"},
+              \"ttl\": {\"N\": \"${TTL}\"},
+              \"description\": {\"S\": \"provisioned via workflow\"}
+            }" \
             --region ${{ vars.AWS_REGION || 'us-east-1' }}
           echo "## Actor Provisioned" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -133,16 +142,15 @@ jobs:
           echo "**Stage:** ${{ inputs.stage }}" >> "$GITHUB_STEP_SUMMARY"
           echo "**Handle:** @${{ inputs.username }}@${{ vars.HANDLE_DOMAIN }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "The bearer token has been stored in SSM at:" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`/activity/${{ inputs.stage }}/keys/client-token\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "The bearer token has been stored in DynamoDB table \`activity-${{ inputs.stage }}\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "Token hash: \`${TOKEN_HASH}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Retrieve it with:" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Raw token (copy now -- it cannot be retrieved later):**" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "aws ssm get-parameter --name /activity/${{ inputs.stage }}/keys/client-token --with-decryption --query Parameter.Value --output text" >> "$GITHUB_STEP_SUMMARY"
+          echo "$TOKEN" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Warning:** This overwrites the shared client-token parameter." >> "$GITHUB_STEP_SUMMARY"
-          echo "Only one account can post at a time per environment." >> "$GITHUB_STEP_SUMMARY"
+          echo "This token is unique to **${{ inputs.username }}** and does not affect other accounts." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify actor
         run: |

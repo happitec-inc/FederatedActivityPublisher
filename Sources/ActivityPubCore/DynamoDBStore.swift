@@ -1,4 +1,5 @@
 import AWSDynamoDB
+import Crypto
 import Foundation
 
 /// Shared ISO8601 date formatter — reused across all DynamoDBStore methods to avoid
@@ -934,7 +935,7 @@ public struct DynamoDBStore: Sendable {
             "SK": .s("META"),
             "challenge": .s(challenge),
             "type": .s(type),
-            "TTL": .n(String(ttl)),
+            "ttl": .n(String(ttl)),
         ]
         if let username {
             item["username"] = .s(username)
@@ -972,7 +973,7 @@ public struct DynamoDBStore: Sendable {
             "PK": .s("REGISTRATION_TOKEN#\(token)"),
             "SK": .s("META"),
             "username": .s(username),
-            "TTL": .n(String(ttl)),
+            "ttl": .n(String(ttl)),
         ]
         let input = PutItemInput(item: item, tableName: tableName)
         _ = try await client.putItem(input: input)
@@ -990,8 +991,10 @@ public struct DynamoDBStore: Sendable {
         let output = try await client.getItem(input: input)
         guard let item = output.item else { return nil }
 
-        // Check TTL manually (DynamoDB TTL deletion is eventually consistent)
-        if case .n(let ttlStr) = item["TTL"], let ttl = Int(ttlStr) {
+        // Check TTL manually (DynamoDB TTL deletion is eventually consistent).
+        // Check both "ttl" (correct) and "TTL" (legacy) for records written before the casing fix.
+        let ttlValue = item["ttl"] ?? item["TTL"]
+        if case .n(let ttlStr) = ttlValue, let ttl = Int(ttlStr) {
             if ttl < Int(Date().timeIntervalSince1970) { return nil }
         }
 
@@ -1018,6 +1021,101 @@ public struct DynamoDBStore: Sendable {
             return RegistrationToken(token: token, username: username)
         } catch is ConditionalCheckFailedException {
             return nil
+        }
+    }
+
+    // MARK: - Bearer Tokens
+
+    /// Compute the SHA-256 hash of a bearer token, returned as a lowercase hex string.
+    ///
+    /// Used as the partition key suffix (`TOKEN#<hash>`) so the raw token never
+    /// appears in DynamoDB keys, CloudTrail logs, or console views.
+    public static func hashToken(_ token: String) -> String {
+        let digest = SHA256.hash(data: Data(token.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Store a bearer token record in DynamoDB.
+    ///
+    /// The token is hashed with SHA-256 and stored as `PK = TOKEN#<hash>, SK = META`.
+    /// The raw token is never persisted.
+    ///
+    /// - Parameters:
+    ///   - token: The raw bearer token string.
+    ///   - username: The actor this token authenticates as.
+    ///   - scope: Space-separated scopes (e.g. "read write").
+    ///   - ttlSeconds: Token lifetime in seconds from now.
+    ///   - description: Optional human-readable label.
+    public func storeBearerToken(
+        token: String,
+        username: String,
+        scope: String,
+        ttlSeconds: Int,
+        description: String?
+    ) async throws {
+        let tokenHash = DynamoDBStore.hashToken(token)
+        let ttl = Int(Date().timeIntervalSince1970) + ttlSeconds
+        let now = iso8601Formatter.string(from: Date())
+        var item: [String: DynamoDBClientTypes.AttributeValue] = [
+            "PK": .s("TOKEN#\(tokenHash)"),
+            "SK": .s("META"),
+            "username": .s(username),
+            "scope": .s(scope),
+            "createdAt": .s(now),
+            "ttl": .n(String(ttl)),
+        ]
+        if let description {
+            item["description"] = .s(description)
+        }
+        let input = PutItemInput(item: item, tableName: tableName)
+        _ = try await client.putItem(input: input)
+    }
+
+    /// Look up a bearer token by its raw value.
+    ///
+    /// Hashes the token, performs a `GetItem` on `TOKEN#<hash>`, and checks
+    /// TTL manually (DynamoDB TTL deletion is eventually consistent).
+    ///
+    /// - Parameter token: The raw bearer token from the Authorization header.
+    /// - Returns: The token record if found and not expired, or nil.
+    public func getBearerToken(token: String) async throws -> BearerTokenRecord? {
+        let tokenHash = DynamoDBStore.hashToken(token)
+        let input = GetItemInput(
+            key: [
+                "PK": .s("TOKEN#\(tokenHash)"),
+                "SK": .s("META"),
+            ],
+            tableName: tableName
+        )
+        let output = try await client.getItem(input: input)
+        guard let item = output.item else { return nil }
+        guard let record = BearerTokenRecord.fromDynamoDB(item) else { return nil }
+
+        // Check TTL manually -- DynamoDB TTL deletion is eventually consistent
+        if record.ttl < Int(Date().timeIntervalSince1970) { return nil }
+
+        return record
+    }
+
+    /// Revoke a bearer token by deleting its DynamoDB record.
+    ///
+    /// - Parameter tokenHash: The SHA-256 hex hash of the token to revoke.
+    /// - Returns: True if the token existed and was deleted, false if not found.
+    public func revokeBearerToken(tokenHash: String) async throws -> Bool {
+        let input = DeleteItemInput(
+            conditionExpression: "attribute_exists(PK)",
+            key: [
+                "PK": .s("TOKEN#\(tokenHash)"),
+                "SK": .s("META"),
+            ],
+            returnValues: .allOld,
+            tableName: tableName
+        )
+        do {
+            let output = try await client.deleteItem(input: input)
+            return output.attributes != nil
+        } catch is ConditionalCheckFailedException {
+            return false
         }
     }
 
