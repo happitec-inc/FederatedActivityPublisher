@@ -29,8 +29,8 @@ swift run ActivityProvisioner \
   --username dailydigest \
   --display-name "Daily Digest" \
   --summary "Posts a daily summary" \
-  --server-domain happitec.com \
-  --handle-domain happitec.com
+  --server-domain {{SERVER_DOMAIN}} \
+  --handle-domain {{HANDLE_DOMAIN}}
 ```
 
 ## Step 2: Verify the actor
@@ -39,13 +39,13 @@ After provisioning, verify the actor is accessible:
 
 ```bash
 # WebFinger (replace domain and username)
-curl -s "https://activity.happitec.com/.well-known/webfinger?resource=acct:dailydigest@happitec.com" | jq .
+curl -s "https://{{SERVER_DOMAIN}}/.well-known/webfinger?resource=acct:dailydigest@{{HANDLE_DOMAIN}}" | jq .
 
 # Actor JSON-LD
-curl -s -H "Accept: application/activity+json" "https://activity.happitec.com/users/dailydigest" | jq .id
+curl -s -H "Accept: application/activity+json" "https://{{SERVER_DOMAIN}}/users/dailydigest" | jq .id
 
 # HTML profile page
-curl -s -o /dev/null -w "%{http_code}" "https://activity.happitec.com/@dailydigest"
+curl -s -o /dev/null -w "%{http_code}" "https://{{SERVER_DOMAIN}}/@dailydigest"
 ```
 
 CloudFront caching may delay visibility by up to an hour. If you get 404s, wait and retry.
@@ -82,7 +82,7 @@ aws cloudformation describe-stacks \
 Or, if the same-origin CloudFront routing is configured, you can post through the CloudFront domain:
 
 ```bash
-curl -X POST "https://activity.happitec.com/api/v1/statuses" \
+curl -X POST "https://{{SERVER_DOMAIN}}/api/v1/statuses" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"status": "Hello!", "visibility": "public"}'
