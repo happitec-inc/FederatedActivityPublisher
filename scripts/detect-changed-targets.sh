@@ -93,6 +93,12 @@ TARGETS_LIST=""
 for file in "${CHANGED_FILES[@]}"; do
   # Check if this is under Sources/
   if [[ "$file" == Sources/* ]]; then
+    # Skip DocC documentation files — they don't affect compiled Lambda binaries.
+    # DocC builds run in a separate workflow (deploy-docc.yml).
+    if [[ "$file" == */Documentation.docc/* ]]; then
+      continue
+    fi
+
     # Extract the target directory name: Sources/{TargetName}/...
     target_dir="${file#Sources/}"
     target_name="${target_dir%%/*}"
