@@ -87,6 +87,26 @@ assert_eq "multiple handlers -> sorted unique" \
   "$(printf "AuthHandler\nPostHandler")" \
   "$(printf "Sources/PostHandler/main.swift\nSources/AuthHandler/main.swift\nSources/PostHandler/other.swift\n" | bash "$SCRIPT")"
 
+# DocC under a handler subtree -> docc skipped, handler still rebuilt
+assert_eq "handler docc + handler swift -> handler only" \
+  "PostHandler" \
+  "$(printf "Sources/PostHandler/Documentation.docc/foo.md\nSources/PostHandler/main.swift\n" | bash "$SCRIPT")"
+
+# Handler-only docc change -> none (no swift change)
+assert_eq "handler docc only -> none" \
+  "none" \
+  "$(echo "Sources/PostHandler/Documentation.docc/foo.md" | bash "$SCRIPT")"
+
+# Swift file that coincidentally contains "Documentation.docc" in its name -> not skipped
+assert_eq "Documentation.docc.swift filename -> not skipped" \
+  "Foo" \
+  "$(echo "Sources/Foo/Documentation.docc.swift" | bash "$SCRIPT")"
+
+# ActivityPubCore + a handler -> dependents (PostHandler is in the dependents set)
+assert_eq "ActivityPubCore + handler -> dependents (deduped)" \
+  "$ACTIVITYPUBCORE_DEPS" \
+  "$(printf "Sources/ActivityPubCore/Foo.swift\nSources/PostHandler/main.swift\n" | bash "$SCRIPT")"
+
 if [[ "$FAIL" -gt 0 ]]; then
   echo ""
   echo "$FAIL test(s) failed"
