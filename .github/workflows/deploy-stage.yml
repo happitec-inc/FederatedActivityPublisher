@@ -136,6 +136,9 @@ jobs:
 
           sudo chown -R $(id -u):$(id -g) .build
 
+      - name: Install zip
+        run: which zip || sudo apt-get install -y zip
+
       - name: Bundle OpenSSL libs into changed zips
         run: |
           mkdir -p /tmp/ssl-libs
