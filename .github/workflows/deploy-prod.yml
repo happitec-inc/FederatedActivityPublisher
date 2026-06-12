@@ -92,17 +92,21 @@ jobs:
             docker save swift-al2023:6.3 > /tmp/docker-image.tar
           fi
 
-      - name: Cache Swift build artifacts
-        uses: actions/cache@v4
+      # Keyed on tracked Package.swift — the old '**/Package.resolved' glob
+      # matched only root-owned files inside .build/, making hashFiles() throw.
+      - name: Restore Swift build cache
+        uses: happitec-inc/shared-actions/swift-build-cache-restore@main
         with:
-          path: .build
-          key: swift-build-${{ hashFiles('**/Package.resolved') }}-${{ github.sha }}
-          restore-keys: |
-            swift-build-${{ hashFiles('**/Package.resolved') }}-
-            swift-build-
+          key-prefix: swift-docker-build
 
       - name: Build Lambda zip
         run: swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3 --disable-docker-image-update
+
+      - name: Save Swift build cache
+        if: always()
+        uses: happitec-inc/shared-actions/swift-build-cache-save@main
+        with:
+          key-prefix: swift-docker-build
 
       - name: Bundle OpenSSL libs from build image
         run: |
