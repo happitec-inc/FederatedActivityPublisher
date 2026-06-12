@@ -8,6 +8,7 @@ import Foundation
 guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] else {
     fatalError("SERVER_DOMAIN environment variable is required")
 }
+let instanceTitle = ProcessInfo.processInfo.environment["INSTANCE_TITLE"] ?? "FederatedActivityPublisher"
 let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "/activity/stage/keys/"
 let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw
 
@@ -94,7 +95,7 @@ struct ComposePage: HTMLDocument {
     var domain: String
     var recentStatuses: [Status]
 
-    var title: String { "Compose - Happitec" }
+    var title: String { "Compose - \(instanceTitle)" }
     var lang: String { "en" }
 
     var bodyAttributes: [HTMLAttribute<HTMLTag.body>] {

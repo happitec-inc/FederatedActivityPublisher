@@ -359,7 +359,10 @@ jobs:
               HandleDomain=${{ vars.HANDLE_DOMAIN }} \
               ProxyDistributionId=${{ vars.PROXY_DISTRIBUTION_ID }} \
               ActivityDistributionId=${{ vars.ACTIVITY_DISTRIBUTION_ID_STAGE }} \
-              ClientApiDomain=${{ vars.CLIENT_API_DOMAIN_STAGE }}
+              ClientApiDomain=${{ vars.CLIENT_API_DOMAIN_STAGE }} \
+              "InstanceTitle=${{ vars.INSTANCE_TITLE || 'FederatedActivityPublisher' }}" \
+              "InstanceDescription=${{ vars.INSTANCE_DESCRIPTION || 'A serverless ActivityPub server powered by FederatedActivityPublisher.' }}" \
+              "SourceUrl=${{ vars.SOURCE_URL || 'https://github.com/happitec-inc/FederatedActivityPublisher' }}"
 
       - name: Upload frontend assets
         run: |
