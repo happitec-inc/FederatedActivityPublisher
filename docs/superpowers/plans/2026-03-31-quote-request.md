@@ -152,18 +152,18 @@ Sources/PostHandler/main.swift                            # Add outbound quote f
 
 Build (on linux-runner VM):
 ```bash
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 SCP files first (the VM cannot git fetch this worktree):
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Tests
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Tests
 ```
 
 Test (on linux-runner VM):
 ```bash
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter QuoteRequestTests 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter QuoteRequestTests 2>&1"
 ```
 
 ---
@@ -281,8 +281,8 @@ Add these lines after the existing `inReplyTo` serialization block (inside `toDy
 - [ ] **1d. SCP to VM and verify build succeeds**
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 All existing callers of `Status.init(...)` omit these new parameters, so they get the defaults. No breakage expected.
@@ -403,8 +403,8 @@ Look up a status by its `uri` attribute. This is needed for inbound QuoteRequest
 - [ ] **2e. SCP to VM and verify build succeeds**
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 ---
@@ -580,8 +580,8 @@ public func shouldAcceptQuoteRequest(
 - [ ] **3c. SCP to VM, run tests, verify they pass**
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources $WORKING_DIR/Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter QuoteRequestTests 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources $WORKING_DIR/Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter QuoteRequestTests 2>&1"
 ```
 
 - [ ] **3d. Add `QuoteRequest` case to InboxHandler switch statement**
@@ -770,8 +770,8 @@ func handleQuoteRequest(
 - [ ] **3f. SCP to VM and verify build succeeds**
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 ---
@@ -1040,8 +1040,8 @@ func handleRejectQuoteRequest(
 - [ ] **4d. SCP to VM and verify build succeeds**
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 ---
@@ -1092,8 +1092,8 @@ Note the two changes to the context:
 - [ ] **5b. SCP to VM and verify build succeeds**
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 ---
@@ -1143,8 +1143,8 @@ Update the `init`:
 - [ ] **6b. SCP to VM and verify build succeeds**
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 ---
@@ -1298,8 +1298,8 @@ enum PostError: Error {
 - [ ] **7e. SCP to VM and verify build succeeds**
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 ---
@@ -1337,8 +1337,8 @@ The full return statement becomes:
 - [ ] **8b. SCP to VM and verify build succeeds**
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 ---
@@ -1354,25 +1354,25 @@ sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "
 - [ ] **9a. SCP all sources and tests to VM**
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources $WORKING_DIR/Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources $WORKING_DIR/Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/
 ```
 
 - [ ] **9b. Full build**
 
 ```bash
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 - [ ] **9c. Run all tests**
 
 ```bash
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test 2>&1"
 ```
 
 - [ ] **9d. Run QuoteRequest-specific tests**
 
 ```bash
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter QuoteRequestTests 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter QuoteRequestTests 2>&1"
 ```
 
 ---

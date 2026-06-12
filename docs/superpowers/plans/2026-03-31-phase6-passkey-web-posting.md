@@ -262,9 +262,9 @@ WebAuthnCredential:
 
 **Build verification:**
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no openapi.yaml admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/openapi.yaml
-sshpass -p admin scp -o StrictHostKeyChecking=no openapi.yaml admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources/APIClient/openapi.yaml
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner-3) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no openapi.yaml admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/openapi.yaml
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no openapi.yaml admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources/APIClient/openapi.yaml
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner-3) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 ---
@@ -511,8 +511,8 @@ public struct RegistrationToken: Sendable {
 
 **Build verification:**
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r Sources/ActivityPubCore/ admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources/ActivityPubCore/
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner-3) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r Sources/ActivityPubCore/ admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources/ActivityPubCore/
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner-3) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 ---
@@ -668,8 +668,8 @@ func base64urlDecode(_ string: String) -> Data? {
 
 **Build verification:**
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no Sources/ActivityPubCore/JWTSession.swift admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources/ActivityPubCore/JWTSession.swift
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner-3) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no Sources/ActivityPubCore/JWTSession.swift admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources/ActivityPubCore/JWTSession.swift
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner-3) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 ---
@@ -968,8 +968,8 @@ func extractCookie(name: String, from cookieHeader: String) -> String? {
 
 **Build verification:**
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r Sources/ admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources/
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner-3) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r Sources/ admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources/
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner-3) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 ---
@@ -1244,8 +1244,8 @@ Write integration tests using the generated APIClient, following the existing `T
 - [ ] Build and run unit tests on linux-runner-3:
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r Tests/ admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Tests/
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner-3) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter ActivityPubCoreTests 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r Tests/ admin@$(tart ip linux-runner-3):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Tests/
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner-3) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter ActivityPubCoreTests 2>&1"
 ```
 
 **Files:** `Tests/ActivityPubCoreTests/JWTSessionTests.swift`, `Tests/IntegrationTests/AuthChallengeTests.swift`, `Tests/IntegrationTests/RegistrationTests.swift`, `Tests/IntegrationTests/ComposePageTests.swift`, `Tests/IntegrationTests/DualAuthTests.swift`

@@ -136,7 +136,7 @@ public func parseMultipart(data: Data, boundary: String) -> [MultipartPart] {
 
 - [ ] **1.3** Build on Linux VM:
 ```bash
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) \
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) \
   "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
@@ -689,13 +689,13 @@ swift test --filter ActivityPubCoreTests 2>&1
 
 **Build:**
 ```bash
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) \
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) \
   "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 **Test:**
 ```bash
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) \
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) \
   "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter ActivityPubCoreTests 2>&1"
 ```
 

@@ -42,18 +42,18 @@ Sources/InboxHandler/main.swift                # Add Like, Announce, Create, Del
 
 Build (on linux-runner VM):
 ```bash
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift build 2>&1"
 ```
 
 SCP files first (the VM cannot git fetch this worktree):
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
-sshpass -p admin scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Tests
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Sources admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Sources
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r $WORKING_DIR/Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/Tests
 ```
 
 Test (on linux-runner VM):
 ```bash
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter ActivityPubCoreTests 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter ActivityPubCoreTests 2>&1"
 ```
 
 ---
@@ -252,9 +252,9 @@ struct HTMLSanitizerTests {
 
 ```bash
 # SCP Sources and Tests to VM
-sshpass -p admin scp -o StrictHostKeyChecking=no -r Sources Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r Sources Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/
 # Run tests -- expect compilation failure
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter HTMLSanitizer 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter HTMLSanitizer 2>&1"
 ```
 
 - [ ] **1c. Implement `HTMLSanitizer`** in `Sources/ActivityPubCore/HTMLSanitizer.swift`
@@ -429,8 +429,8 @@ public enum HTMLSanitizer {
 - [ ] **1d. SCP to VM, verify all tests pass, commit**
 
 ```bash
-sshpass -p admin scp -o StrictHostKeyChecking=no -r Sources Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/
-sshpass -p admin ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter HTMLSanitizer 2>&1"
+sshpass -p "$RUNNER_VM_PASSWORD" scp -o StrictHostKeyChecking=no -r Sources Tests admin@$(tart ip linux-runner):~/actions-runner/_work/activity.happitec.com/activity.happitec.com/
+sshpass -p "$RUNNER_VM_PASSWORD" ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) "cd ~/actions-runner/_work/activity.happitec.com/activity.happitec.com && swift test --filter HTMLSanitizer 2>&1"
 ```
 
 If tests fail, fix the implementation until all pass. Then commit both files:

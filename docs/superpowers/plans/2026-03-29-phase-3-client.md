@@ -544,12 +544,12 @@ git commit -m "Add text-to-HTML and Note builder unit tests"
 - [ ] **Step 1: Sync to VM and build**
 
 ```bash
-SSHPASS=admin sshpass -e rsync -az --exclude='.build' --exclude='.git' \
+SSHPASS=$RUNNER_VM_PASSWORD sshpass -e rsync -az --exclude='.build' --exclude='.git' \
   -e "ssh -o StrictHostKeyChecking=no" \
   /Users/spar/web-local/activity.happitec.com/ \
   admin@$(tart ip linux-runner):/tmp/activity-test/
 
-SSHPASS=admin sshpass -e ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) \
+SSHPASS=$RUNNER_VM_PASSWORD sshpass -e ssh -o StrictHostKeyChecking=no admin@$(tart ip linux-runner) \
   "cd /tmp/activity-test && swift build 2>&1 | tail -5"
 ```
 
