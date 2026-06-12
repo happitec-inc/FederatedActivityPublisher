@@ -20,7 +20,7 @@ Three SAM/CloudFormation templates, parameterized by stage:
 |-------|---------|
 | `activity-bootstrap` | Route 53 hosted zone, ACM wildcard certificate |
 | `activity-environment-{stage}` | DynamoDB table, S3 media bucket, SQS delivery queue |
-| `activity-app-{stage}` | 17 Lambda handlers (nested FunctionsStack + CdnStack), API Gateway, CloudFront |
+| `activity-app-{stage}` | 18 Lambda handlers (nested FunctionsStack + CdnStack), API Gateway, CloudFront |
 
 In simple DNS mode, your domain points directly to the server. In split DNS mode, traffic is proxied through a parent domain's CloudFront distribution.
 
@@ -104,7 +104,7 @@ These must be set for deployment workflows to succeed:
 
 | Secret | Used by | Description |
 |--------|---------|-------------|
-| `HAPPITEC_READ_ONLY_PAT` | deploy-docc | PAT for private repo access (OG image generation) |
+| `HAPPITEC_READ_ONLY_PAT` | deploy-docc | Maintainers only — PAT for the private repos used by the optional DocC pipeline. Forks can ignore; the workflow is gated behind `ENABLE_DOCC_DEPLOY`. |
 
 ### Repository Variables
 

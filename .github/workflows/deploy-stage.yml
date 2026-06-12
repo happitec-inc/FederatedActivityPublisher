@@ -17,6 +17,9 @@ env:
 
 jobs:
   detect:
+    # Skip entirely on forks/repos that haven't configured deployment
+    # (SERVER_DOMAIN is the minimum required repository variable).
+    if: vars.SERVER_DOMAIN
     runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
     outputs:
       path: ${{ steps.decide.outputs.path }}

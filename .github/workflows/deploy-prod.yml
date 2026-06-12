@@ -16,8 +16,9 @@ env:
 jobs:
   build-and-deploy:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
+      vars.SERVER_DOMAIN &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v')))
     runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
     environment:
       name: production
