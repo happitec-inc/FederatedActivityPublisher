@@ -7,6 +7,10 @@ guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] el
 }
 
 let instanceTitle = ProcessInfo.processInfo.environment["INSTANCE_TITLE"] ?? "FederatedActivityPublisher"
+let instanceDescription = ProcessInfo.processInfo.environment["INSTANCE_DESCRIPTION"]
+    ?? "A serverless ActivityPub server powered by FederatedActivityPublisher."
+let sourceUrl = ProcessInfo.processInfo.environment["SOURCE_URL"]
+    ?? "https://github.com/happitec-inc/FederatedActivityPublisher"
 
 let runtime = LambdaRuntime {
     (event: APIGatewayRequest, context: LambdaContext) -> APIGatewayResponse in
@@ -19,8 +23,8 @@ let runtime = LambdaRuntime {
           "domain": "\(serverDomain)",
           "title": "\(instanceTitle)",
           "version": "4.5.0 (compatible; FederatedActivityPublisher 0.4.2)",
-          "source_url": "https://github.com/happitec-inc/FederatedActivityPublisher",
-          "description": "A serverless ActivityPub server powered by FederatedActivityPublisher. A project by Happitec.",
+          "source_url": "\(sourceUrl)",
+          "description": "\(instanceDescription)",
           "usage": {"users": {"active_month": 4}},
           "thumbnail": null,
           "icon": [],
@@ -74,8 +78,8 @@ let runtime = LambdaRuntime {
         {
           "uri": "\(serverDomain)",
           "title": "\(instanceTitle)",
-          "short_description": "A serverless ActivityPub server powered by FederatedActivityPublisher",
-          "description": "A serverless ActivityPub server powered by FederatedActivityPublisher. A project by Happitec.",
+          "short_description": "\(instanceDescription)",
+          "description": "\(instanceDescription)",
           "email": "",
           "version": "4.5.0 (compatible; FederatedActivityPublisher 0.4.2)",
           "urls": {
