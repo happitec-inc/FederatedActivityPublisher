@@ -1,6 +1,25 @@
 .build/
 .swiftpm/
 Package.resolved
+.DS_Store
+
+# Agent / local-only files
+CLAUDE.md
+.claude/
+
+# Generated DocC site output (built by deploy-docc.yml)
+docs/css/
+docs/js/
+docs/data/
+docs/img/
+docs/index/
+docs/documentation/
+docs/index.html
+docs/metadata.json
+docs/favicon.ico
+docs/favicon.svg
+docs/developer-og.jpg
+docs/developer-og-twitter.jpg
 
 # Secrets / credentials
 *.pem
