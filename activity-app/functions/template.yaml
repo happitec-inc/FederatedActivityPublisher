@@ -48,6 +48,21 @@ Parameters:
     Default: ""
     Description: CloudFront distribution ID from CDN stack (for PostFunction/ProfileUpdateFunction invalidation)
 
+  InstanceTitle:
+    Type: String
+    Default: FederatedActivityPublisher
+    Description: Instance name shown in page titles, WebAuthn prompts, OG tags, and the instance API
+
+  InstanceDescription:
+    Type: String
+    Default: A serverless ActivityPub server powered by FederatedActivityPublisher.
+    Description: Instance description returned by the instance API
+
+  SourceUrl:
+    Type: String
+    Default: https://github.com/happitec-inc/FederatedActivityPublisher
+    Description: Source code URL returned by the instance API
+
 Conditions:
   IsProd: !Equals [!Ref Stage, prod]
 
@@ -87,6 +102,9 @@ Globals:
           Fn::Sub: "${EnvironmentStackName}-QueueUrl"
         SSM_KEY_PREFIX: !ImportValue
           Fn::Sub: "${EnvironmentStackName}-SSMKeyPrefix"
+        INSTANCE_TITLE: !Ref InstanceTitle
+        INSTANCE_DESCRIPTION: !Ref InstanceDescription
+        SOURCE_URL: !Ref SourceUrl
 
 Resources:
   # --- Client API Gateway (routed through CloudFront as same-origin) ---

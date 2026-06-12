@@ -7,6 +7,7 @@ import Foundation
 guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] else {
     fatalError("SERVER_DOMAIN environment variable is required")
 }
+let instanceTitle = ProcessInfo.processInfo.environment["INSTANCE_TITLE"] ?? "FederatedActivityPublisher"
 
 let store = try await DynamoDBStore()
 
@@ -174,7 +175,7 @@ struct ProfilePage: HTMLDocument {
 
         // OG meta tags
         meta(.property("og:type"), .content("profile"))
-        meta(.property("og:site_name"), .content("Happitec"))
+        meta(.property("og:site_name"), .content(instanceTitle))
         meta(.property("og:title"), .content("\(actor.displayName) (@\(actor.username)@\(domain))"))
         meta(.property("og:description"), .content(stripHTML(actor.summary)))
         meta(.property("og:url"), .content("https://\(domain)/@\(actor.username)"))
@@ -321,7 +322,7 @@ struct PostPage: HTMLDocument {
     var domain: String
 
     var title: String {
-        "\(actor.displayName) on Happitec"
+        "\(actor.displayName) on \(instanceTitle)"
     }
 
     var lang: String { "en" }
@@ -363,8 +364,8 @@ struct PostPage: HTMLDocument {
 
         // OG meta tags
         meta(.property("og:type"), .content("article"))
-        meta(.property("og:site_name"), .content("Happitec"))
-        meta(.property("og:title"), .content("\(actor.displayName) on Happitec"))
+        meta(.property("og:site_name"), .content(instanceTitle))
+        meta(.property("og:title"), .content("\(actor.displayName) on \(instanceTitle)"))
         meta(.property("og:description"), .content(descriptionText))
         meta(.property("og:url"), .content("https://\(domain)/@\(actor.username)/\(status.id)"))
         if !ogImage.isEmpty {
@@ -375,7 +376,7 @@ struct PostPage: HTMLDocument {
 
         // Twitter Card
         meta(.name("twitter:card"), .content(twitterCardType))
-        meta(.name("twitter:title"), .content("\(actor.displayName) on Happitec"))
+        meta(.name("twitter:title"), .content("\(actor.displayName) on \(instanceTitle)"))
         meta(.name("twitter:description"), .content(descriptionText))
         if !ogImage.isEmpty {
             meta(.name("twitter:image"), .content(ogImage))
@@ -465,7 +466,7 @@ struct ErrorPage: HTMLDocument {
         self.domain = domain
     }
 
-    var title: String { "\(errorTitle) - Happitec" }
+    var title: String { "\(errorTitle) - \(instanceTitle)" }
     var lang: String { "en" }
 
     var bodyAttributes: [HTMLAttribute<HTMLTag.body>] {

@@ -9,6 +9,7 @@ import Crypto
 guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] else {
     fatalError("SERVER_DOMAIN environment variable is required")
 }
+let instanceTitle = ProcessInfo.processInfo.environment["INSTANCE_TITLE"] ?? "FederatedActivityPublisher"
 let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "/activity/stage/keys/"
 let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw
 
@@ -285,7 +286,7 @@ func handleRegisterChallenge(event: APIGatewayRequest) async throws -> APIGatewa
     let userId = base64urlEncode(Data(regToken.username.utf8))
 
     let json2 = """
-    {"challengeId":"\(challengeId)","challenge":"\(challenge)","rp":{"name":"Happitec","id":"\(serverDomain)"},"user":{"id":"\(userId)","name":"\(escapeJSON(regToken.username))","displayName":"\(escapeJSON(regToken.username))"},"pubKeyCredParams":[{"type":"public-key","alg":-7}],"timeout":300000,"attestation":"none","authenticatorSelection":{"residentKey":"preferred","userVerification":"preferred"}}
+    {"challengeId":"\(challengeId)","challenge":"\(challenge)","rp":{"name":"\(escapeJSON(instanceTitle))","id":"\(serverDomain)"},"user":{"id":"\(userId)","name":"\(escapeJSON(regToken.username))","displayName":"\(escapeJSON(regToken.username))"},"pubKeyCredParams":[{"type":"public-key","alg":-7}],"timeout":300000,"attestation":"none","authenticatorSelection":{"residentKey":"preferred","userVerification":"preferred"}}
     """
 
     return APIGatewayResponse(
@@ -866,7 +867,7 @@ func generateRandomBytes(count: Int) -> [UInt8] {
 struct LoginPage: HTMLDocument {
     var domain: String
 
-    var title: String { "Sign in - Happitec" }
+    var title: String { "Sign in - \(instanceTitle)" }
     var lang: String { "en" }
 
     var bodyAttributes: [HTMLAttribute<HTMLTag.body>] {
@@ -894,7 +895,7 @@ struct LoginPage: HTMLDocument {
 
     var body: some HTML {
         article(.class("auth-container")) {
-            h1 { "Sign in to Happitec" }
+            h1 { "Sign in to \(instanceTitle)" }
             p { "Use your passkey to sign in." }
 
             button(.class("auth-btn"), .id("login-btn")) { "Sign in with passkey" }
@@ -971,7 +972,7 @@ struct RegisterPage: HTMLDocument {
     var token: String
     var domain: String
 
-    var title: String { "Register passkey - Happitec" }
+    var title: String { "Register passkey - \(instanceTitle)" }
     var lang: String { "en" }
 
     var bodyAttributes: [HTMLAttribute<HTMLTag.body>] {
@@ -1094,7 +1095,7 @@ struct AuthErrorPage: HTMLDocument {
     var message: String
     var domain: String
 
-    var title: String { "\(errorTitle) - Happitec" }
+    var title: String { "\(errorTitle) - \(instanceTitle)" }
     var lang: String { "en" }
 
     var bodyAttributes: [HTMLAttribute<HTMLTag.body>] {

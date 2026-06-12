@@ -55,6 +55,21 @@ Parameters:
       When set, the CDN stack uses this domain as the CloudFront alias
       instead of the computed domain, avoiding alias conflicts.
 
+  InstanceTitle:
+    Type: String
+    Default: FederatedActivityPublisher
+    Description: Instance name shown in page titles, WebAuthn prompts, OG tags, and the instance API
+
+  InstanceDescription:
+    Type: String
+    Default: A serverless ActivityPub server powered by FederatedActivityPublisher.
+    Description: Instance description returned by the instance API
+
+  SourceUrl:
+    Type: String
+    Default: https://github.com/happitec-inc/FederatedActivityPublisher
+    Description: Source code URL returned by the instance API
+
 Conditions:
   HasActivityDistribution: !Not [!Equals [!Ref ActivityDistributionId, ""]]
 
@@ -76,6 +91,9 @@ Resources:
           - HasActivityDistribution
           - !Ref ActivityDistributionId
           - ""
+        InstanceTitle: !Ref InstanceTitle
+        InstanceDescription: !Ref InstanceDescription
+        SourceUrl: !Ref SourceUrl
 
   CdnStack:
     Type: AWS::CloudFormation::Stack
