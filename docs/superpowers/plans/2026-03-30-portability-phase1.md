@@ -341,7 +341,7 @@ Add a comprehensive configuration reference to `README.md` so external deployers
 
 ### 6.3 Remove hardcoded API Gateway URLs from AGENTS.md
 
-- [ ] In `AGENTS.md`, replace the hardcoded API Gateway URLs (`https://REDACTED-API-ID.execute-api...` and `https://REDACTED-API-ID.execute-api...`) with a note directing readers to check stack outputs:
+- [ ] In `AGENTS.md`, replace the hardcoded API Gateway URLs (the prod and stage `*.execute-api...` endpoints) with a note directing readers to check stack outputs:
   ```
   Check your deployed stack outputs for the API Gateway URL:
   aws cloudformation describe-stacks --stack-name activity-app-{stage} \
