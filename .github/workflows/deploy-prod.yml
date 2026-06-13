@@ -19,7 +19,7 @@ jobs:
       vars.SERVER_DOMAIN &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v')))
-    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-24.04-arm' }}
     environment:
       name: production
       url: https://${{ vars.SERVER_DOMAIN || 'activity.example.com' }}
@@ -96,7 +96,7 @@ jobs:
       # Keyed on tracked Package.swift — the old '**/Package.resolved' glob
       # matched only root-owned files inside .build/, making hashFiles() throw.
       - name: Restore Swift build cache
-        uses: happitec-inc/shared-actions/swift-build-cache-restore@main
+        uses: happitec-inc/public-actions/swift-build-cache-restore@main
         with:
           key-prefix: swift-docker-build
 
@@ -105,7 +105,7 @@ jobs:
 
       - name: Save Swift build cache
         if: always()
-        uses: happitec-inc/shared-actions/swift-build-cache-save@main
+        uses: happitec-inc/public-actions/swift-build-cache-save@main
         with:
           key-prefix: swift-docker-build
 
