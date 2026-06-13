@@ -20,7 +20,7 @@ jobs:
     # Skip entirely on forks/repos that haven't configured deployment
     # (SERVER_DOMAIN is the minimum required repository variable).
     if: vars.SERVER_DOMAIN
-    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-24.04-arm' }}
     outputs:
       path: ${{ steps.decide.outputs.path }}
       targets: ${{ steps.decide.outputs.targets }}
@@ -85,7 +85,7 @@ jobs:
   fast-deploy:
     needs: detect
     if: needs.detect.outputs.path == 'fast'
-    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-24.04-arm' }}
     environment:
       name: stage
       url: https://stage.${{ vars.SERVER_DOMAIN || 'activity.example.com' }}
@@ -130,7 +130,7 @@ jobs:
       # Keyed on tracked Package.swift — the old '**/Package.resolved' glob
       # matched only root-owned files inside .build/, making hashFiles() throw.
       - name: Restore Swift build cache
-        uses: happitec-inc/shared-actions/swift-build-cache-restore@main
+        uses: happitec-inc/public-actions/swift-build-cache-restore@main
         with:
           key-prefix: swift-docker-build
 
@@ -149,7 +149,7 @@ jobs:
 
       - name: Save Swift build cache
         if: always()
-        uses: happitec-inc/shared-actions/swift-build-cache-save@main
+        uses: happitec-inc/public-actions/swift-build-cache-save@main
         with:
           key-prefix: swift-docker-build
 
@@ -241,7 +241,7 @@ jobs:
   build:
     needs: detect
     if: needs.detect.outputs.path == 'full'
-    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-24.04-arm' }}
     environment:
       name: stage
       url: https://stage.${{ vars.SERVER_DOMAIN || 'activity.example.com' }}
@@ -318,7 +318,7 @@ jobs:
       # Keyed on tracked Package.swift — the old '**/Package.resolved' glob
       # matched only root-owned files inside .build/, making hashFiles() throw.
       - name: Restore Swift build cache
-        uses: happitec-inc/shared-actions/swift-build-cache-restore@main
+        uses: happitec-inc/public-actions/swift-build-cache-restore@main
         with:
           key-prefix: swift-docker-build
 
@@ -327,7 +327,7 @@ jobs:
 
       - name: Save Swift build cache
         if: always()
-        uses: happitec-inc/shared-actions/swift-build-cache-save@main
+        uses: happitec-inc/public-actions/swift-build-cache-save@main
         with:
           key-prefix: swift-docker-build
 
@@ -418,7 +418,7 @@ jobs:
       always() &&
       needs.detect.outputs.path != 'skip' &&
       (needs.fast-deploy.result == 'success' || needs.build.result == 'success')
-    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-24.04-arm' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
