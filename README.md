@@ -1,5 +1,6 @@
 # FederatedActivityPublisher
 
+[![Tests](https://github.com/happitec-inc/FederatedActivityPublisher/actions/workflows/test.yml/badge.svg)](https://github.com/happitec-inc/FederatedActivityPublisher/actions/workflows/test.yml)
 [![Release](https://img.shields.io/github/v/release/happitec-inc/FederatedActivityPublisher?sort=semver)](https://github.com/happitec-inc/FederatedActivityPublisher/releases/latest)
 
 A serverless ActivityPub server for brand accounts. Swift 6.3 on AWS Lambda, federated with Mastodon and the fediverse. Zero cost at rest.
