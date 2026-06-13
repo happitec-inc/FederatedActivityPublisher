@@ -39,7 +39,17 @@ jobs:
             exit 0
           fi
 
-          CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
+          # On a force-push (history rewrite) or first push to a branch, the
+          # "before" SHA may not exist in the new history. git diff against a
+          # missing object aborts; fall back to the full pipeline instead.
+          BEFORE="${{ github.event.before }}"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo "path=full" >> "$GITHUB_OUTPUT"
+            echo "before-SHA unresolvable (force-push or new branch) — full pipeline"
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "$BEFORE" ${{ github.sha }})
           echo "Changed files:"
           echo "$CHANGED"
 
