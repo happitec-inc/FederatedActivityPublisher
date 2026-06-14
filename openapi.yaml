@@ -418,16 +418,10 @@ paths:
                   description: "Focal point as x,y (-1.0 to 1.0)"
       responses:
         "200":
-          description: Media attachment created (synchronous processing)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MediaAttachment"
-        "202":
           description: |
-            Media accepted for async processing. The response body is the same
-            MediaAttachment schema but `url` may be null until processing completes.
-            Clients should poll GET /api/v1/media/{id} until `url` is populated.
+            Media attachment created. Processing is fully synchronous: the file is
+            uploaded to S3 and the attachment is returned immediately with a populated
+            `url` (and a `preview_url` equal to it). There is no async/poll branch.
           content:
             application/json:
               schema:
@@ -710,13 +704,52 @@ components:
             - type: string
             - type: object
 
+    CreateActivity:
+      type: object
+      description: |
+        A Create activity wrapping a Note. This is the concrete shape of each item in the
+        outbox page's orderedItems (built by buildCreateActivityJSON). The Create envelope
+        carries only @context, id, type, actor, published, to, cc, and the inline Note object.
+      required: ["@context", id, type, actor, object]
+      properties:
+        "@context":
+          type: string
+          description: Always the bare ActivityStreams context string on the Create envelope.
+        id:
+          type: string
+          format: uri
+          description: "Activity URI: {status URI}/activity"
+        type:
+          type: string
+          enum: [Create]
+        actor:
+          type: string
+          format: uri
+        published:
+          type: string
+          format: date-time
+        to:
+          type: array
+          items:
+            type: string
+        cc:
+          type: array
+          items:
+            type: string
+        object:
+          $ref: "#/components/schemas/Note"
+
     OrderedCollection:
       type: object
       description: |
         Root collection (type=OrderedCollection): has totalItems, first, last — no orderedItems.
-        Page (type=OrderedCollectionPage): has orderedItems, partOf, next, prev — no first/last.
+        Page (type=OrderedCollectionPage): has orderedItems, partOf, next, prev — no first/last,
+        no totalItems.
+        Followers/following return only the root collection (empty for service accounts).
         Featured/featuredTags collections include orderedItems (empty array for MVP).
-      required: ["@context", id, type, totalItems]
+        The outbox page (GET /users/{username}/outbox?page=true) is the only collection that
+        populates orderedItems with content: each item is a Create activity wrapping a Note.
+      required: ["@context", id, type]
       properties:
         "@context":
           type: string
@@ -728,6 +761,7 @@ components:
           enum: [OrderedCollection, OrderedCollectionPage]
         totalItems:
           type: integer
+          description: Root collection only — total item count. Absent on pages.
         first:
           type: string
           format: uri
@@ -742,9 +776,11 @@ components:
           description: Page only — URI of the parent collection
         orderedItems:
           type: array
-          description: Page only — items on this page (also present on featured/featuredTags)
+          description: |
+            Page only — items on this page (also an empty array on featured/featuredTags).
+            On the outbox page each item is a Create activity wrapping a Note.
           items:
-            $ref: "#/components/schemas/Activity"
+            $ref: "#/components/schemas/CreateActivity"
         next:
           type: string
           format: uri
@@ -844,68 +880,87 @@ components:
 
     Status:
       type: object
-      description: Mastodon-compatible status entity (subset)
+      description: |
+        Status entity returned by POST /api/v1/statuses (built by buildStatusResponse).
+        Every field below is always present in the response; nullable fields are emitted
+        as JSON null when unset. This is a Mastodon-compatible subset — it does NOT include
+        an `account`, an embedded `quote` status, or a Mastodon `quote_approval` object.
+        Quote state is conveyed via the flat `quoted_status_uri` and `quote_approval_state`.
+      required:
+        - id
+        - created_at
+        - visibility
+        - sensitive
+        - spoiler_text
+        - content
+        - url
+        - uri
+        - language
+        - in_reply_to_id
+        - favourites_count
+        - reblogs_count
+        - replies_count
+        - quotes_count
+        - quoted_status_uri
+        - quote_approval_state
+        - media_attachments
       properties:
         id:
           type: string
         created_at:
           type: string
           format: date-time
-        content:
-          type: string
-          description: HTML content of the status
         visibility:
           type: string
           enum: [public, unlisted, private, direct]
         sensitive:
           type: boolean
         spoiler_text:
+          oneOf:
+            - type: string
+            - type: "null"
+          description: Content warning text, or null when none is set
+        content:
           type: string
-        language:
-          type: string
-        uri:
-          type: string
-          format: uri
+          description: HTML content of the status
         url:
           type: string
           format: uri
-        replies_count:
+        uri:
+          type: string
+          format: uri
+        language:
+          oneOf:
+            - type: string
+            - type: "null"
+          description: ISO 639-1 language code, or null when unset
+        in_reply_to_id:
+          oneOf:
+            - type: string
+            - type: "null"
+          description: ID of the status being replied to, or null
+        favourites_count:
           type: integer
         reblogs_count:
           type: integer
-        favourites_count:
+        replies_count:
           type: integer
         quotes_count:
           type: integer
           description: Accepted quotes count (Mastodon 4.5+)
-        quote:
-          description: The quoted status, if any
+        quoted_status_uri:
           oneOf:
-            - $ref: "#/components/schemas/Status"
+            - type: string
+              format: uri
             - type: "null"
-        quote_approval:
-          description: Quote approval policy info (Mastodon 4.5+, FEP-044f)
+          description: URI of the quoted status, or null when this status quotes nothing
+        quote_approval_state:
           oneOf:
-            - type: object
-              properties:
-                automatic:
-                  type: array
-                  items:
-                    type: string
-                  description: List of auto-approve targets
-                manual:
-                  type: array
-                  items:
-                    type: string
-                  description: List of manual-approve targets
-                current_user:
-                  type: string
-                  enum: [automatic, pending, accepted, rejected]
-                  description: Approval status for the authenticated user
+            - type: string
             - type: "null"
-        account:
-          type: object
-          description: Actor who posted
+          description: |
+            Quote approval state for the quoted status (e.g. "accepted", "pending"),
+            or null when not applicable (no quote, or a local-to-local quote).
         media_attachments:
           type: array
           items:
@@ -913,35 +968,39 @@ components:
 
     MediaAttachment:
       type: object
+      description: |
+        Media attachment entity. Two endpoints emit this shape:
+          - POST /api/v2/media returns {id, type, url, preview_url, description, blurhash}
+            (synchronous; url is always present, preview_url equals url, blurhash is always null).
+          - Status.media_attachments returns {id, type, url, description, blurhash}
+            (no preview_url, no meta).
+        id, type, and url are always present and non-null. preview_url is present only on the
+        media-upload response. description and blurhash are nullable. The server does not emit
+        gifv, a nullable url, or a meta object.
+      required: [id, type, url, description, blurhash]
       properties:
         id:
           type: string
         type:
           type: string
-          enum: [image, video, gifv, audio, unknown]
+          enum: [image, video, audio, unknown]
         url:
-          oneOf:
-            - type: string
-              format: uri
-            - type: "null"
-          description: May be null if async processing is incomplete
+          type: string
+          format: uri
         preview_url:
           type: string
           format: uri
+          description: Present only on the POST /api/v2/media response; equals url.
         description:
-          type: string
-          description: Alt text
+          oneOf:
+            - type: string
+            - type: "null"
+          description: Alt text, or null when none was provided
         blurhash:
-          type: string
-        meta:
-          type: object
-          properties:
-            width:
-              type: integer
-            height:
-              type: integer
-            size:
-              type: string
+          oneOf:
+            - type: string
+            - type: "null"
+          description: Blurhash string, or null (always null on the upload response)
 
     # ── Instance entities ──────────────────────────
 
@@ -1279,8 +1338,23 @@ components:
     Note:
       type: object
       description: |
-        ActivityPub Note object (JSON-LD). Includes Mastodon toot namespace
-        extensions for quote support and media metadata.
+        ActivityPub Note object (JSON-LD). This is the concrete shape produced by
+        buildNoteJSON and embedded as the `object` of each outbox Create activity.
+        Includes Mastodon toot namespace extensions for quote support and media metadata.
+        @context, id, type, attributedTo, content, url, published, to, cc, sensitive, and
+        interactionPolicy are always present. summary, contentMap, quoteUri/_misskey_quote,
+        attachment, and tag are conditionally emitted.
+      required:
+        - "@context"
+        - id
+        - type
+        - attributedTo
+        - content
+        - url
+        - published
+        - to
+        - cc
+        - sensitive
       properties:
         "@context":
           oneOf:
@@ -1316,24 +1390,25 @@ components:
           type: boolean
         summary:
           type: string
-          description: Content warning text
+          description: Content warning text (emitted only when a content warning is set)
         contentMap:
           type: object
-          description: Language-keyed content map
+          description: Language-keyed content map (emitted only when a language is set)
           additionalProperties:
             type: string
         quoteUri:
           type: string
           format: uri
-          description: URI of the quoted status (toot:quoteUri, requires accepted quote approval)
+          description: URI of the quoted status (toot:quoteUri, emitted only when the quote is accepted)
         _misskey_quote:
           type: string
           format: uri
-          description: Misskey/Calckey compatibility alias for quoteUri
+          description: Misskey/Calckey compatibility alias for quoteUri (emitted alongside quoteUri)
         attachment:
           type: array
           items:
             type: object
+            required: [type, mediaType, url]
             properties:
               type:
                 type: string
@@ -1345,13 +1420,14 @@ components:
                 format: uri
               name:
                 type: string
-                description: Alt text
+                description: Alt text (emitted only when a description is set)
               blurhash:
                 type: string
         tag:
           type: array
           items:
             type: object
+            required: [type, name]
             properties:
               type:
                 type: string
@@ -1360,6 +1436,19 @@ components:
               href:
                 type: string
                 format: uri
+        interactionPolicy:
+          type: object
+          description: |
+            Quote interaction policy (toot namespace). Always emitted with a canQuote
+            automaticApproval list containing the public collection URI.
+          properties:
+            canQuote:
+              type: object
+              properties:
+                automaticApproval:
+                  type: array
+                  items:
+                    type: string
 
     # ── Auth / Passkey entities ───────────────────────
 
