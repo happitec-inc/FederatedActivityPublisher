@@ -59,6 +59,9 @@ jobs:
       - name: Run unit tests
         run: swift test --filter ActivityPubCoreTests
 
+      - name: Run schema-conformance tests
+        run: swift test --package-path integration-tests --filter SchemaConformanceTests
+
       - name: Run integration tests (non-network)
         run: swift test --filter IntegrationTests
         continue-on-error: true
