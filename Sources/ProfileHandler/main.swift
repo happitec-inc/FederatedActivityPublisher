@@ -61,7 +61,7 @@ func renderProfilePage(actor: Actor, context: LambdaContext) async throws -> API
         statusCode: .ok,
         headers: [
             "content-type": "text/html; charset=utf-8",
-            "cache-control": "public, max-age=3600",
+            "cache-control": "public, max-age=300",
         ],
         body: html
     )
