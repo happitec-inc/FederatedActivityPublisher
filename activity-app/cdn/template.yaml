@@ -65,8 +65,8 @@ Resources:
     Properties:
       CachePolicyConfig:
         Name: !Sub "activity-webfinger-cache-${Stage}"
-        DefaultTTL: 86400
-        MaxTTL: 86400
+        DefaultTTL: 300
+        MaxTTL: 300
         MinTTL: 0
         ParametersInCacheKeyAndForwardedToOrigin:
           CookiesConfig:
@@ -84,8 +84,8 @@ Resources:
     Properties:
       CachePolicyConfig:
         Name: !Sub "activity-outbox-cache-${Stage}"
-        DefaultTTL: 3600
-        MaxTTL: 3600
+        DefaultTTL: 300
+        MaxTTL: 300
         MinTTL: 0
         ParametersInCacheKeyAndForwardedToOrigin:
           CookiesConfig:
@@ -105,8 +105,8 @@ Resources:
     Properties:
       CachePolicyConfig:
         Name: !Sub "activity-long-cache-${Stage}"
-        DefaultTTL: 3600
-        MaxTTL: 3600
+        DefaultTTL: 300
+        MaxTTL: 300
         MinTTL: 0
         ParametersInCacheKeyAndForwardedToOrigin:
           CookiesConfig:
@@ -122,8 +122,8 @@ Resources:
     Properties:
       CachePolicyConfig:
         Name: !Sub "activity-medium-cache-${Stage}"
-        DefaultTTL: 86400
-        MaxTTL: 86400
+        DefaultTTL: 300
+        MaxTTL: 300
         MinTTL: 0
         ParametersInCacheKeyAndForwardedToOrigin:
           CookiesConfig:
@@ -139,8 +139,8 @@ Resources:
     Properties:
       CachePolicyConfig:
         Name: !Sub "activity-short-cache-${Stage}"
-        DefaultTTL: 3600
-        MaxTTL: 3600
+        DefaultTTL: 300
+        MaxTTL: 300
         MinTTL: 0
         ParametersInCacheKeyAndForwardedToOrigin:
           CookiesConfig:
