@@ -117,42 +117,27 @@ jobs:
             --server-domain "${{ vars.SERVER_DOMAIN }}" \
             --handle-domain "${{ vars.HANDLE_DOMAIN }}"
 
-      - name: Generate bearer token
+      - name: Provisioning summary
         run: |
-          TOKEN=$(openssl rand -hex 32)
-          # Note: intentionally NOT masking the token — it needs to be visible
-          # in the step summary for the user to copy. The token is hashed in
-          # DynamoDB and this workflow run is ephemeral.
-          TOKEN_HASH=$(echo -n "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
-          TTL=$(( $(date +%s) + 31536000 ))  # 1 year
-          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          aws dynamodb put-item \
-            --table-name "activity-${{ inputs.stage }}" \
-            --item "{
-              \"PK\": {\"S\": \"TOKEN#${TOKEN_HASH}\"},
-              \"SK\": {\"S\": \"META\"},
-              \"username\": {\"S\": \"${{ inputs.username }}\"},
-              \"scope\": {\"S\": \"read write\"},
-              \"createdAt\": {\"S\": \"${NOW}\"},
-              \"ttl\": {\"N\": \"${TTL}\"},
-              \"description\": {\"S\": \"provisioned via workflow\"}
-            }" \
-            --region ${{ vars.AWS_REGION || 'us-east-1' }}
+          # SECURITY: this workflow provisions the ACTOR ONLY. It deliberately does
+          # NOT mint or print a bearer token. This repository is public, so anything
+          # written to a run summary (or logs) is publicly visible — a raw token here
+          # would be an immediate credential leak. Token issuance is done locally,
+          # off-CI, via the ActivityProvisioner CLI (see below).
           echo "## Actor Provisioned" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Username:** ${{ inputs.username }}" >> "$GITHUB_STEP_SUMMARY"
           echo "**Stage:** ${{ inputs.stage }}" >> "$GITHUB_STEP_SUMMARY"
           echo "**Handle:** @${{ inputs.username }}@${{ vars.HANDLE_DOMAIN }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "The bearer token has been stored in DynamoDB table \`activity-${{ inputs.stage }}\`." >> "$GITHUB_STEP_SUMMARY"
-          echo "Token hash: \`${TOKEN_HASH}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "This workflow provisions the actor only. **No bearer token was minted** —" >> "$GITHUB_STEP_SUMMARY"
+          echo "this repo is public and a token in a run summary would be publicly visible." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Raw token (copy now -- it cannot be retrieved later):**" >> "$GITHUB_STEP_SUMMARY"
+          echo "To issue a bearer token, run the CLI locally (requires AWS credentials):" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "$TOKEN" >> "$GITHUB_STEP_SUMMARY"
+          echo "swift run ActivityProvisioner mint-token --stage ${{ inputs.stage }} --username ${{ inputs.username }} --out token.txt" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "This token is unique to **${{ inputs.username }}** and does not affect other accounts." >> "$GITHUB_STEP_SUMMARY"
+          echo "The raw token prints to your terminal (and the --out file) only; it never touches CI." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify actor
         run: |
