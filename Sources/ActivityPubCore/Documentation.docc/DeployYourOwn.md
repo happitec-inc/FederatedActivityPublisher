@@ -120,7 +120,8 @@ The workflow creates the actor profile in DynamoDB, generates an RSA keypair in 
 ### Option B: CLI on a machine with Swift and AWS credentials
 
 ```bash
-swift run ActivityProvisioner \
+# Provision the actor (RSA keypair to SSM, profile to DynamoDB)
+swift run ActivityProvisioner provision \
   --stage stage \
   --username mybot \
   --display-name "My Bot" \
@@ -128,25 +129,14 @@ swift run ActivityProvisioner \
   --server-domain example.com \
   --handle-domain example.com
 
-# Create a per-account bearer token in DynamoDB
-TOKEN=$(openssl rand -hex 32)
-TOKEN_HASH=$(echo -n "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
-TTL=$(( $(date +%s) + 31536000 ))  # 1 year
-NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-aws dynamodb put-item \
-  --table-name "activity-stage" \
-  --item "{
-    \"PK\": {\"S\": \"TOKEN#${TOKEN_HASH}\"},
-    \"SK\": {\"S\": \"META\"},
-    \"username\": {\"S\": \"mybot\"},
-    \"scope\": {\"S\": \"read write\"},
-    \"createdAt\": {\"S\": \"${NOW}\"},
-    \"ttl\": {\"N\": \"${TTL}\"},
-    \"description\": {\"S\": \"manual provisioning\"}
-  }" \
-  --region us-east-1
-echo "Bearer token: $TOKEN"
+# Mint a bearer token (printed once; --out also writes it to a file)
+swift run ActivityProvisioner mint-token \
+  --stage stage \
+  --username mybot \
+  --out token.txt
 ```
+
+Provisioning the actor and minting its token are separate steps. The token is shown only at mint time — store it securely and never commit it. See <doc:ManagingActorsAndTokens> for the full set of token commands (list, rotate, revoke) and the reasoning behind minting tokens locally rather than in CI.
 
 ## Step 10: Verify the actor
 
