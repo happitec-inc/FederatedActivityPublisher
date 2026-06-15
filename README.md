@@ -70,6 +70,8 @@ See [Sources/ActivityPubCore/Documentation.docc/DNSSetup.md](Sources/ActivityPub
 
 See [Sources/ActivityPubCore/Documentation.docc/DeployYourOwn.md](Sources/ActivityPubCore/Documentation.docc/DeployYourOwn.md) for a step-by-step guide to deploying your own instance.
 
+See [Sources/ActivityPubCore/Documentation.docc/ManagingActorsAndTokens.md](Sources/ActivityPubCore/Documentation.docc/ManagingActorsAndTokens.md) for managing actors and bearer tokens with the `ActivityProvisioner` CLI.
+
 ## Building
 
 Requires Swift 6.3, Docker (for the AL2023 build image), and AWS SAM CLI.
@@ -91,6 +93,50 @@ sam deploy \
   --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
   --parameter-overrides Stage=stage ...
 ```
+
+## Managing Actors and Tokens
+
+Actors and their bearer tokens are managed locally with the `ActivityProvisioner` CLI, which talks to DynamoDB and SSM using the standard AWS credential chain (`~/.aws/credentials`, environment variables, etc.). The `Provision Actor` GitHub workflow can create an actor, but it does not mint tokens: this repository is public, and a token printed into a CI log or job summary would be exposed. Tokens are always minted locally, where the plaintext stays on your machine.
+
+Build the CLI once:
+
+```bash
+swift build --product ActivityProvisioner
+```
+
+Then run any subcommand through SwiftPM (`swift run ActivityProvisioner ...`) or as the built binary (`.build/debug/ActivityProvisioner ...`). Every subcommand needs a target table: pass `--stage <stage>` to derive `activity-<stage>`, or `--table-name` to name it directly. `--region` defaults to `us-east-1`.
+
+```bash
+# Provision an actor: RSA keypair to SSM, profile to DynamoDB (no token minted)
+swift run ActivityProvisioner provision \
+  --stage stage \
+  --username mybot \
+  --display-name "My Bot" \
+  --summary "An ActivityPub bot." \
+  --server-domain activity.example.com \
+  --handle-domain example.com
+
+# Mint a bearer token (defaults: --scope "read write", --ttl-days 365)
+swift run ActivityProvisioner mint-token \
+  --stage stage --username mybot --out token.txt
+
+# List token records (hashes and metadata only, never plaintext)
+swift run ActivityProvisioner list-tokens --stage stage
+swift run ActivityProvisioner list-tokens --stage stage --username mybot
+
+# Rotate: mint a new token, then revoke the username's older ones (no zero-token gap)
+swift run ActivityProvisioner rotate-token \
+  --stage stage --username mybot --out new-token.txt
+
+# Revoke all tokens for a username, or a single token by hash
+swift run ActivityProvisioner revoke-token --stage stage --username mybot --dry-run
+swift run ActivityProvisioner revoke-token --stage stage --username mybot
+swift run ActivityProvisioner revoke-token --stage stage --hash <sha256-hash>
+```
+
+The raw token is shown once, on `mint-token` and `rotate-token` (stdout, and the `--out` file if given). Only its SHA-256 hash is stored in DynamoDB, so a lost token cannot be recovered — store it in a secrets manager or your OS keychain, `chmod 600` any `--out` file, and never commit it. If a token leaks, revoke and rotate.
+
+For the full reference, including the actor and token data model and the token lifecycle, see [Managing Actors and Tokens](Sources/ActivityPubCore/Documentation.docc/ManagingActorsAndTokens.md).
 
 ## Configuration
 
