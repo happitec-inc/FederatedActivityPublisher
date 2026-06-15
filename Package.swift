@@ -38,6 +38,7 @@ let package = Package(
         .package(url: "https://github.com/elementary-swift/elementary.git", from: "0.7.0"),
         .package(url: "https://github.com/swiftlang/swift-markdown", from: "0.5.0"),
         .package(url: "https://github.com/swiftlang/swift-docc-plugin.git", from: "1.0.0"),
+        .package(url: "https://github.com/vapor/multipart-kit.git", from: "4.0.0"),
     ],
     targets: [
         // Shared library
@@ -50,6 +51,7 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
                 .product(name: "Markdown", package: "swift-markdown"),
+                .product(name: "MultipartKit", package: "multipart-kit"),
             ]
         ),
 
