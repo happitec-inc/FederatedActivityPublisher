@@ -506,9 +506,13 @@ jobs:
         run: |
           # FoundationNetworking on Linux crashes during process teardown after
           # tests pass (signal 6). Check output for pass/fail, not exit code.
+          # Mount the whole repo (not just integration-tests) so the
+          # integration-tests/Sources/APIClient/openapi.yaml symlink ->
+          # ../../../openapi.yaml resolves inside the container; run from the
+          # integration-tests subdir.
           OUTPUT=$(docker run --rm \
-            -v "$(pwd)/integration-tests:/workspace" \
-            -w /workspace \
+            -v "$(pwd):/workspace" \
+            -w /workspace/integration-tests \
             -e TEST_API_URL \
             -e TEST_CLIENT_API_URL \
             -e TEST_BEARER_TOKEN \
