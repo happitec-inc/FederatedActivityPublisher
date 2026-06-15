@@ -1,4 +1,7 @@
 import Foundation
+import MultipartKit
+import NIOCore
+import NIOHTTP1
 
 /// A single part extracted from a `multipart/form-data` body.
 ///
@@ -46,85 +49,81 @@ public func extractBoundary(from contentType: String) -> String? {
 
 /// Parse a `multipart/form-data` body into individual ``MultipartPart`` instances.
 ///
-/// Splits the body on boundary markers and extracts headers and body data for each part.
+/// Delegates the actual boundary/header/body parsing to `vapor/multipart-kit`, which
+/// robustly handles standards-compliant `multipart/form-data` (both quoted and unquoted
+/// `Content-Disposition` parameter values, parts with or without an explicit
+/// `Content-Type`, CRLF line endings, preamble/epilogue, etc.). The library's parsed
+/// parts are then mapped onto ``MultipartPart`` so callers see a stable public API.
 ///
 /// - Parameters:
 ///   - data: The raw request body bytes.
 ///   - boundary: The boundary string extracted from the Content-Type header.
 /// - Returns: An array of parsed parts.
 public func parseMultipart(data: Data, boundary: String) -> [MultipartPart] {
-    let boundaryData = Data("--\(boundary)".utf8)
-    let crlfData = Data("\r\n".utf8)
-    let doubleCRLF = Data("\r\n\r\n".utf8)
+    guard !boundary.isEmpty else { return [] }
 
-    var parts: [MultipartPart] = []
+    let parser = MultipartKit.MultipartParser(boundary: boundary)
 
-    var ranges: [Range<Data.Index>] = []
-    var searchStart = data.startIndex
+    var collected: [(headers: HTTPHeaders, body: ByteBuffer)] = []
+    var currentHeaders = HTTPHeaders()
+    var currentBody = ByteBuffer()
 
-    while let range = data.range(of: boundaryData, in: searchStart..<data.endIndex) {
-        ranges.append(range)
-        searchStart = range.upperBound
+    parser.onHeader = { name, value in
+        currentHeaders.add(name: name, value: value)
+    }
+    parser.onBody = { buffer in
+        currentBody.writeBuffer(&buffer)
+    }
+    parser.onPartComplete = {
+        collected.append((headers: currentHeaders, body: currentBody))
+        currentHeaders = HTTPHeaders()
+        currentBody = ByteBuffer()
     }
 
-    for i in 0..<(ranges.count - 1) {
-        let partStart = ranges[i].upperBound
-        let partEnd = ranges[i + 1].lowerBound
+    do {
+        try parser.execute(ByteBuffer(bytes: data))
+    } catch {
+        // Malformed body: return whatever (if anything) completed before the failure.
+        // This mirrors the lenient behavior of the previous hand-rolled parser, which
+        // simply skipped parts it could not interpret rather than throwing.
+        return []
+    }
 
-        var contentStart = partStart
-        if contentStart + crlfData.count <= partEnd,
-           data[contentStart..<contentStart + crlfData.count] == crlfData {
-            contentStart += crlfData.count
-        }
+    return collected.map { entry in
+        let disposition = entry.headers["Content-Disposition"].first
+        let name = disposition.flatMap { dispositionParameter($0, key: "name") }
+        let filename = disposition.flatMap { dispositionParameter($0, key: "filename") }
+        let contentType = entry.headers["Content-Type"].first?
+            .trimmingCharacters(in: .whitespaces)
 
-        var contentEnd = partEnd
-        if contentEnd >= crlfData.count,
-           data[contentEnd - crlfData.count..<contentEnd] == crlfData {
-            contentEnd -= crlfData.count
-        }
+        let body = entry.body
+        let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
 
-        guard contentStart < contentEnd else { continue }
-
-        let partData = data[contentStart..<contentEnd]
-
-        guard let headerEnd = partData.range(of: doubleCRLF) else { continue }
-
-        let headerData = partData[partData.startIndex..<headerEnd.lowerBound]
-        let bodyData = partData[headerEnd.upperBound..<partData.endIndex]
-
-        guard let headerString = String(data: headerData, encoding: .utf8) else { continue }
-
-        var name: String?
-        var filename: String?
-        var contentType: String?
-
-        for line in headerString.components(separatedBy: "\r\n") {
-            let lower = line.lowercased()
-            if lower.hasPrefix("content-disposition:") {
-                if let nameRange = line.range(of: "name=\"") {
-                    let afterName = line[nameRange.upperBound...]
-                    if let endQuote = afterName.firstIndex(of: "\"") {
-                        name = String(afterName[..<endQuote])
-                    }
-                }
-                if let fnRange = line.range(of: "filename=\"") {
-                    let afterFn = line[fnRange.upperBound...]
-                    if let endQuote = afterFn.firstIndex(of: "\"") {
-                        filename = String(afterFn[..<endQuote])
-                    }
-                }
-            } else if lower.hasPrefix("content-type:") {
-                contentType = line.components(separatedBy: ":").dropFirst().joined(separator: ":").trimmingCharacters(in: .whitespaces)
-            }
-        }
-
-        parts.append(MultipartPart(
+        return MultipartPart(
             name: name,
             filename: filename,
             contentType: contentType,
-            data: Data(bodyData)
-        ))
+            data: Data(bytes)
+        )
     }
+}
 
-    return parts
+/// Extract a single parameter value from a `Content-Disposition` header value.
+///
+/// Handles both quoted (`name="file"`) and unquoted (`name=file`) parameter forms by
+/// splitting on `;`, matching the requested key, and stripping surrounding quotes.
+private func dispositionParameter(_ headerValue: String, key: String) -> String? {
+    for component in headerValue.split(separator: ";") {
+        let trimmed = component.trimmingCharacters(in: .whitespaces)
+        guard let eq = trimmed.range(of: "=") else { continue }
+        let paramName = trimmed[trimmed.startIndex..<eq.lowerBound]
+            .trimmingCharacters(in: .whitespaces)
+        guard paramName.caseInsensitiveCompare(key) == .orderedSame else { continue }
+        var value = String(trimmed[eq.upperBound...]).trimmingCharacters(in: .whitespaces)
+        if value.hasPrefix("\"") && value.hasSuffix("\"") && value.count >= 2 {
+            value = String(value.dropFirst().dropLast())
+        }
+        return value
+    }
+    return nil
 }
