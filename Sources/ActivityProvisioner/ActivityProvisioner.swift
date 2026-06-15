@@ -8,7 +8,14 @@ import Foundation
 struct ActivityProvisioner: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Provision and manage ActivityPub actors",
-        subcommands: [ProvisionActor.self, RegisterPasskey.self],
+        subcommands: [
+            ProvisionActor.self,
+            RegisterPasskey.self,
+            MintToken.self,
+            ListTokens.self,
+            RevokeToken.self,
+            RotateToken.self,
+        ],
         defaultSubcommand: ProvisionActor.self
     )
 }

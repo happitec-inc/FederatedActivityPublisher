@@ -217,6 +217,7 @@ let package = Package(
                 "ActivityPubCore",
                 .product(name: "AWSDynamoDB", package: "aws-sdk-swift"),
                 .product(name: "AWSSSM", package: "aws-sdk-swift"),
+                .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
