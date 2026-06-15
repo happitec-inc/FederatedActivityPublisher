@@ -23,11 +23,13 @@ swift build --product ActivityProvisioner
 The provisioner creates the actor's DynamoDB profile record and generates an RSA keypair stored as a SecureString in SSM Parameter Store:
 
 ```bash
-.build/debug/ActivityProvisioner create \
+.build/debug/ActivityProvisioner provision \
   --username randomforms \
   --display-name "Random Forms" \
   --summary "Official account for the Random Forms app." \
-  --stage prod
+  --stage prod \
+  --server-domain activity.example.com \
+  --handle-domain example.com
 ```
 
 This will:
