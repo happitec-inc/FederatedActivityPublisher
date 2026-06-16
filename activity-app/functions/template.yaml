@@ -217,6 +217,30 @@ Resources:
             Path: /api/v1/accounts/update_credentials
             Method: PATCH
 
+  VerifyCredentialsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "activity-app-verifycredentials-${Stage}"
+      CodeUri: ../../.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/VerifyCredentialsHandler/VerifyCredentialsHandler.zip
+      Timeout: 30
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !ImportValue
+              Fn::Sub: "${EnvironmentStackName}-TableName"
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+      Events:
+        VerifyCredentials:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ClientApi
+            Path: /api/v1/accounts/verify_credentials
+            Method: GET
+
   WebFingerFunction:
     Type: AWS::Serverless::Function
     Properties:
