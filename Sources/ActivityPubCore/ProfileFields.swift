@@ -81,6 +81,56 @@ public func encodeProfileFields(_ fields: [ProfileField]) -> String {
     return json
 }
 
+/// Strip HTML tags and unescape basic entities to recover plain text.
+///
+/// Intended as a fallback to recover a plain-text bio from a rendered HTML
+/// `summary` when no raw `sourceNote` was stored. Block-level closing tags
+/// (`</p>`) and `<br>` become newlines; all other tags are removed.
+/// A small set of common entities is decoded.
+public func plainTextFromHTML(_ html: String) -> String {
+    guard !html.isEmpty else { return "" }
+
+    // Convert paragraph/line breaks to newlines before stripping remaining tags.
+    var text = html
+    let breakPatterns = [
+        "(?i)</p>": "\n\n",
+        "(?i)<br\\s*/?>": "\n",
+    ]
+    for (pattern, replacement) in breakPatterns {
+        if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+            let ns = text as NSString
+            text = regex.stringByReplacingMatches(
+                in: text,
+                options: [],
+                range: NSRange(location: 0, length: ns.length),
+                withTemplate: replacement
+            )
+        }
+    }
+
+    // Remove all remaining tags.
+    if let regex = try? NSRegularExpression(pattern: "<[^>]+>", options: []) {
+        let ns = text as NSString
+        text = regex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: NSRange(location: 0, length: ns.length),
+            withTemplate: ""
+        )
+    }
+
+    // Unescape basic HTML entities (ampersand last to avoid double-decoding).
+    text = text
+        .replacingOccurrences(of: "&lt;", with: "<")
+        .replacingOccurrences(of: "&gt;", with: ">")
+        .replacingOccurrences(of: "&quot;", with: "\"")
+        .replacingOccurrences(of: "&#39;", with: "'")
+        .replacingOccurrences(of: "&apos;", with: "'")
+        .replacingOccurrences(of: "&amp;", with: "&")
+
+    return text.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 /// HTML-escape special characters for profile field values.
 func htmlEscapeField(_ text: String) -> String {
     text.replacingOccurrences(of: "&", with: "&amp;")

@@ -22,6 +22,7 @@ let package = Package(
         .executable(name: "PostHandler", targets: ["PostHandler"]),
         .executable(name: "MediaUploadHandler", targets: ["MediaUploadHandler"]),
         .executable(name: "ProfileUpdateHandler", targets: ["ProfileUpdateHandler"]),
+        .executable(name: "VerifyCredentialsHandler", targets: ["VerifyCredentialsHandler"]),
         .executable(name: "InstanceHandler", targets: ["InstanceHandler"]),
         .executable(name: "AuthHandler", targets: ["AuthHandler"]),
         .executable(name: "ComposeHandler", targets: ["ComposeHandler"]),
@@ -187,6 +188,15 @@ let package = Package(
                 .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
                 .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
                 .product(name: "AWSS3", package: "aws-sdk-swift"),
+                .product(name: "AWSSSM", package: "aws-sdk-swift"),
+            ]
+        ),
+        .executableTarget(
+            name: "VerifyCredentialsHandler",
+            dependencies: [
+                "ActivityPubCore",
+                .product(name: "AWSLambdaRuntime", package: "swift-aws-lambda-runtime"),
+                .product(name: "AWSLambdaEvents", package: "swift-aws-lambda-events"),
                 .product(name: "AWSSSM", package: "aws-sdk-swift"),
             ]
         ),
