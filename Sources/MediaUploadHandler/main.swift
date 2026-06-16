@@ -183,8 +183,10 @@ let runtime = LambdaRuntime {
             filename: filePart.filename,
             declared: filePart.contentType
         )
-        let filename = filePart.filename ?? "upload"
-        let s3Key = "media/\(mediaId)/\(filename)"
+        // Build the S3 key from server-controlled values only — the client filename is untrusted
+        // input and must not flow into the object key.
+        let fileExtension = MediaType.preferredExtension(forContentType: fileContentType)
+        let s3Key = "media/\(mediaId)/upload.\(fileExtension)"
 
         // 5. Upload to S3
         let putInput = PutObjectInput(

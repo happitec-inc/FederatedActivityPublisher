@@ -61,6 +61,12 @@ public enum MediaType {
         return ext.lowercased()
     }
 
+    /// A safe filename extension for a resolved content type, for server-generated storage keys.
+    /// Never derived from client input, so it can't carry a path/key-injection payload.
+    public static func preferredExtension(forContentType contentType: String) -> String {
+        byContentType[contentType.lowercased()] ?? "bin"
+    }
+
     static func isConcreteMediaType(_ s: String) -> Bool {
         let lower = s.lowercased()
         return lower.hasPrefix("image/") || lower.hasPrefix("video/") || lower.hasPrefix("audio/")
@@ -70,6 +76,11 @@ public enum MediaType {
         "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
         "webp": "image/webp", "heic": "image/heic", "heif": "image/heic",
         "mp4": "video/mp4", "mov": "video/quicktime",
+    ]
+
+    static let byContentType: [String: String] = [
+        "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp",
+        "image/heic": "heic", "image/heif": "heic", "video/mp4": "mp4", "video/quicktime": "mov",
     ]
 
     static let heicBrands: Set<String> = ["heic", "heix", "heif", "hevc", "mif1", "msf1"]
