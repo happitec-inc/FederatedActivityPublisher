@@ -246,6 +246,7 @@ let runtime = LambdaRuntime {
             username: username,
             displayName: newDisplayName,
             summary: newSummary,
+            sourceNote: newNote,
             avatarUrl: newAvatarUrl,
             headerUrl: newHeaderUrl,
             fields: newFieldsJSON
