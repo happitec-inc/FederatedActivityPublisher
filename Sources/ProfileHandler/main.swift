@@ -291,7 +291,7 @@ struct StatusEntry: HTML {
             if let attachments = status.attachments, !attachments.isEmpty {
                 div(.class("post-media")) {
                     for attachment in attachments {
-                        if attachment.contentType.hasPrefix("image/") {
+                        if attachment.isImage {
                             figure {
                                 img(.src(attachment.url), .alt(attachment.description ?? "Media attachment"))
                                 if let desc = attachment.description, !desc.isEmpty {
@@ -334,7 +334,7 @@ struct PostPage: HTMLDocument {
     var ogImage: String {
         // Use first image attachment if available, otherwise avatar
         if let attachments = status.attachments,
-           let firstImage = attachments.first(where: { $0.contentType.hasPrefix("image/") }) {
+           let firstImage = attachments.first(where: { $0.isImage }) {
             return firstImage.url
         }
         return actor.avatarUrl ?? ""  // Empty string handled below — og:image only emitted if non-empty
@@ -342,7 +342,7 @@ struct PostPage: HTMLDocument {
 
     var twitterCardType: String {
         if let attachments = status.attachments,
-           attachments.contains(where: { $0.contentType.hasPrefix("image/") }) {
+           attachments.contains(where: { $0.isImage }) {
             return "summary_large_image"
         }
         return "summary"
@@ -418,7 +418,7 @@ struct PostPage: HTMLDocument {
             if let attachments = status.attachments, !attachments.isEmpty {
                 div(.class("post-media")) {
                     for attachment in attachments {
-                        if attachment.contentType.hasPrefix("image/") {
+                        if attachment.isImage {
                             figure {
                                 img(.src(attachment.url), .alt(attachment.description ?? "Media attachment"))
                                 if let desc = attachment.description, !desc.isEmpty {
