@@ -25,6 +25,9 @@ public struct Actor: Codable, Sendable {
     public let privateKeyArn: String
     /// ISO 8601 timestamp of when the actor was created.
     public let createdAt: String
+    /// Raw user-typed bio text (Markdown/plain). Internal only — never serialized into
+    /// public ActivityPub JSON-LD or federated Update activities.
+    public let sourceNote: String?
     /// Whether the actor appears in server directory listings.
     public let discoverable: Bool
     /// Whether follow requests require manual approval.
@@ -39,7 +42,7 @@ public struct Actor: Codable, Sendable {
     public init(
         username: String, displayName: String, summary: String,
         avatarUrl: String? = nil, headerUrl: String? = nil,
-        fields: String? = nil,
+        fields: String? = nil, sourceNote: String? = nil,
         publicKeyPem: String, privateKeyArn: String,
         createdAt: String, discoverable: Bool = true,
         manuallyApprovesFollowers: Bool = false,
@@ -51,6 +54,7 @@ public struct Actor: Codable, Sendable {
         self.avatarUrl = avatarUrl
         self.headerUrl = headerUrl
         self.fields = fields
+        self.sourceNote = sourceNote
         self.publicKeyPem = publicKeyPem
         self.privateKeyArn = privateKeyArn
         self.createdAt = createdAt
@@ -97,6 +101,11 @@ public struct Actor: Codable, Sendable {
             fields = f
         }
 
+        var sourceNote: String?
+        if case .s(let note) = attributes["sourceNote"] {
+            sourceNote = note
+        }
+
         return Actor(
             username: username,
             displayName: displayName,
@@ -104,6 +113,7 @@ public struct Actor: Codable, Sendable {
             avatarUrl: avatarUrl,
             headerUrl: headerUrl,
             fields: fields,
+            sourceNote: sourceNote,
             publicKeyPem: publicKeyPem,
             privateKeyArn: privateKeyArn,
             createdAt: createdAt,
