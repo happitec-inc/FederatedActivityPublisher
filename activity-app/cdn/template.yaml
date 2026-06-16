@@ -205,21 +205,6 @@ Resources:
         QueryStringsConfig:
           QueryStringBehavior: all
 
-  ClientApiBearerOriginRequestPolicy:
-    Type: AWS::CloudFront::OriginRequestPolicy
-    Properties:
-      OriginRequestPolicyConfig:
-        Name: !Sub "activity-clientapi-bearer-origin-${Stage}"
-        CookiesConfig:
-          CookieBehavior: none
-        HeadersConfig:
-          HeaderBehavior: whitelist
-          Headers:
-            - Authorization
-            - Content-Type
-        QueryStringsConfig:
-          QueryStringBehavior: none
-
   # --- CloudFront OAC for S3 Media ---
 
   CloudFrontOAC:
@@ -377,7 +362,7 @@ Resources:
             TargetOriginId: ClientApiGateway
             ViewerProtocolPolicy: redirect-to-https
             CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
-            OriginRequestPolicyId: !Ref ClientApiBearerOriginRequestPolicy
+            OriginRequestPolicyId: !Ref ClientApiOriginRequestPolicy
             AllowedMethods: [GET, HEAD]
             Compress: true
           - PathPattern: /api/v1/instance
