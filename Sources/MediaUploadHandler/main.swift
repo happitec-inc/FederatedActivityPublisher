@@ -176,8 +176,13 @@ let runtime = LambdaRuntime {
         // 4. Generate media ID
         let mediaId = store.generateULID()
 
-        // Determine content type and filename
-        let fileContentType = filePart.contentType ?? "application/octet-stream"
+        // Determine content type from the file's own bytes — the multipart part's declared type is
+        // untrustworthy (swift-openapi clients send `text/plain` for binary parts).
+        let fileContentType = MediaType.contentType(
+            forFileData: fileData,
+            filename: filePart.filename,
+            declared: filePart.contentType
+        )
         let filename = filePart.filename ?? "upload"
         let s3Key = "media/\(mediaId)/\(filename)"
 
