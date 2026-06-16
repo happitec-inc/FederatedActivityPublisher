@@ -151,7 +151,7 @@ let runtime = LambdaRuntime {
         // 5. Validate and upload avatar
         var newAvatarUrl: String?
         if let avatarPart, let avatarData = avatarPart.data, !avatarData.isEmpty {
-            let contentType = avatarPart.contentType ?? "application/octet-stream"
+            let contentType = MediaType.contentType(forFileData: avatarData, filename: avatarPart.filename, declared: avatarPart.contentType)
             guard allowedImageTypes.contains(contentType) else {
                 return APIGatewayResponse(
                     statusCode: .unprocessableContent,
@@ -181,7 +181,7 @@ let runtime = LambdaRuntime {
         // 6. Validate and upload header
         var newHeaderUrl: String?
         if let headerPart, let headerData = headerPart.data, !headerData.isEmpty {
-            let contentType = headerPart.contentType ?? "application/octet-stream"
+            let contentType = MediaType.contentType(forFileData: headerData, filename: headerPart.filename, declared: headerPart.contentType)
             guard allowedImageTypes.contains(contentType) else {
                 return APIGatewayResponse(
                     statusCode: .unprocessableContent,
