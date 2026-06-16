@@ -46,6 +46,25 @@ struct MediaTypeTests {
         #expect(MediaType.contentType(forFileData: unknown, filename: nil, declared: nil) == "application/octet-stream")
     }
 
+    @Test("Buffers too short to sniff degrade gracefully")
+    func shortBuffers() {
+        // Fewer than 4 bytes can't match any signature; fall through to extension, then octet-stream.
+        let tiny = Data([0xFF, 0xD8])  // looks JPEG-ish but too short to confirm
+        #expect(MediaType.contentType(forFileData: tiny, filename: nil, declared: nil) == "application/octet-stream")
+        #expect(MediaType.contentType(forFileData: tiny, filename: "x.png", declared: nil) == "image/png")
+        #expect(MediaType.contentType(forFileData: Data(), filename: nil, declared: "image/jpeg") == "image/jpeg")
+    }
+
+    @Test("preferredExtension maps content types to safe extensions")
+    func preferredExtensions() {
+        #expect(MediaType.preferredExtension(forContentType: "image/jpeg") == "jpg")
+        #expect(MediaType.preferredExtension(forContentType: "image/png") == "png")
+        #expect(MediaType.preferredExtension(forContentType: "image/webp") == "webp")
+        #expect(MediaType.preferredExtension(forContentType: "video/mp4") == "mp4")
+        #expect(MediaType.preferredExtension(forContentType: "application/octet-stream") == "bin")
+        #expect(MediaType.preferredExtension(forContentType: "text/plain") == "bin")
+    }
+
     @Test("isImageURL keys off the path extension")
     func imageURLDetection() {
         #expect(MediaType.isImageURL("https://happitec.com/media/ABC123/upload.jpeg"))
