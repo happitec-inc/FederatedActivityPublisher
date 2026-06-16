@@ -64,6 +64,7 @@ public struct DynamoDBStore: Sendable {
         username: String,
         displayName: String?,
         summary: String?,
+        sourceNote: String? = nil,
         avatarUrl: String?,
         headerUrl: String?,
         fields: String?
@@ -81,6 +82,11 @@ public struct DynamoDBStore: Sendable {
             updateParts.append("#sm = :sm")
             exprNames["#sm"] = "summary"
             exprValues[":sm"] = .s(summary)
+        }
+        if let sourceNote {
+            updateParts.append("#sn = :sn")
+            exprNames["#sn"] = "sourceNote"
+            exprValues[":sn"] = .s(sourceNote)
         }
         if let avatarUrl {
             updateParts.append("#au = :au")
