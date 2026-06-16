@@ -37,3 +37,24 @@ private func sampleActorItem(sourceNote: String? = nil) -> [String: DynamoDBClie
     #expect(actor != nil)
     #expect(actor?.sourceNote == nil)
 }
+
+/// Regression guard: the public ActivityPub actor JSON-LD must never expose
+/// the raw `sourceNote` value or the key name "sourceNote".
+@Test func actorJSONLDDoesNotLeakSourceNote() {
+    let actor = Actor(
+        username: "testbot",
+        displayName: "Test Bot",
+        summary: "<p>Rendered bio</p>",
+        sourceNote: "RAW_SECRET_BIO_DO_NOT_LEAK",
+        publicKeyPem: "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----",
+        privateKeyArn: "/activity/stage/keys/testbot",
+        createdAt: "2026-01-01T00:00:00Z"
+    )
+    let json = buildActorJSONLD(
+        actor: actor,
+        serverDomain: "activity.example.com",
+        handleDomain: "example.com"
+    )
+    #expect(!json.contains("RAW_SECRET_BIO_DO_NOT_LEAK"))
+    #expect(!json.contains("sourceNote"))
+}
