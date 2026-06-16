@@ -13,7 +13,7 @@ import FoundationNetworking
 /// Injects `Authorization: Bearer <token>` on every request, mirroring how the iOS client's
 /// generated `Client` is configured. Lives in the test target so the upload path exercises the
 /// real generated multipart encoding rather than a hand-built request.
-private struct BearerMiddleware: ClientMiddleware {
+struct BearerMiddleware: ClientMiddleware {
     let token: String
 
     func intercept(
