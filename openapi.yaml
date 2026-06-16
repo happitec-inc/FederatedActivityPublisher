@@ -326,6 +326,27 @@ paths:
 
   # ── Client (authoring) ───────────────────────────
 
+  /api/v1/accounts/verify_credentials:
+    get:
+      operationId: verifyCredentials
+      summary: Fetch the authenticated account's profile (with raw source values)
+      tags: [client]
+      description: |
+        Returns the authenticated account entity including the `source` object
+        with raw (unrendered) bio and field values. Used by clients to pre-populate
+        profile editing forms.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Authenticated account with source
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialAccount"
+        "401":
+          description: Invalid or missing auth
+
   /api/v1/accounts/update_credentials:
     patch:
       operationId: updateCredentials
@@ -1297,6 +1318,59 @@ components:
               format: date-time
             - type: "null"
           description: Timestamp of last successful rel=me verification
+
+    CredentialAccount:
+      type: object
+      description: |
+        Authenticated account entity returned by GET /api/v1/accounts/verify_credentials.
+        Extends Account with a `source` object containing raw (unrendered) bio and field values
+        for use by profile-editing clients.
+      required: [id, username, display_name, note, source]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        display_name:
+          type: string
+        note:
+          type: string
+          description: HTML-rendered bio
+        avatar:
+          type: string
+          format: uri
+        header:
+          type: string
+          format: uri
+        fields:
+          type: array
+          description: Rendered profile fields (HTML values, may contain links)
+          items:
+            $ref: "#/components/schemas/ProfileField"
+        source:
+          $ref: "#/components/schemas/Source"
+
+    Source:
+      type: object
+      description: |
+        Raw (unrendered) account source values. Used by profile-editing clients to
+        pre-populate edit forms without having to reverse-render HTML.
+      required: [note, fields]
+      properties:
+        note:
+          type: string
+          description: Raw plain-text bio (before HTML conversion)
+        fields:
+          type: array
+          description: Raw profile fields (plain-text name/value pairs, before HTML conversion)
+          items:
+            type: object
+            required: [name, value]
+            properties:
+              name:
+                type: string
+              value:
+                type: string
 
     UpdateCredentialsRequest:
       type: object
