@@ -1,3 +1,14 @@
+/// Profile metadata fields — the key-value pairs shown on an actor's profile page.
+///
+/// Fields are stored as a JSON-encoded array in the ``Actor/fields`` DynamoDB attribute.
+/// ``ActorSerializer`` reads them via ``parseProfileFields(_:)`` and formats URL values
+/// as anchor tags for the ActivityPub actor document and Mastodon API responses.
+/// The web profile page also calls ``formatFieldValueForActivityPub(_:)`` when rendering
+/// the profile.
+///
+/// ``plainTextFromHTML(_:)`` is used as a fallback when a stored actor has an HTML `summary`
+/// but no raw ``Actor/sourceNote``, so the profile editor can show the user something
+/// reasonable to edit.
 import Foundation
 
 /// A profile metadata field displayed as a key-value pair on an actor's profile.

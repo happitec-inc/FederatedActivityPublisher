@@ -1,3 +1,46 @@
+/// Lambda handler for passkey (WebAuthn) authentication and session management.
+///
+/// This handler owns all user-facing auth surfaces: the login page, the passkey
+/// registration page, and the JSON API endpoints the browser's WebAuthn JS calls
+/// during both ceremonies. It is invoked by API Gateway for the `/auth/*` and
+/// `/api/internal/auth/*` and `/api/internal/passkeys/*` paths.
+///
+/// ## Authentication flow
+///
+/// Login follows the standard WebAuthn authentication ceremony:
+/// 1. Browser hits `POST /api/internal/auth/challenge` to get a server-generated
+///    challenge stored in DynamoDB with a short TTL.
+/// 2. Browser calls `navigator.credentials.get()` with the challenge and sends the
+///    assertion to `POST /api/internal/auth/verify`.
+/// 3. This handler consumes the challenge (atomic DynamoDB delete to prevent replay),
+///    verifies the ES256 signature against the stored public key, checks the sign
+///    count for cloned-authenticator detection, and issues a JWT session cookie signed
+///    with a key loaded from SSM Parameter Store.
+///
+/// ## Registration flow
+///
+/// New passkeys require a pre-issued registration token (created via the
+/// `provision-actor` GitHub Actions workflow):
+/// 1. Admin shares the one-time token URL (`GET /auth/register?token=...`).
+/// 2. Browser hits `POST /api/internal/passkeys/register-challenge` with the token
+///    to get a `navigator.credentials.create()` challenge.
+/// 3. Browser completes the ceremony and posts to `POST /api/internal/passkeys/register`,
+///    which consumes the token atomically, parses the CBOR attestation object, extracts
+///    the COSE public key, and stores the passkey in DynamoDB.
+///
+/// ## Key dependencies
+/// - `ActivityPubCore.DynamoDBStore` — challenge, passkey, and registration token storage
+/// - `ActivityPubCore.JWTSession` — JWT signing and parsing
+/// - `AWSSSM` — retrieves the session signing key at cold start, cached for reuse
+/// - `Elementary` — HTML rendering for the login, registration, and error pages
+/// - `Crypto` (swift-crypto) — P-256 ECDSA signature verification
+///
+/// Required environment variables:
+/// - `SERVER_DOMAIN`: the ActivityPub server domain (e.g. `activity.happitec.com`)
+/// - `SSM_KEY_PREFIX`: SSM path prefix where `session-signing-key` lives
+///
+/// Optional environment variables:
+/// - `INSTANCE_TITLE`: display name shown in page titles
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import AWSSSM
@@ -19,6 +62,15 @@ let ssmClient = try await SSMClient()
 /// Cached signing key -- initialized once per Lambda cold start.
 nonisolated(unsafe) var cachedSigningKey: String?
 
+/// Returns the session signing key, loading it from SSM on the first call and
+/// caching it for the lifetime of the Lambda execution environment.
+///
+/// The key lives at `{ssmKeyPrefix}/session-signing-key` as a SecureString parameter.
+/// A missing or empty value is a fatal misconfiguration — the handler cannot issue
+/// sessions without it.
+///
+/// - Returns: The plaintext signing key string.
+/// - Throws: Any error from the SSM `GetParameter` call.
 func getSigningKey() async throws -> String {
     if let key = cachedSigningKey { return key }
     let output = try await ssmClient.getParameter(input: .init(
@@ -69,6 +121,19 @@ try await runtime.run()
 
 // MARK: - Auth Challenge
 
+/// Generates a WebAuthn authentication challenge and stores it in DynamoDB.
+///
+/// Called by the login page before invoking `navigator.credentials.get()`. The
+/// returned JSON includes a `challengeId` (used to retrieve and consume the stored
+/// record during verification) and the base64url-encoded challenge bytes the browser
+/// passes to the authenticator.
+///
+/// The challenge has a 5-minute TTL enforced by DynamoDB's TTL attribute; it is also
+/// atomically deleted on first use in ``handleAuthVerify(event:context:)`` to prevent replay.
+///
+/// - Returns: A 200 response with JSON containing `challengeId`, `challenge`, `rpId`, `timeout`,
+///   and `userVerification`.
+/// - Throws: DynamoDB errors from ``DynamoDBStore/storeChallenge(challengeId:challenge:type:username:)``.
 func handleAuthChallenge() async throws -> APIGatewayResponse {
     let challengeId = generateRandomHex(byteCount: 16)
     let challengeBytes = generateRandomBytes(count: 32)
@@ -94,6 +159,25 @@ func handleAuthChallenge() async throws -> APIGatewayResponse {
 
 // MARK: - Auth Verify
 
+/// Verifies a WebAuthn authentication assertion and issues a session cookie on success.
+///
+/// This is the second half of the login ceremony. It performs the full WebAuthn
+/// authentication verification sequence:
+/// 1. Consumes the stored challenge atomically (preventing replay).
+/// 2. Decodes and validates `clientDataJSON`: checks origin, ceremony type (`webauthn.get`),
+///    and challenge value.
+/// 3. Retrieves the stored passkey by credential ID.
+/// 4. Verifies the ES256 signature over `authenticatorData || SHA-256(clientDataJSON)`.
+/// 5. Detects potentially cloned authenticators by comparing sign counts.
+/// 6. Issues a 24-hour JWT session cookie (`session=...`; HttpOnly, Secure, SameSite=Lax).
+///
+/// - Parameters:
+///   - event: The API Gateway request containing the JSON body with `challengeId` and
+///     the WebAuthn credential assertion object.
+///   - context: Lambda context used for structured logging.
+/// - Returns: 200 with `{"ok":true,"username":"..."}` and a `set-cookie` header on success,
+///   or an appropriate 4xx/5xx JSON error response.
+/// - Throws: DynamoDB or SSM errors that escape the outer do/catch in the runtime closure.
 func handleAuthVerify(event: APIGatewayRequest, context: LambdaContext) async throws -> APIGatewayResponse {
     guard let bodyString = event.body else {
         return APIGatewayResponse(
@@ -248,6 +332,20 @@ func handleAuthVerify(event: APIGatewayRequest, context: LambdaContext) async th
 
 // MARK: - Registration Challenge
 
+/// Generates a WebAuthn registration challenge for a validated registration token.
+///
+/// Called by the registration page before invoking `navigator.credentials.create()`.
+/// The registration token (a one-time value provisioned via the `provision-actor` workflow)
+/// is validated but not yet consumed here — consumption happens in ``handleRegisterPasskey(event:context:)``
+/// to allow the browser to retry the authenticator step without needing a new token.
+///
+/// The challenge is stored in DynamoDB with the username from the token, so the
+/// registration step can verify that the same user is completing the ceremony.
+///
+/// - Parameter event: The API Gateway request containing a JSON body with a `token` field.
+/// - Returns: 200 with WebAuthn `PublicKeyCredentialCreationOptions`-shaped JSON, or
+///   a 400/401 JSON error response.
+/// - Throws: DynamoDB errors.
 func handleRegisterChallenge(event: APIGatewayRequest) async throws -> APIGatewayResponse {
     guard let bodyString = event.body,
           let bodyData = bodyString.data(using: .utf8),
@@ -298,6 +396,26 @@ func handleRegisterChallenge(event: APIGatewayRequest) async throws -> APIGatewa
 
 // MARK: - Register Passkey
 
+/// Completes the WebAuthn registration ceremony and stores the new passkey.
+///
+/// Expects the attestation object from `navigator.credentials.create()`, along with the
+/// registration token and challenge ID from the earlier steps. The sequence is:
+/// 1. Consumes the challenge atomically.
+/// 2. Consumes the registration token atomically, verifying it matches the username
+///    in the challenge record.
+/// 3. Validates `clientDataJSON` (origin, ceremony type `webauthn.create`, challenge).
+/// 4. Parses the CBOR-encoded attestation object to extract `authData`.
+/// 5. Extracts the COSE public key (EC2 / ES256) from `authData`.
+/// 6. Stores the credential ID, public key, algorithm, and initial sign count in DynamoDB.
+///
+/// After this call succeeds, the user can log in with the registered passkey.
+///
+/// - Parameters:
+///   - event: The API Gateway request containing `token`, `challengeId`, and a WebAuthn
+///     credential object with `clientDataJSON` and `attestationObject`.
+///   - context: Lambda context used for structured logging.
+/// - Returns: 200 with `{"ok":true}` on success, or a 4xx JSON error response.
+/// - Throws: DynamoDB errors.
 func handleRegisterPasskey(event: APIGatewayRequest, context: LambdaContext) async throws -> APIGatewayResponse {
     guard let bodyString = event.body,
           let bodyData = bodyString.data(using: .utf8),
@@ -417,6 +535,16 @@ func handleRegisterPasskey(event: APIGatewayRequest, context: LambdaContext) asy
 
 // MARK: - Registration Page
 
+/// Renders the passkey registration HTML page for a given one-time registration token.
+///
+/// The token is passed as the `token` query parameter. If absent or invalid, an error
+/// page is returned instead. The page's inline JavaScript drives the registration
+/// ceremony against the `/api/internal/passkeys/*` endpoints.
+///
+/// - Parameter event: The API Gateway request; reads `event.queryStringParameters["token"]`.
+/// - Returns: 200 with the registration page HTML, 400 if no token was provided,
+///   or 401 if the token is invalid or expired.
+/// - Throws: DynamoDB errors.
 func handleRegisterPage(event: APIGatewayRequest) async throws -> APIGatewayResponse {
     let token = event.queryStringParameters["token"] ?? ""
 
@@ -443,6 +571,11 @@ func handleRegisterPage(event: APIGatewayRequest) async throws -> APIGatewayResp
 
 // MARK: - Login Page
 
+/// Renders the passkey login HTML page.
+///
+/// The page's inline JavaScript drives the authentication ceremony against
+/// `/api/internal/auth/challenge` and `/api/internal/auth/verify`. On success it
+/// redirects to `/compose`.
 func renderLoginPage() -> APIGatewayResponse {
     let page = LoginPage(domain: serverDomain)
     let html = page.render()
@@ -457,6 +590,12 @@ func renderLoginPage() -> APIGatewayResponse {
     )
 }
 
+/// Renders an HTML error page with the given title and message.
+///
+/// - Parameters:
+///   - title: Heading text displayed on the page and in the browser tab.
+///   - message: Body text describing the error.
+///   - badRequest: If `true`, returns HTTP 400; otherwise returns HTTP 401.
 func renderAuthErrorPage(title: String, message: String, badRequest: Bool = false) -> APIGatewayResponse {
     let page = AuthErrorPage(errorTitle: title, message: message, domain: serverDomain)
     let html = page.render()
@@ -499,7 +638,13 @@ func verifyES256Signature(signature: Data, data: Data, publicKeyData: Data) -> B
     }
 }
 
-/// Extract sign count from authenticator data (bytes 33-36, big-endian UInt32).
+/// Extracts the sign count from authenticator data (bytes 33–36, big-endian UInt32).
+///
+/// Returns 0 if `authData` is shorter than 37 bytes, which is treated as a
+/// counter-not-supported authenticator.
+///
+/// - Parameter authData: Raw authenticator data bytes from the WebAuthn assertion.
+/// - Returns: The sign count as an `Int`, or 0 if unavailable.
 func extractSignCount(from authData: Data) -> Int {
     guard authData.count >= 37 else { return 0 }
     let offset = authData.startIndex + 33
@@ -510,17 +655,31 @@ func extractSignCount(from authData: Data) -> Int {
     return Int(sc)
 }
 
-/// Minimal CBOR parser to extract authData from attestation object.
-/// The attestation object is a CBOR map with keys "fmt", "attStmt", "authData".
+/// Extracts the `authData` field from a CBOR-encoded WebAuthn attestation object.
+///
+/// The attestation object is a CBOR map with string keys `"fmt"`, `"attStmt"`, and
+/// `"authData"`. This function parses that map and returns the raw bytes stored under
+/// `"authData"`.
+///
+/// - Parameter data: The raw attestation object bytes from the WebAuthn registration response.
+/// - Returns: The `authData` bytes, or `nil` if parsing fails.
 func extractAuthDataFromAttestation(_ data: Data) -> Data? {
     // Parse CBOR map
     guard let (map, _) = parseCBORMap(data, at: data.startIndex) else { return nil }
     return map["authData"]
 }
 
-/// Extract the public key (as raw X||Y bytes) and algorithm from authData.
-/// authData layout: rpIdHash(32) + flags(1) + signCount(4) + [attestedCredentialData]
-/// attestedCredentialData: aaguid(16) + credIdLen(2) + credId(credIdLen) + COSE_Key(CBOR)
+/// Extracts the public key and algorithm identifier from WebAuthn authenticator data.
+///
+/// The `authData` layout is: `rpIdHash(32) + flags(1) + signCount(4) +
+/// aaguid(16) + credIdLen(2) + credId(credIdLen) + COSE_Key(CBOR)`.
+/// This function reads the attested credential data section (present when the AT flag,
+/// bit 6, is set) and parses the COSE public key map to get the raw X and Y
+/// coordinates of the EC2 key.
+///
+/// - Parameter authData: Raw authenticator data bytes from the attestation response.
+/// - Returns: A tuple of `(X||Y bytes, COSE algorithm identifier)`, or `nil` if the
+///   data is malformed or the AT flag is not set.
 func extractPublicKeyFromAuthData(_ authData: Data) -> (Data, Int)? {
     guard authData.count > 37 else { return nil }
 
@@ -561,7 +720,16 @@ func extractPublicKeyFromAuthData(_ authData: Data) -> (Data, Int)? {
 
 // MARK: - Minimal CBOR Parser
 
-/// Parse a CBOR map with string keys, return as [String: Data].
+/// Parses a CBOR map with text-string keys, returning each value as its raw CBOR bytes.
+///
+/// Only major type 5 (map) is accepted at `startOffset`. Values are returned as raw
+/// `Data` slices so callers can further decode them with type-specific parsers.
+///
+/// - Parameters:
+///   - data: The full CBOR-encoded buffer.
+///   - startOffset: Byte offset within `data` where the map starts.
+/// - Returns: A dictionary mapping string keys to raw value bytes, and the offset
+///   immediately after the map, or `nil` if parsing fails.
 func parseCBORMap(_ data: Data, at startOffset: Int) -> ([String: Data], Int)? {
     guard startOffset < data.endIndex else { return nil }
 
@@ -599,7 +767,16 @@ func parseCBORMap(_ data: Data, at startOffset: Int) -> ([String: Data], Int)? {
     return (result, offset)
 }
 
-/// Parse a CBOR map with integer keys (for COSE keys).
+/// Parses a CBOR map with integer keys, returning each value as its raw CBOR bytes.
+///
+/// Used specifically to decode COSE key maps, where keys are signed integers (e.g.
+/// 1 = kty, 3 = alg, -2 = x, -3 = y).
+///
+/// - Parameters:
+///   - data: The full CBOR-encoded buffer.
+///   - startOffset: Byte offset within `data` where the map starts.
+/// - Returns: A dictionary mapping integer keys to raw value bytes, and the offset
+///   immediately after the map, or `nil` if parsing fails.
 func parseCBORMapInt(_ data: Data, at startOffset: Int) -> ([Int: Data], Int)? {
     guard startOffset < data.endIndex else { return nil }
 
@@ -637,6 +814,13 @@ func parseCBORMapInt(_ data: Data, at startOffset: Int) -> ([Int: Data], Int)? {
     return (result, offset)
 }
 
+/// Parses a CBOR text string (major type 3) at the given offset.
+///
+/// - Parameters:
+///   - data: The full CBOR-encoded buffer.
+///   - offset: Byte offset within `data` where the text string starts.
+/// - Returns: The decoded UTF-8 string and the offset immediately after it,
+///   or `nil` if the byte at `offset` is not major type 3 or the data is truncated.
 func parseCBORString(_ data: Data, at offset: Int) -> (String, Int)? {
     guard offset < data.endIndex else { return nil }
     let majorByte = data[offset]
@@ -667,6 +851,13 @@ func parseCBORString(_ data: Data, at offset: Int) -> (String, Int)? {
     return (str, pos + length)
 }
 
+/// Parses a CBOR integer (major type 0 = unsigned, major type 1 = negative) at the given offset.
+///
+/// - Parameters:
+///   - data: The full CBOR-encoded buffer.
+///   - offset: Byte offset within `data` where the integer starts.
+/// - Returns: The decoded `Int` value and the offset immediately after it,
+///   or `nil` if the major type is not 0 or 1 or the data is truncated.
 func parseCBORInt(_ data: Data, at offset: Int) -> (Int, Int)? {
     guard offset < data.endIndex else { return nil }
     let majorByte = data[offset]
@@ -702,8 +893,18 @@ func parseCBORInt(_ data: Data, at offset: Int) -> (Int, Int)? {
     }
 }
 
-/// Parse a raw CBOR value and return its Data content (for byte strings)
-/// or skip over it (for other types, returning the raw content).
+/// Parses any CBOR value at the given offset and returns its raw bytes.
+///
+/// For byte strings (major type 2), the returned `Data` contains the decoded payload
+/// bytes (not the CBOR header). For all other types the full CBOR encoding including
+/// the header byte is returned. This lets callers pass the result to ``cborToInt(_:)``
+/// or recurse into nested structures.
+///
+/// - Parameters:
+///   - data: The full CBOR-encoded buffer.
+///   - offset: Byte offset within `data` where the value starts.
+/// - Returns: The raw bytes for the value and the offset immediately after it,
+///   or `nil` if the data is truncated or the major type is unsupported.
 func parseCBORRawValue(_ data: Data, at offset: Int) -> (Data, Int)? {
     guard offset < data.endIndex else { return nil }
     let majorByte = data[offset]
@@ -821,6 +1022,10 @@ func parseCBORRawValue(_ data: Data, at offset: Int) -> (Data, Int)? {
     }
 }
 
+/// Decodes a CBOR integer from raw bytes previously returned by ``parseCBORRawValue(_:at:)``.
+///
+/// - Parameter data: Raw CBOR bytes beginning with the major-type/additional-info byte.
+/// - Returns: The decoded integer, or `nil` if the data is not a CBOR integer type.
 func cborToInt(_ data: Data) -> Int? {
     guard !data.isEmpty else { return nil }
     let majorByte = data[data.startIndex]
@@ -850,12 +1055,18 @@ func cborToInt(_ data: Data) -> Int? {
 
 // MARK: - Random Helpers
 
+/// Generates a random hex string by producing `byteCount` random bytes.
+///
+/// - Parameter byteCount: Number of random bytes to generate; the returned string
+///   is `byteCount * 2` characters long.
+/// - Returns: A lowercase hexadecimal string.
 func generateRandomHex(byteCount: Int) -> String {
     var bytes = [UInt8](repeating: 0, count: byteCount)
     for i in 0..<bytes.count { bytes[i] = UInt8.random(in: 0...255) }
     return bytes.map { String(format: "%02x", $0) }.joined()
 }
 
+/// Generates an array of `count` cryptographically random bytes.
 func generateRandomBytes(count: Int) -> [UInt8] {
     var bytes = [UInt8](repeating: 0, count: count)
     for i in 0..<bytes.count { bytes[i] = UInt8.random(in: 0...255) }
@@ -864,7 +1075,13 @@ func generateRandomBytes(count: Int) -> [UInt8] {
 
 // MARK: - Login Page
 
+/// The passkey login page rendered by ``renderLoginPage()``.
+///
+/// Contains inline JavaScript that drives the full WebAuthn authentication ceremony
+/// against `/api/internal/auth/challenge` and `/api/internal/auth/verify`.
+/// On successful authentication the browser is redirected to `/compose`.
 struct LoginPage: HTMLDocument {
+    /// The server domain, used to construct the stylesheet URL and as the WebAuthn RP ID.
     var domain: String
 
     var title: String { "Sign in - \(instanceTitle)" }
@@ -967,9 +1184,18 @@ struct LoginPage: HTMLDocument {
 
 // MARK: - Register Page
 
+/// The passkey registration page rendered by ``handleRegisterPage(event:)``.
+///
+/// Contains inline JavaScript that drives the WebAuthn registration ceremony against
+/// `/api/internal/passkeys/register-challenge` and `/api/internal/passkeys/register`.
+/// The one-time registration token is embedded directly in the page's JavaScript so
+/// the browser can include it in both API calls.
 struct RegisterPage: HTMLDocument {
+    /// The username being registered, displayed on the page.
     var username: String
+    /// The one-time registration token, embedded in the page's JavaScript.
     var token: String
+    /// The server domain, used to construct the stylesheet URL and as the WebAuthn RP ID.
     var domain: String
 
     var title: String { "Register passkey - \(instanceTitle)" }
@@ -1090,9 +1316,13 @@ struct RegisterPage: HTMLDocument {
 
 // MARK: - Error Page
 
+/// A minimal error page rendered when authentication or registration fails.
 struct AuthErrorPage: HTMLDocument {
+    /// Heading text displayed in the page body and browser tab.
     var errorTitle: String
+    /// Body text describing the error.
     var message: String
+    /// The server domain, used to construct the stylesheet URL.
     var domain: String
 
     var title: String { "\(errorTitle) - \(instanceTitle)" }
@@ -1117,6 +1347,13 @@ struct AuthErrorPage: HTMLDocument {
 
 // MARK: - Shared Helpers
 
+/// Escapes a string for safe embedding in a JSON string literal.
+///
+/// Handles backslash, double-quote, newline, carriage return, and tab. Used when
+/// building JSON responses by string interpolation rather than `JSONEncoder`.
+///
+/// - Parameter str: The raw string to escape.
+/// - Returns: The escaped string, safe to place between JSON double quotes.
 func escapeJSON(_ str: String) -> String {
     str.replacingOccurrences(of: "\\", with: "\\\\")
        .replacingOccurrences(of: "\"", with: "\\\"")

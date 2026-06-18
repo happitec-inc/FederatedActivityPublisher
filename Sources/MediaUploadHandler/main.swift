@@ -1,3 +1,22 @@
+/// Lambda handler for `POST /api/v2/media` — the endpoint that accepts a media file upload
+/// and returns an attachment ID the client can later reference in a status post.
+///
+/// Both the iOS client and the web compose page use this endpoint. The iOS client sends
+/// uploads via the generated swift-openapi client, which sends all multipart binary parts
+/// as `text/plain` regardless of actual content; the content type is therefore sniffed
+/// server-side from the file's leading bytes via `MediaType.contentType(forFileData:...)`.
+///
+/// The handler accepts both bearer tokens and session cookies (with CSRF validation),
+/// matching the auth model used by the web compose page.
+///
+/// On success, the handler:
+/// 1. Uploads the file to S3 under `media/{mediaId}/upload.{ext}`, using a server-generated
+///    ULID as the ID and a server-derived extension — the client filename is not trusted.
+/// 2. Stores metadata (content type, S3 key, optional alt text, file size) in DynamoDB.
+/// 3. Returns a Mastodon-compatible attachment JSON object containing the media ID.
+///
+/// Blurhash and image dimensions are not computed at upload time; those fields are `null`
+/// in the response.
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import AWSS3
@@ -20,9 +39,14 @@ let store = try await DynamoDBStore()
 let s3Client = try await S3Client()
 let ssmClient = try await SSMClient()
 
-/// Cached signing key -- initialized once per Lambda cold start.
+/// Signing key cached across invocations within the same Lambda execution environment.
+/// Populated on the first request and reused on subsequent warm invocations.
 nonisolated(unsafe) var cachedSigningKey: String?
 
+/// Returns the session signing key, fetching it from SSM on the first call.
+///
+/// - Returns: The plaintext signing key.
+/// - Throws: A fatal error if the parameter is missing or empty; SSM errors are propagated.
 func getSigningKey() async throws -> String {
     if let key = cachedSigningKey { return key }
     let output = try await ssmClient.getParameter(input: .init(

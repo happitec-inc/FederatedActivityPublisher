@@ -1,22 +1,27 @@
+/// Shared helpers used by the token-management subcommands (mint, list, revoke, rotate).
+///
+/// `TokenSupport` centralizes the DynamoDB item schema for bearer tokens so that tokens
+/// minted by this CLI validate against the same schema the `provision-actor.yml` workflow
+/// produces and the Lambda handlers verify against.
+///
+/// Token storage model: a raw 64-character hex token (32 random bytes) is generated locally
+/// and shown to the operator once. Only its lowercase SHA-256 hex hash is written to DynamoDB
+/// as `TOKEN#{hash}` / `META`. The Lambda handlers authenticate by hashing the incoming
+/// `Authorization: Bearer` value and doing a `GetItem` on the resulting primary key.
 import ArgumentParser
 import AWSDynamoDB
 import Crypto
 import Foundation
 
-/// Shared helpers for the local token-management subcommands.
+/// DynamoDB item schema for token items (matches what `provision-actor.yml` writes):
 ///
-/// These mint, hash, enumerate, and delete bearer-token items in the
-/// `activity-{stage}` DynamoDB table. The item schema mirrors exactly what the
-/// provisioning workflow (`provision-actor.yml`) writes so that tokens minted
-/// here validate against the server:
-///
-///   PK          = "TOKEN#<sha256hex>"   (lowercase hex of SHA-256 over the raw token's UTF-8 bytes)
-///   SK          = "META"
-///   username    = <username>
-///   scope       = "read write" (default)
-///   createdAt   = ISO8601 "%Y-%m-%dT%H:%M:%SZ"
-///   ttl         = Number, epoch seconds = now + ttlDays * 86400
-///   description = free-form provenance string
+///     PK          = "TOKEN#<sha256hex>"
+///     SK          = "META"
+///     username    = <username>
+///     scope       = "read write" (default)
+///     createdAt   = ISO8601 "%Y-%m-%dT%H:%M:%SZ"
+///     ttl         = Number, epoch seconds = now + ttlDays * 86400
+///     description = free-form provenance string
 enum TokenSupport {
     /// A single token META item read back from DynamoDB.
     struct TokenItem {
@@ -58,6 +63,7 @@ enum TokenSupport {
         return hexEncode(Array(digest))
     }
 
+    /// Encodes a byte sequence as lowercase hex, two characters per byte.
     static func hexEncode<S: Sequence>(_ bytes: S) -> String where S.Element == UInt8 {
         bytes.map { String(format: "%02x", $0) }.joined()
     }
@@ -187,11 +193,13 @@ enum TokenSupport {
         }
     }
 
+    /// Extracts a string value from a DynamoDB `.s` attribute, or returns `nil`.
     private static func stringValue(_ value: DynamoDBClientTypes.AttributeValue?) -> String? {
         if case let .s(s)? = value { return s }
         return nil
     }
 
+    /// Extracts a number string from a DynamoDB `.n` attribute, or returns `nil`.
     private static func numberValue(_ value: DynamoDBClientTypes.AttributeValue?) -> String? {
         if case let .n(n)? = value { return n }
         return nil

@@ -1,3 +1,19 @@
+/// Lambda handler for `GET /users/{username}/statuses/{id}`.
+///
+/// This is the ActivityPub object endpoint — the canonical URL for a single Note. Remote
+/// servers fetch this URL to resolve a status by its URI, and Mastodon links here when
+/// displaying a remote post in a thread. The CloudFront cache behavior for this path sets
+/// a long TTL (`max-age=31536000`) because status content is immutable once published.
+///
+/// The handler does content negotiation on the `Accept` header:
+/// - ActivityPub clients (`application/activity+json`, `application/ld+json`) receive the
+///   Note JSON serialized by `buildNoteJSON`.
+/// - Browser requests (`text/html`) receive a 302 redirect to the human-readable profile
+///   page at `/@{username}/{id}`. Private and direct-visibility statuses return 404 for
+///   browser requests to avoid leaking their existence.
+///
+/// Dependencies: `DynamoDBStore` (status lookup), `ActivityPubCore.buildNoteJSON`
+/// (Note serialization).
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import ActivityPubCore

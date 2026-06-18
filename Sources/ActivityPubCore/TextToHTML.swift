@@ -1,3 +1,14 @@
+/// Converts posted text into the HTML that goes into an ActivityPub `Note`'s `content` field.
+///
+/// `PostHandler` calls ``convertTextToHTML(_:)`` on the user-supplied post body before
+/// storing the note and fanning it out to followers. The result is then run through
+/// ``HTMLSanitizer`` before storage, so this file does not need to worry about XSS.
+///
+/// The converter tries to detect markdown: if the parsed document contains any formatting
+/// markup (bold, links, headings, etc.) it uses `ActivityPubHTMLVisitor` to render it;
+/// otherwise it falls back to the plain-text path that handles paragraph splitting and
+/// URL autolinking. This lets users write plain text naturally while still supporting
+/// markdown for those who use it.
 import Foundation
 import Markdown
 

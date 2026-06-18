@@ -1,3 +1,15 @@
+/// Generic ActivityPub object dereferencing.
+///
+/// ``fetchRemoteObject(uri:)`` is used by inbox handlers and ``KeyManager`` whenever the
+/// server needs to resolve an ActivityPub URI to its JSON-LD document: looking up an
+/// actor's profile, reading the full object of a `Create` activity, etc.
+///
+/// The function sends `Accept: application/activity+json` and enforces a 10-second timeout.
+/// It does not sign the outbound request; signatures are only required for inbox `POST`
+/// requests, not for `GET` fetches in the base ActivityPub spec.
+///
+/// On Linux Lambda the `FoundationNetworking` module provides `URLSession`; the conditional
+/// import at the top of this file ensures the same source compiles on both platforms.
 import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -5,8 +17,11 @@ import FoundationNetworking
 
 /// Errors that can occur when fetching a remote ActivityPub object.
 public enum FetchRemoteObjectError: Error {
+    /// The URI string could not be parsed into a `URL`.
     case invalidUri(String)
+    /// The server returned a non-2xx status code. Associated values: (uri, statusCode).
     case fetchFailed(String, Int)
+    /// The response body was not a JSON object.
     case invalidJSON(String)
 }
 

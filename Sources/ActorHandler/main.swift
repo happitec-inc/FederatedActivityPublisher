@@ -1,3 +1,21 @@
+/// Lambda handler for `GET /users/{username}`.
+///
+/// This is the ActivityPub actor endpoint. Mastodon and other AP clients fetch it
+/// to discover the actor's public key, inbox URL, and profile metadata. Browsers
+/// get a 302 redirect to the human-readable profile page at `/@{username}`.
+///
+/// Content negotiation: requests that accept `text/html` (and don't explicitly
+/// ask for `application/activity+json` or `application/ld+json`) are redirected
+/// to `https://{serverDomain}/@{username}`. All other requests receive the actor
+/// JSON-LD document with `content-type: application/activity+json`.
+///
+/// The actor JSON-LD is built by `buildActorJSONLD` in `ActivityPubCore`. It uses
+/// both `SERVER_DOMAIN` (the API host, `activity.happitec.com`) and `HANDLE_DOMAIN`
+/// (the WebFinger handle domain, `happitec.com`) to construct the correct `@`
+/// address and WebFinger subject claim.
+///
+/// Both domains are required environment variables; the handler fatally exits at
+/// cold-start if either is absent.
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import ActivityPubCore

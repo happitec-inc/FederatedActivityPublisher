@@ -1,3 +1,17 @@
+/// Remote actor public key resolution for HTTP Signature verification.
+///
+/// When the inbox Lambda receives a signed `POST`, it extracts the `keyId` from the
+/// `Signature` header and calls ``KeyManager/getPublicKey(keyId:store:)`` to get the
+/// corresponding RSA public key. ``HTTPSignature/verify(signatureHeader:method:path:headers:body:publicKeyPem:)``
+/// then uses that key to check the signature.
+///
+/// Keys are cached as ``RemoteActor`` records in DynamoDB with a 24-hour TTL. If verification
+/// fails on a cached key (possible after key rotation on the remote side), the inbox handler
+/// calls ``KeyManager/refreshKey(keyId:store:)`` to force a fresh fetch before retrying.
+///
+/// Actor documents are fetched with `Accept: application/activity+json` and a 10-second
+/// timeout. The same `FoundationNetworking` conditional import pattern as ``FetchRemoteObject``
+/// applies here for Linux Lambda compatibility.
 import Foundation
 
 #if canImport(FoundationNetworking)

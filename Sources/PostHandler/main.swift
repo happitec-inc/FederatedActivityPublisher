@@ -1,3 +1,19 @@
+/// Lambda handler for `POST /api/v1/statuses` — the endpoint that creates a new status.
+///
+/// This is the iOS client's write path for publishing posts. Requests arrive from the
+/// happitec.com CloudFront distribution, which forwards the `Authorization` header from
+/// the iOS client. The handler accepts either a bearer token or a session cookie (with a
+/// matching CSRF token); the iOS client always uses bearer auth.
+///
+/// On success, the handler:
+/// 1. Converts the plain-text/Markdown body to HTML via `convertTextToHTML`.
+/// 2. Stores the status in DynamoDB.
+/// 3. Builds a `Create(Note)` ActivityPub activity and fans it out to follower inboxes via SQS.
+/// 4. If the status quotes a remote post, enqueues a `QuoteRequest` activity to the quoted
+///    actor's inbox and records the approval state as `pending`.
+///
+/// The signing key used for session/CSRF validation is fetched from SSM Parameter Store on
+/// first invocation and cached for the lifetime of the Lambda execution environment.
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import AWSSSM
@@ -21,9 +37,15 @@ let store = try await DynamoDBStore()
 let sqsClient = try await SQSDeliveryClient()
 let ssmClient = try await SSMClient()
 
-/// Cached signing key -- initialized once per Lambda cold start.
+/// Signing key cached across invocations within the same Lambda execution environment.
+/// Populated on the first request and reused on subsequent warm invocations.
 nonisolated(unsafe) var cachedSigningKey: String?
 
+/// Returns the session signing key, fetching it from SSM on the first call.
+/// The key is stored in SSM Parameter Store as a SecureString at `{ssmKeyPrefix}/session-signing-key`.
+///
+/// - Returns: The plaintext signing key.
+/// - Throws: A fatal error if the parameter is missing or empty; SSM errors are propagated.
 func getSigningKey() async throws -> String {
     if let key = cachedSigningKey { return key }
     let output = try await ssmClient.getParameter(input: .init(
@@ -388,7 +410,18 @@ let runtime = LambdaRuntime {
     }
 }
 
-/// Build a Mastodon-compatible Status JSON response.
+/// Returns a Mastodon-compatible status JSON string for the given status.
+///
+/// The shape matches the Mastodon `Status` entity so the iOS client (and any
+/// Mastodon-compatible client) can deserialize the create-status response directly.
+/// Media attachments are inlined as a JSON array; optional fields (`spoiler_text`,
+/// `language`, `in_reply_to_id`, `quoted_status_uri`, `quote_approval_state`) are
+/// serialized as JSON `null` when absent.
+///
+/// - Parameters:
+///   - status: The stored status to serialize.
+///   - serverDomain: The server's canonical domain (e.g. `activity.happitec.com`).
+/// - Returns: A JSON string.
 func buildStatusResponse(status: Status, serverDomain: String) -> String {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
@@ -417,6 +450,10 @@ func buildStatusResponse(status: Status, serverDomain: String) -> String {
     """
 }
 
+/// Maps a MIME content type to the Mastodon attachment type string.
+///
+/// - Parameter contentType: A MIME type string (e.g. `image/jpeg`).
+/// - Returns: One of `"image"`, `"video"`, `"audio"`, or `"unknown"`.
 func mediaTypeFromContentType(_ contentType: String) -> String {
     if contentType.hasPrefix("image/") { return "image" }
     if contentType.hasPrefix("video/") { return "video" }
@@ -424,7 +461,9 @@ func mediaTypeFromContentType(_ contentType: String) -> String {
     return "unknown"
 }
 
+/// Errors specific to the post-creation path.
 enum PostError: Error {
+    /// JSON serialization of the `QuoteRequest` activity failed.
     case encodingFailed
 }
 

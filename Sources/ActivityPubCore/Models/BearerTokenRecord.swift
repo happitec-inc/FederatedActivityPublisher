@@ -1,10 +1,18 @@
+/// A bearer token stored in DynamoDB, used to authenticate API requests.
+///
+/// Token records live under `PK=TOKEN#<sha256-hex>`, `SK=TOKEN` in the single-table design.
+/// They are written by the `ActivityProvisioner` CLI (and the `provision-actor` workflow) and
+/// read by the authentication middleware on every protected API call. The raw token string is
+/// never stored; only its SHA-256 hex digest appears in the key. Expiry is enforced by comparing
+/// `ttl` against the current time; DynamoDB's TTL deletion is eventually consistent and cannot be
+/// used as a hard gate.
 import AWSDynamoDB
 import Foundation
 
-/// A stored bearer token record from DynamoDB.
+/// A stored bearer token record.
 ///
-/// Maps to the `TOKEN#<sha256-hex>` entity in the single-table design.
-/// The raw token is never stored; only its SHA-256 hash appears as the partition key.
+/// Keyed by `PK=TOKEN#{sha256-hex}`, `SK=TOKEN`. The raw token string is never stored;
+/// only its SHA-256 hex digest appears in the partition key.
 public struct BearerTokenRecord: Sendable {
     /// The authenticated username this token belongs to.
     public let username: String
@@ -18,6 +26,14 @@ public struct BearerTokenRecord: Sendable {
     /// Human-readable description (e.g. "provisioned via workflow").
     public let description: String?
 
+    /// Create a BearerTokenRecord with the given fields.
+    ///
+    /// - Parameters:
+    ///   - username: The username this token authenticates.
+    ///   - scope: Space-separated OAuth-compatible scope string (e.g. `"read write"`).
+    ///   - ttl: Expiry as Unix epoch seconds.
+    ///   - createdAt: ISO 8601 creation timestamp.
+    ///   - description: Free-text note about how the token was issued.
     public init(
         username: String,
         scope: String,
@@ -33,6 +49,9 @@ public struct BearerTokenRecord: Sendable {
     }
 
     /// Parse a BearerTokenRecord from a DynamoDB item.
+    ///
+    /// - Parameter item: The raw DynamoDB attribute map from a `GetItem` call.
+    /// - Returns: A populated record, or `nil` if `username`, `scope`, or `ttl` are missing.
     public static func fromDynamoDB(
         _ item: [String: DynamoDBClientTypes.AttributeValue]
     ) -> BearerTokenRecord? {

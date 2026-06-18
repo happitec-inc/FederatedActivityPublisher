@@ -1,3 +1,15 @@
+/// Sanitizes untrusted HTML received from remote ActivityPub servers before it is stored or
+/// rendered on the web profile.
+///
+/// Inbound `Note` content arrives as arbitrary HTML from Mastodon and other servers.
+/// `InboxHandler` passes that content through ``HTMLSanitizer/sanitize(_:)`` before writing
+/// it to DynamoDB, so the stored value is always safe to embed in the profile page without
+/// further escaping.
+///
+/// The sanitizer uses a tag allowlist rather than a blocklist: unknown tags are stripped
+/// (their text content is kept), and only `href` on `<a>` and known Mastodon `class` values
+/// on `<span>` are preserved. All `<a>` tags gain `rel="nofollow noopener noreferrer"` and
+/// only `http://` / `https://` hrefs are kept.
 import Foundation
 
 /// Sanitizes untrusted HTML for safe storage and display.

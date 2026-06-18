@@ -1,3 +1,22 @@
+/// Lambda handler for `GET /profile/{proxy+}`.
+///
+/// This is the human-readable side of the server. It renders HTML for browsers
+/// and is the destination for the 302 redirect that `ActorHandler` sends when
+/// it detects a browser request.
+///
+/// The proxy path has two shapes:
+/// - `/{username}` — renders `ProfilePage`, which shows the actor's bio, profile
+///   fields, stats, and recent public/unlisted posts.
+/// - `/{username}/{statusId}` — renders `PostPage`, which shows a single post.
+///   Private and direct-visibility posts return 404 rather than their content.
+///
+/// HTML is produced using the `Elementary` DSL. Both page types include Open Graph
+/// and Twitter Card meta tags so link previews work in social apps. The actor JSON-LD
+/// URL is emitted as a `<link rel="alternate">` so AP clients that encounter the
+/// profile URL can still find the machine-readable actor document.
+///
+/// `SERVER_DOMAIN` is required. `INSTANCE_TITLE` is optional and defaults to
+/// `"FederatedActivityPublisher"`.
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import ActivityPubCore
@@ -49,6 +68,13 @@ let runtime = LambdaRuntime {
 
 // MARK: - Profile Page
 
+/// Fetch and render the actor's profile page, showing recent public and unlisted posts.
+///
+/// - Parameters:
+///   - actor: The actor whose profile is being rendered.
+///   - context: The Lambda execution context, used for logging.
+/// - Returns: A 200 response with `text/html` content and a 5-minute public cache TTL.
+/// - Throws: Any DynamoDB error from `store.listStatuses`.
 func renderProfilePage(actor: Actor, context: LambdaContext) async throws -> APIGatewayResponse {
     // Fetch recent public/unlisted statuses
     let (allStatuses, _) = try await store.listStatuses(username: actor.username, limit: 20)
@@ -69,6 +95,19 @@ func renderProfilePage(actor: Actor, context: LambdaContext) async throws -> API
 
 // MARK: - Post Page
 
+/// Render a single-post page for the given status ID.
+///
+/// Private and direct-visibility posts return 404 rather than their content,
+/// so this endpoint never exposes non-public content to browsers. The post page
+/// uses a one-year cache TTL because post content is immutable once published.
+///
+/// - Parameters:
+///   - actor: The actor who owns the status.
+///   - statusId: The ID of the status to render.
+///   - context: The Lambda execution context, used for logging.
+/// - Returns: A 200 response with `text/html`, or a 404 response if the status
+///   doesn't exist or is private/direct.
+/// - Throws: Any DynamoDB error from `store.getStatus`.
 func renderPostPage(actor: Actor, statusId: String, context: LambdaContext) async throws -> APIGatewayResponse {
     guard let status = try await store.getStatus(username: actor.username, id: statusId) else {
         return notFoundResponse(title: "Not Found", message: "This post does not exist.")
@@ -94,6 +133,7 @@ func renderPostPage(actor: Actor, statusId: String, context: LambdaContext) asyn
 
 // MARK: - Error Response
 
+/// Returns a 404 HTML response using `ErrorPage`. The response is not cached (`no-cache`).
 func notFoundResponse(title: String, message: String) -> APIGatewayResponse {
     let page = ErrorPage(title: title, message: message, domain: serverDomain)
     let html = page.render()
@@ -107,6 +147,7 @@ func notFoundResponse(title: String, message: String) -> APIGatewayResponse {
     )
 }
 
+/// Returns a 500 HTML response using `ErrorPage`. The response is not cached (`no-cache`).
 func serverErrorResponse(title: String, message: String) -> APIGatewayResponse {
     let page = ErrorPage(title: title, message: message, domain: serverDomain)
     let html = page.render()
@@ -152,6 +193,12 @@ let sharedStyles = """
 
 // MARK: - Profile Page Component
 
+/// Full-page HTML document for an actor's profile.
+///
+/// Shows the actor's avatar, display name, bio, profile fields, follower/following/post
+/// counts, and up to 20 recent public or unlisted posts. Open Graph and Twitter Card
+/// meta tags are included for link previews. A `<link rel="alternate">` points AP
+/// clients to the machine-readable actor JSON-LD at `/users/{username}`.
 struct ProfilePage: HTMLDocument {
     var actor: Actor
     var statuses: [Status]
@@ -269,6 +316,11 @@ struct ProfilePage: HTMLDocument {
 
 // MARK: - Status Entry Component (for profile page)
 
+/// A single post entry rendered on the profile page.
+///
+/// Shows the content warning (if any), post HTML content, image attachments, and a
+/// metadata line with the publication date, like count, boost count, and quote count.
+/// The timestamp links to the individual post page.
 struct StatusEntry: HTML {
     var status: Status
     var domain: String
@@ -316,6 +368,16 @@ struct StatusEntry: HTML {
 
 // MARK: - Post Page Component
 
+/// Full-page HTML document for a single post.
+///
+/// Shows the author header (avatar + handle), content warning, post content, image
+/// attachments, publication timestamp, visibility label, and interaction counts.
+/// Open Graph and Twitter Card meta tags are included. The `og:image` is the first
+/// image attachment if present, falling back to the actor's avatar. The Twitter card
+/// type is `summary_large_image` when any image attachment is present.
+///
+/// A `<link rel="alternate">` points AP clients to the machine-readable status at
+/// `/users/{username}/statuses/{id}`.
 struct PostPage: HTMLDocument {
     var actor: Actor
     var status: Status
@@ -331,6 +393,10 @@ struct PostPage: HTMLDocument {
         [.class("latex-dark-auto")]
     }
 
+    /// The URL to use for `og:image` and `twitter:image`.
+    ///
+    /// Prefers the first image attachment, falls back to the actor's avatar.
+    /// An empty string means no image tag is emitted.
     var ogImage: String {
         // Use first image attachment if available, otherwise avatar
         if let attachments = status.attachments,
@@ -340,6 +406,7 @@ struct PostPage: HTMLDocument {
         return actor.avatarUrl ?? ""  // Empty string handled below — og:image only emitted if non-empty
     }
 
+    /// `"summary_large_image"` when the status has image attachments, `"summary"` otherwise.
     var twitterCardType: String {
         if let attachments = status.attachments,
            attachments.contains(where: { $0.isImage }) {
@@ -348,6 +415,7 @@ struct PostPage: HTMLDocument {
         return "summary"
     }
 
+    /// Post content stripped of HTML tags, truncated to 200 characters for use in meta descriptions.
     var descriptionText: String {
         let stripped = stripHTML(status.content)
         if stripped.count > 200 {
@@ -455,6 +523,7 @@ struct PostPage: HTMLDocument {
 
 // MARK: - Error Page Component
 
+/// Minimal error page used for 404 and 500 responses.
 struct ErrorPage: HTMLDocument {
     var errorTitle: String
     var message: String

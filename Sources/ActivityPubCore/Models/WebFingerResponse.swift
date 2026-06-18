@@ -1,3 +1,9 @@
+/// The JSON Resource Descriptor (JRD) returned by the WebFinger endpoint, and the link type it contains.
+///
+/// `WebFingerHandler` constructs a ``WebFingerResponse`` for each `GET /.well-known/webfinger`
+/// request. It always includes a `self` link pointing to the AP actor JSON and a profile-page
+/// link pointing to the HTML profile. The `happitec.com` CloudFront Function proxies the request
+/// here from the handle domain; see the project architecture notes for the two-domain setup.
 import Foundation
 
 /// A WebFinger (RFC 7033) response for actor discovery.
@@ -10,6 +16,11 @@ public struct WebFingerResponse: Codable, Sendable {
     /// Links to the actor's representations (ActivityPub JSON-LD, profile page, etc.).
     public let links: [WebFingerLink]
 
+    /// Create a WebFingerResponse.
+    ///
+    /// - Parameters:
+    ///   - subject: The `acct:` URI that was queried (e.g. `acct:alice@happitec.com`).
+    ///   - links: One or more links describing the actor's representations.
     public init(subject: String, links: [WebFingerLink]) {
         self.subject = subject
         self.links = links
@@ -29,6 +40,13 @@ public struct WebFingerLink: Codable, Sendable {
     /// URI template for parameterized lookups.
     public let template: String?
 
+    /// Create a WebFingerLink.
+    ///
+    /// - Parameters:
+    ///   - rel: Link relation type (e.g. `"self"`, `"http://webfinger.net/rel/profile-page"`).
+    ///   - type: MIME type of the linked resource (e.g. `"application/activity+json"`).
+    ///   - href: Absolute URL of the linked resource.
+    ///   - template: URI template string, used for OStatus subscription links; mutually exclusive with `href`.
     public init(rel: String, type: String? = nil, href: String? = nil, template: String? = nil) {
         self.rel = rel
         self.type = type
@@ -36,7 +54,7 @@ public struct WebFingerLink: Codable, Sendable {
         self.template = template
     }
 
-    // Custom encoding to omit nil optional fields (no null values in JRD output)
+    /// Encode to JSON, omitting nil fields so the JRD output contains no null values.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(rel, forKey: .rel)

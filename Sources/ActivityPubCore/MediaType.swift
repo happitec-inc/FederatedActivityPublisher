@@ -1,3 +1,15 @@
+/// Determines the true content type of uploaded media files.
+///
+/// The swift-openapi-generator client labels every multipart part `text/plain` when the
+/// OpenAPI spec omits an `encoding` block. Because of that, `MediaUploadHandler` cannot
+/// trust the declared content type from the client and calls
+/// ``MediaType/contentType(forFileData:filename:declared:)`` instead. The function inspects
+/// the file's magic bytes first, falls back to the filename extension, and only accepts a
+/// declared type when it looks like a real media type rather than the `text/plain` placeholder.
+///
+/// ``MediaType/preferredExtension(forContentType:)`` is used by `MediaUploadHandler` when
+/// constructing the S3 storage key, so the key extension is always derived from the
+/// server-resolved type and never from client-supplied input.
 import Foundation
 
 /// Determines the true content type of uploaded media from its bytes.
@@ -54,6 +66,7 @@ public enum MediaType {
         return byExtension[ext]?.hasPrefix("image/") ?? false
     }
 
+    /// Extract the lowercased file extension from a filename or path, or `nil` if none is present.
     static func fileExtension(_ name: String) -> String? {
         guard let dot = name.lastIndex(of: "."), dot < name.endIndex else { return nil }
         let ext = name[name.index(after: dot)...]
@@ -67,23 +80,29 @@ public enum MediaType {
         byContentType[contentType.lowercased()] ?? "bin"
     }
 
+    /// Returns `true` when the string looks like a real image, video, or audio media type,
+    /// as opposed to `text/plain` or `application/octet-stream` placeholders.
     static func isConcreteMediaType(_ s: String) -> Bool {
         let lower = s.lowercased()
         return lower.hasPrefix("image/") || lower.hasPrefix("video/") || lower.hasPrefix("audio/")
     }
 
+    /// Maps file extensions (lowercase, no dot) to IANA media type strings.
     static let byExtension: [String: String] = [
         "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
         "webp": "image/webp", "heic": "image/heic", "heif": "image/heic",
         "mp4": "video/mp4", "mov": "video/quicktime",
     ]
 
+    /// Maps IANA media type strings (lowercase) to the preferred file extension for S3 key generation.
     static let byContentType: [String: String] = [
         "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp",
         "image/heic": "heic", "image/heif": "heic", "video/mp4": "mp4", "video/quicktime": "mov",
     ]
 
+    /// ISO base media file brands that identify HEIC/HEIF still images.
     static let heicBrands: Set<String> = ["heic", "heix", "heif", "hevc", "mif1", "msf1"]
+    /// ISO base media file brands that identify MP4 video containers.
     static let mp4Brands: Set<String> = ["mp42", "mp41", "isom", "iso2", "avc1", "M4V ", "dash"]
 }
 

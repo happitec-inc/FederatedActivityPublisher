@@ -1,3 +1,17 @@
+/// Lambda handler for the WebFinger discovery endpoint (`/.well-known/webfinger`).
+///
+/// WebFinger is the entry point to federation. When a Mastodon user searches for
+/// `@user@happitec.com`, their server hits `happitec.com/.well-known/webfinger` first.
+/// A CloudFront Function on `happitec.com` proxies that request here. This handler
+/// resolves the `acct:` URI to the actor's ActivityPub profile URL on the server domain.
+///
+/// The handle domain (`happitec.com`) and server domain (`activity.happitec.com`) are
+/// intentionally different: users are addressed as `@user@happitec.com` but their
+/// ActivityPub actor document lives at `activity.happitec.com/users/{username}`.
+///
+/// Required environment variables:
+/// - `SERVER_DOMAIN`: the ActivityPub server domain (e.g. `activity.happitec.com`)
+/// - `HANDLE_DOMAIN`: the user-facing handle domain (e.g. `happitec.com`)
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import ActivityPubCore
@@ -10,6 +24,8 @@ guard let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] el
     fatalError("HANDLE_DOMAIN environment variable is required")
 }
 
+/// DynamoDB-backed store used to check whether a given username actually exists
+/// before returning a WebFinger response.
 let store = try await DynamoDBStore()
 
 let runtime = LambdaRuntime {

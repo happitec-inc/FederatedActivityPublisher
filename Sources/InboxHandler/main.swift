@@ -1,3 +1,39 @@
+/// Lambda handler for `POST /users/{username}/inbox` — the ActivityPub inbound federation endpoint.
+///
+/// This is the entry point for all activities sent by remote servers: follows, likes,
+/// boosts, replies, quote requests, and actor updates. API Gateway routes the request here
+/// after CloudFront forwards it, and this Lambda is the only place that verifies inbound
+/// HTTP Signatures before touching DynamoDB.
+///
+/// ## Request pipeline
+///
+/// 1. Verify the actor exists locally.
+/// 2. Decode the raw body (handles base64-encoded payloads from API Gateway).
+/// 3. Parse and verify the HTTP Signature using the remote actor's public key from
+///    `KeyManager` (which caches keys in DynamoDB). On first failure, the key is refreshed
+///    in case the remote server rotated its key pair.
+/// 4. Confirm that the `actor` field in the JSON body matches the key owner — prevents one
+///    server from impersonating another.
+/// 5. Dedup via `storeReceivedActivity` (DynamoDB conditional write); duplicate activities
+///    return 202 immediately.
+/// 6. Dispatch to the appropriate `handle*` function by `type`.
+///
+/// ## Activity types handled
+///
+/// - `Follow` — stores follower, sends Accept back via SQS.
+/// - `Undo` — reverses a Follow, Like, or Announce.
+/// - `Like` / `Announce` — records an interaction and increments the counter.
+/// - `Create` — stores inbound Note replies to local statuses.
+/// - `Update` — updates a stored reply or a cached remote actor profile.
+/// - `Delete` — removes a reply, interaction, or follower (actor self-deletion).
+/// - `QuoteRequest` — evaluates a quote approval policy and sends Accept or Reject.
+/// - `Accept` / `Reject` — handles responses to outbound QuoteRequests.
+/// - `Block`, `Move`, `Add`, `Remove`, `Flag`, `EmojiReact` — acknowledged but not stored.
+///
+/// ## Key dependencies
+///
+/// `ActivityPubCore`: `DynamoDBStore`, `SQSDeliveryClient`, `KeyManager`,
+/// `HTTPSignature`, `HTMLSanitizer`, `shouldAcceptQuoteRequest`, `buildNoteJSON`.
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import ActivityPubCore
@@ -316,6 +352,25 @@ let runtime = LambdaRuntime {
 
 // MARK: - Follow Handling
 
+/// Handles an inbound Follow activity.
+///
+/// Stores the remote actor as a follower of `username`, increments the follower count if
+/// the follow is new, then enqueues an Accept activity back to the remote actor's inbox
+/// via SQS. The Accept wraps the original Follow JSON as its `object`, which Mastodon
+/// requires for correlation.
+///
+/// The remote actor's inbox URL comes from the DynamoDB cache populated during HTTP
+/// Signature verification. On a cache miss (rare), the key is refreshed to repopulate it.
+///
+/// - Parameters:
+///   - json: The parsed activity JSON from the request body.
+///   - username: The local actor receiving the follow.
+///   - actorUri: The URI of the remote actor sending the Follow.
+///   - activityId: The `id` of the Follow activity, embedded in the Accept's `object`.
+///   - keyId: The HTTP Signature key ID, used to look up the remote actor's cached profile.
+///   - bodyString: The raw body string, re-serialized into the Accept's `object`.
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted on success or if the actor cannot be resolved.
 func handleFollow(
     json: [String: Any],
     username: String,
@@ -401,6 +456,25 @@ func handleFollow(
 
 // MARK: - Undo Handling
 
+/// Handles an inbound Undo activity.
+///
+/// The `object` of an Undo can be an inline dict or a bare URI string. This handler
+/// infers the undone activity type from the `object.type` field, or assumes `Follow`
+/// when the object is a bare URI (the common case from Mastodon).
+///
+/// Supported inner types:
+/// - `Follow`: removes the follower record and decrements the follower count.
+/// - `Like`: removes the Like interaction and decrements the likes counter on the status.
+/// - `Announce`: removes the Announce interaction and decrements the boosts counter.
+///
+/// Unknown inner types are logged and accepted without error.
+///
+/// - Parameters:
+///   - json: The parsed activity JSON.
+///   - username: The local actor whose follower/interaction data is being modified.
+///   - actorUri: The remote actor performing the Undo.
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted in all cases.
 func handleUndo(
     json: [String: Any],
     username: String,
@@ -489,6 +563,18 @@ func handleUndo(
 
 // MARK: - Like Handling
 
+/// Handles an inbound Like activity.
+///
+/// Parses the `object` URI, verifies it refers to a local status, stores the interaction
+/// in DynamoDB (conditional write for dedup), and increments the like count on first write.
+/// Likes against non-local or non-existent statuses are silently accepted.
+///
+/// - Parameters:
+///   - json: The parsed activity JSON.
+///   - username: The local actor whose inbox received the Like.
+///   - actorUri: The remote actor who sent the Like.
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted, or 400 if the `object` field is missing.
 func handleLike(
     json: [String: Any],
     username: String,
@@ -551,6 +637,18 @@ func handleLike(
 
 // MARK: - Announce Handling
 
+/// Handles an inbound Announce (boost) activity.
+///
+/// Identical flow to `handleLike`: parses the object URI, verifies it is a local status,
+/// stores the interaction, and increments the boost count on first write. Announces for
+/// non-local or non-existent statuses are silently accepted.
+///
+/// - Parameters:
+///   - json: The parsed activity JSON.
+///   - username: The local actor whose inbox received the Announce.
+///   - actorUri: The remote actor who boosted.
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted, or 400 if the `object` field is missing.
 func handleAnnounce(
     json: [String: Any],
     username: String,
@@ -609,6 +707,23 @@ func handleAnnounce(
 
 // MARK: - Create Handling
 
+/// Handles an inbound Create activity.
+///
+/// Only `Create` activities whose `object` is an inline `Note` with an `inReplyTo` pointing
+/// at one of our local statuses are stored. All other Create types (non-Note objects,
+/// replies to remote statuses) are accepted and discarded. This keeps the inbox focused:
+/// the server only stores content that belongs in a thread it hosts.
+///
+/// The reply content is sanitized by `HTMLSanitizer` before storage. The reply count on
+/// the parent status is incremented on first write.
+///
+/// - Parameters:
+///   - json: The parsed activity JSON.
+///   - username: The local actor whose inbox received the Create.
+///   - actorUri: The remote actor who created the Note.
+///   - bodyString: The raw request body, stored as the canonical representation of the reply.
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted in all cases (including silently dropped creates).
 func handleCreate(
     json: [String: Any],
     username: String,
@@ -706,6 +821,23 @@ func handleCreate(
 
 // MARK: - Update Handling
 
+/// Handles an inbound Update activity.
+///
+/// Two object types are handled:
+/// - `Note`: updates a stored reply if `inReplyTo` points at a local status. The update
+///   is rejected if the acting actor does not own the reply (ownership check in the store).
+/// - `Person` / `Service` / `Application` / `Organization`: updates the cached remote
+///   actor profile in DynamoDB, including the public key, inbox URL, and shared inbox.
+///   The actor can only update its own profile (`actorUri == object.id`).
+///
+/// Updates for other object types are accepted and logged without storing.
+///
+/// - Parameters:
+///   - json: The parsed activity JSON.
+///   - username: The local actor whose inbox received the Update.
+///   - actorUri: The remote actor sending the Update.
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted in all cases; 403 if an actor tries to update another actor's profile.
 func handleUpdate(
     json: [String: Any],
     username: String,
@@ -828,6 +960,30 @@ func handleUpdate(
 
 // MARK: - Delete Handling
 
+/// Handles an inbound Delete activity.
+///
+/// The `object` field may be a Tombstone dict or a bare URI string. This handler
+/// tries three interpretation branches in order:
+///
+/// 1. **Local status URI** (`parseStatusUri` matches): the object is one of our status
+///    URIs. This is unusual — remote servers normally send `Undo` to retract a Like or
+///    Announce — but can occur when a remote server purges objects retroactively. The
+///    handler tries to remove a Like interaction, an Announce interaction, and a reply,
+///    decrementing the relevant counters for any that existed.
+///
+/// 2. **Actor self-deletion** (`actorUri == objectUri`): the remote server is signalling
+///    that an actor account has been deleted. The follower record is removed and the count
+///    decremented. Any stored reply by that actor is also removed.
+///
+/// 3. **Unknown remote URI**: may be a remote Note (a reply stored here). The handler
+///    tries to remove it as a reply; if nothing matches, the Delete is logged and accepted.
+///
+/// - Parameters:
+///   - json: The parsed activity JSON.
+///   - username: The local actor whose inbox received the Delete.
+///   - actorUri: The remote actor sending the Delete.
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted in all cases.
 func handleDelete(
     json: [String: Any],
     username: String,
@@ -946,9 +1102,15 @@ func handleDelete(
 
 // MARK: - Helpers
 
-/// Parse a status URI like `https://activity.happitec.com/users/{username}/statuses/{id}`
-/// or `https://happitec.com/users/{username}/statuses/{id}` into (username, statusId).
-/// Returns nil if the URI doesn't match our domain pattern.
+/// Parses a status URI into its username and status ID components.
+///
+/// Accepts URIs on either the server domain (`activity.happitec.com`) or the handle
+/// domain (`happitec.com`), both of which resolve to local statuses. Returns `nil` for
+/// any URI that doesn't match the expected `https://{domain}/users/{username}/statuses/{id}`
+/// pattern.
+///
+/// - Parameter uri: A fully-qualified status URI.
+/// - Returns: A tuple of `(username, statusId)`, or `nil` if the URI is not local.
 func parseStatusUri(_ uri: String) -> (username: String, statusId: String)? {
     // Match both serverDomain and handleDomain
     let patterns = [
@@ -966,6 +1128,13 @@ func parseStatusUri(_ uri: String) -> (username: String, statusId: String)? {
     return nil
 }
 
+/// Extracts the object URI from an ActivityPub JSON object.
+///
+/// The `object` field may be a bare URI string or an inline object containing an `id`.
+/// Returns `nil` if neither form is present.
+///
+/// - Parameter json: An activity or nested object dictionary.
+/// - Returns: The URI string, or `nil`.
 func extractObjectUri(from json: [String: Any]) -> String? {
     if let objectStr = json["object"] as? String {
         return objectStr
@@ -976,12 +1145,27 @@ func extractObjectUri(from json: [String: Any]) -> String? {
     return nil
 }
 
+/// Errors thrown internally by InboxHandler.
 enum InboxError: Error {
+    /// JSON serialization to a UTF-8 string failed, which should not happen in practice.
     case encodingFailed
 }
 
 // MARK: - Accept Handling
 
+/// Handles an inbound Accept activity.
+///
+/// The only Accept type that requires action is `Accept<QuoteRequest>`, which means
+/// a remote server approved one of our outbound quote posts. That case is delegated to
+/// `handleAcceptQuoteRequest`. All other Accept types (including `Accept<Follow>`, which
+/// is handled implicitly by the Follow flow) are acknowledged and logged.
+///
+/// - Parameters:
+///   - json: The parsed activity JSON.
+///   - username: The local actor whose inbox received the Accept.
+///   - actorUri: The remote actor sending the Accept.
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted in all cases.
 func handleAcceptActivity(
     json: [String: Any],
     username: String,
@@ -1019,6 +1203,22 @@ func handleAcceptActivity(
     )
 }
 
+/// Handles an `Accept<QuoteRequest>` — a remote server approving one of our quote posts.
+///
+/// The `instrument` field in the embedded QuoteRequest is the URI of our quoting status.
+/// After verifying that the accepting actor is from the same origin as the quoted post
+/// (to prevent forgery), the quote approval state is updated to `"accepted"` in DynamoDB.
+///
+/// Once accepted, the handler re-federates an `Update` activity for the quoting Note to
+/// all followers. The Note now includes the `quoteUri` field that was withheld while the
+/// quote was pending, so followers' clients can render the inline quote.
+///
+/// - Parameters:
+///   - objectDict: The inline QuoteRequest object from the Accept's `object` field.
+///   - username: The local actor whose inbox received the Accept.
+///   - actorUri: The remote actor sending the Accept (must be from the quoted post's origin).
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted in all cases.
 func handleAcceptQuoteRequest(
     objectDict: [String: Any],
     username: String,
@@ -1118,6 +1318,17 @@ func handleAcceptQuoteRequest(
 
 // MARK: - Reject Handling
 
+/// Handles an inbound Reject activity.
+///
+/// The only Reject type that requires action is `Reject<QuoteRequest>`, delegated to
+/// `handleRejectQuoteRequest`. All other Reject types are accepted and logged.
+///
+/// - Parameters:
+///   - json: The parsed activity JSON.
+///   - username: The local actor whose inbox received the Reject.
+///   - actorUri: The remote actor sending the Reject.
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted in all cases.
 func handleRejectActivity(
     json: [String: Any],
     username: String,
@@ -1152,6 +1363,19 @@ func handleRejectActivity(
     )
 }
 
+/// Handles a `Reject<QuoteRequest>` — a remote server declining one of our quote posts.
+///
+/// The same origin-check as `handleAcceptQuoteRequest` applies: the rejecting actor must
+/// be from the same origin as the quoted post. On success, the quote approval state is
+/// updated to `"rejected"` in DynamoDB. The quoting Note is not re-federated on rejection
+/// because the `quoteUri` was never included in the distributed copy.
+///
+/// - Parameters:
+///   - objectDict: The inline QuoteRequest object from the Reject's `object` field.
+///   - username: The local actor whose inbox received the Reject.
+///   - actorUri: The remote actor sending the Reject (must be from the quoted post's origin).
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted in all cases.
 func handleRejectQuoteRequest(
     objectDict: [String: Any],
     username: String,
@@ -1216,6 +1440,32 @@ func handleRejectQuoteRequest(
 
 // MARK: - QuoteRequest Handling
 
+/// Handles an inbound QuoteRequest (FEP-044f) from a remote server.
+///
+/// A QuoteRequest means a remote actor wants to quote one of our local statuses. The
+/// `object` field is the URI of the status being quoted; `instrument` is the URI of the
+/// remote actor's quoting post.
+///
+/// The handler:
+/// 1. Verifies the quoted status is local and exists.
+/// 2. Checks whether the requesting actor is a follower.
+/// 3. Evaluates the actor's quote approval policy via `shouldAcceptQuoteRequest`.
+///    The policy is currently hardcoded to `"public"` (auto-accept from anyone).
+/// 4. Builds an Accept or Reject activity (with the FEP-044f `@context` extension) and
+///    enqueues it for delivery to the remote actor's inbox.
+/// 5. On accept, increments the quotes count on the quoted status.
+///
+/// If the remote actor's inbox URL is not in the local cache, the handler falls back to
+/// fetching their actor profile directly before giving up.
+///
+/// - Parameters:
+///   - json: The parsed activity JSON.
+///   - username: The local actor whose inbox received the QuoteRequest.
+///   - actorUri: The remote actor requesting the quote.
+///   - activityId: The `id` of the QuoteRequest, echoed back in the response for correlation.
+///   - context: Lambda context for logging.
+/// - Returns: 202 Accepted in all cases. If the remote inbox cannot be resolved, the
+///   Accept/Reject is not delivered, but the request is still acknowledged.
 func handleQuoteRequest(
     json: [String: Any],
     username: String,

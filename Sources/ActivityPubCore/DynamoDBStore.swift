@@ -1,3 +1,35 @@
+/// Single-table DynamoDB persistence layer for the ActivityPub server.
+///
+/// Every Lambda handler that needs to read or write state depends on this file. It covers
+/// actors, statuses, followers, received activities (with dedup), interactions (likes and
+/// boosts), inbound replies, remote actor caching, media metadata, WebAuthn passkeys and
+/// challenges, one-time registration tokens, and bearer tokens.
+///
+/// ## Single-table key scheme
+///
+/// All records share one DynamoDB table (name from the `TABLE_NAME` environment variable).
+/// The primary key is `PK` (partition) + `SK` (sort). A single GSI (`GSI1`) with keys
+/// `GSI1PK` / `GSI1SK` supports range queries that would otherwise require a scan.
+///
+/// | Entity | PK | SK | GSI1PK | GSI1SK |
+/// |---|---|---|---|---|
+/// | Local actor profile | `ACTOR#{username}` | `PROFILE` | - | - |
+/// | Follower | `ACTOR#{username}` | `FOLLOWER#{actorUri}` | `FOLLOWERS#{username}` | acceptedAt |
+/// | Status | `ACTOR#{username}` | `STATUS#{ulid}` | - | - |
+/// | Activity dedup | `ACTIVITY_DEDUP` | `{activityId}` | - | - |
+/// | Received activity | `ACTOR#{username}` | `ACTIVITY#{type}#{ulid}` | - | - |
+/// | Interaction | `ACTOR#{username}` | `INTERACTION#{type}#{actorUri}#{objectUri}` | - | - |
+/// | Inbound reply | `ACTOR#{username}` | `REPLY#{objectUri}` | `REPLIES#{inReplyTo}` | createdAt |
+/// | Remote actor cache | `REMOTE_ACTOR#{actorUri}` | `PROFILE` | - | - |
+/// | Media metadata | `MEDIA#{id}` | `META` | - | - |
+/// | Passkey credential | `PASSKEY#{credentialId}` | `META` | - | - |
+/// | WebAuthn challenge | `PASSKEY_CHALLENGE#{challengeId}` | `META` | - | - |
+/// | Registration token | `REGISTRATION_TOKEN#{token}` | `META` | - | - |
+/// | Bearer token | `TOKEN#{sha256hash}` | `META` | - | - |
+///
+/// All time-limited records (remote actor cache, activity dedup, challenges, tokens) use
+/// DynamoDB TTL on the `ttl` attribute. Because TTL deletion is eventually consistent,
+/// methods that care about expiry check the TTL value manually before returning a record.
 import AWSDynamoDB
 import Crypto
 import Foundation

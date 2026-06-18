@@ -1,3 +1,13 @@
+/// Lambda handler for `GET /api/v1/accounts/verify_credentials` — the endpoint that returns
+/// the authenticated account's own profile data.
+///
+/// This is the first request the iOS client makes after login to populate the profile-editing
+/// form. It returns a `CredentialAccount` JSON object, which extends the standard Mastodon
+/// `Account` with a `source` object that carries the raw (unrendered) bio text and profile
+/// field values. This lets the client pre-populate text fields without reverse-rendering HTML.
+///
+/// Authentication is bearer-token only. The handler reads from DynamoDB (`DynamoDBStore`)
+/// but does not write to it or touch S3 or SQS.
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import AWSSSM
@@ -80,10 +90,13 @@ let runtime = LambdaRuntime {
     }
 }
 
-/// Build the `CredentialAccount` JSON response for `GET /api/v1/accounts/verify_credentials`.
+/// Returns the `CredentialAccount` JSON response for `GET /api/v1/accounts/verify_credentials`.
 ///
-/// Includes a `source` object carrying the raw (unrendered) bio and field values so
+/// The `source` object in the response carries the raw (unrendered) bio and field values so
 /// profile-editing clients can pre-populate edit forms without reverse-rendering HTML.
+///
+/// - Parameter actor: The authenticated actor's record from DynamoDB.
+/// - Returns: A JSON string shaped like a Mastodon `CredentialAccount` entity.
 func buildCredentialAccountJSON(actor: Actor) -> String {
     // Parsed raw fields (stored values are already raw plain text).
     let rawFields = actor.fields.map(parseProfileFields) ?? []

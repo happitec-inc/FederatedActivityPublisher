@@ -19,6 +19,15 @@ public struct RemoteActor: Codable, Sendable {
     /// ISO 8601 timestamp of when this cache entry was fetched.
     public let fetchedAt: String
 
+    /// Create a RemoteActor cache entry.
+    ///
+    /// - Parameters:
+    ///   - actorUri: The remote actor's canonical ActivityPub URI.
+    ///   - publicKeyPem: PEM-encoded RSA public key for HTTP Signature verification.
+    ///   - preferredUsername: The actor's `preferredUsername` field, if present in their AP profile.
+    ///   - inbox: The actor's personal inbox URL.
+    ///   - sharedInbox: The server's shared inbox URL, if advertised.
+    ///   - fetchedAt: ISO 8601 timestamp of when this record was fetched from the remote server.
     public init(
         actorUri: String,
         publicKeyPem: String,
@@ -66,7 +75,12 @@ public struct RemoteActor: Codable, Sendable {
         )
     }
 
-    /// Convert to DynamoDB attribute map.
+    /// Serialize to a DynamoDB attribute map for a `PutItem` call.
+    ///
+    /// Optional fields are omitted when nil so that no spurious null-equivalent string attributes
+    /// appear in the stored item.
+    ///
+    /// - Returns: A DynamoDB attribute map ready to pass to `PutItem`.
     public func toDynamoDB() -> [String: DynamoDBClientTypes.AttributeValue] {
         var item: [String: DynamoDBClientTypes.AttributeValue] = [
             "actorUri": .s(actorUri),
