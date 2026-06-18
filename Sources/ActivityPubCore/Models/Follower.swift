@@ -3,8 +3,8 @@
 /// Written by `InboxHandler` when it receives and accepts a Follow activity. The record is read
 /// by `PostHandler` when fanning out deliveries: it collects all followers for a given username
 /// and enqueues one ``DeliveryJob`` per follower (using `sharedInboxUrl` when available to
-/// reduce per-server request count). `UnfollowHandler` deletes the record when an Undo(Follow)
-/// arrives. The GSI on `FOLLOWERS#{username}` / `{acceptedAt}` supports time-ordered listing
+/// reduce per-server request count). `InboxHandler` deletes the record (in `handleUndo`) when an
+/// Undo(Follow) arrives. The GSI on `FOLLOWERS#{username}` / `{acceptedAt}` supports time-ordered listing
 /// for the followers collection endpoint.
 import Foundation
 

@@ -15,7 +15,7 @@
 /// |---|---|---|---|---|
 /// | Local actor profile | `ACTOR#{username}` | `PROFILE` | - | - |
 /// | Follower | `ACTOR#{username}` | `FOLLOWER#{actorUri}` | `FOLLOWERS#{username}` | acceptedAt |
-/// | Status | `ACTOR#{username}` | `STATUS#{ulid}` | - | - |
+/// | Status | `ACTOR#{username}` | `STATUS#{ulid}` | `ACTOR#{username}` | `PUBLISHED#{published}` |
 /// | Activity dedup | `ACTIVITY_DEDUP` | `{activityId}` | - | - |
 /// | Received activity | `ACTOR#{username}` | `ACTIVITY#{type}#{ulid}` | - | - |
 /// | Interaction | `ACTOR#{username}` | `INTERACTION#{type}#{actorUri}#{objectUri}` | - | - |
