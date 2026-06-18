@@ -1,3 +1,22 @@
+/// HTTP Signature signing and verification for ActivityPub federation.
+///
+/// ActivityPub servers authenticate federated requests using the Cavage HTTP Signatures
+/// draft (draft-cavage-http-signatures). This file implements both directions:
+///
+/// - **Inbound verification**: The inbox Lambda calls ``HTTPSignature/verify(signatureHeader:method:path:headers:body:publicKeyPem:)``
+///   to confirm that an incoming `POST` was signed by the actor's private key. The signer's
+///   public key is fetched and cached by ``KeyManager``.
+///
+/// - **Outbound signing**: The delivery Lambda calls ``HTTPSignature/sign(privateKeyPem:keyId:method:path:host:body:)``
+///   to produce the `Signature`, `Date`, `Digest`, and `Host` headers needed on each
+///   outbound `POST` to a remote inbox. The private key comes from SSM.
+///
+/// Signing uses RSA-SHA256 with PKCS#1 v1.5 padding via `swift-crypto`'s `_CryptoExtras`
+/// module (`_RSA.Signing`). The Digest header is `sha-256={base64(SHA-256(body))}` per the
+/// ActivityPub convention.
+///
+/// The Signature header is parsed with a regex (`(\w+)="([^"]*)"`) rather than a naive
+/// comma-split because some field values (like `keyId` URLs) can contain commas.
 import Crypto
 import _CryptoExtras
 import Foundation

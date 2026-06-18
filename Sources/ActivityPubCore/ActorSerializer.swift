@@ -1,3 +1,14 @@
+/// Builds the JSON-LD actor document served by the ActivityPub actor endpoints.
+///
+/// `ActorHandler` calls ``buildActorJSONLD(actor:serverDomain:handleDomain:)`` to respond to
+/// `GET /users/{username}` requests from remote ActivityPub servers (Mastodon, etc.).
+/// `ProfileUpdateHandler` calls it again when constructing the `Update` activity payload
+/// that notifies followers of profile changes.
+///
+/// The output is a single-line JSON-LD string embedding the ActivityStreams and
+/// security vocabularies, Mastodon-specific Toot extensions, profile field attachments,
+/// and the actor's RSA public key. It is passed directly as the HTTP response body,
+/// so no additional JSON encoding step is needed.
 import Foundation
 
 /// Build the full actor JSON-LD document for ActivityPub federation.

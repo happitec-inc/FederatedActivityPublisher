@@ -1,3 +1,21 @@
+/// Lambda handler for outbound ActivityPub delivery, triggered by SQS.
+///
+/// DeliverHandler is the second half of the federation pipeline. When any other handler
+/// needs to send an activity to a remote server (Accept a Follow, fan-out a new post,
+/// send an Update after quote approval, etc.), it enqueues a `DeliveryJob` onto SQS via
+/// `SQSDeliveryClient`. This Lambda processes those jobs.
+///
+/// For each SQS record the handler:
+/// 1. Decodes the `DeliveryJob` (target inbox URL, activity JSON, actor username).
+/// 2. Reads the actor's RSA private key from SSM Parameter Store (encrypted, per-actor).
+/// 3. Signs the outbound HTTP POST with an HTTP Signature using that private key.
+/// 4. Posts the activity JSON to the remote inbox.
+/// 5. On a 5xx response, throws so SQS retries; on a 4xx, logs and moves on (not retryable).
+///
+/// The SQS queue has a dead-letter queue for jobs that exhaust retries.
+///
+/// Key dependencies: `AWSSSM` (private key storage), `ActivityPubCore.HTTPSignature`
+/// (outbound signing), `ActivityPubCore.DeliveryJob` (job schema).
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import AWSSSM
@@ -12,6 +30,7 @@ guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] el
     fatalError("SERVER_DOMAIN environment variable is required")
 }
 let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "/activity/stage/keys/"
+/// SSM path prefix for actor private keys, with any trailing slash stripped.
 let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw
 
 let ssmClient = try await SSMClient()
@@ -103,7 +122,9 @@ let runtime = LambdaRuntime {
     }
 }
 
+/// Errors thrown by the delivery handler.
 enum DeliverError: Error {
+    /// The remote server returned a 5xx status code. SQS will retry the job.
     case serverError(Int, String)
 }
 

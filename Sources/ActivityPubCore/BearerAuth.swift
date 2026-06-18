@@ -1,3 +1,21 @@
+/// Bearer token and session authentication for the ActivityPub API.
+///
+/// Handlers that require authenticated access call ``authenticateBearer(_:store:ssmKeyPrefix:ssmClient:)``
+/// (for API clients) or ``authenticateRequest(authHeader:cookies:store:ssmKeyPrefix:ssmClient:signingKey:serverDomain:)``
+/// (for requests that may arrive from either API clients or browsers). The dual-auth entry
+/// point checks the `Authorization` header first and falls back to the `session` JWT cookie.
+///
+/// ## Token lookup order
+///
+/// 1. DynamoDB token record (keyed by SHA-256 hash of the raw token, TTL-enforced).
+/// 2. SSM legacy fallback: `{ssmKeyPrefix}/client-token` stores a `username:token` string.
+///    This path is retained during migration and logs a JSON event each time it is hit.
+///
+/// ## Dependencies
+///
+/// - ``DynamoDBStore`` for hashed token lookup.
+/// - AWS SSM (`AWSSSM`) for the legacy fallback, accessed with `withDecryption: true`.
+/// - ``JWTSession`` for cookie-based session verification.
 import AWSSSM
 import Foundation
 

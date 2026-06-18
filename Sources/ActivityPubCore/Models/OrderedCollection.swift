@@ -1,8 +1,17 @@
+/// An ActivityPub OrderedCollection or OrderedCollectionPage, returned by the outbox, followers,
+/// following, featured, and featured-tags endpoints.
+///
+/// The type is reused for both the root collection (which carries `totalItems` and a `first` page
+/// link) and individual pages (which carry `orderedItems` inline). Nil fields are omitted from the
+/// encoded JSON so the output is valid JSON-LD without null values. This struct is not persisted to
+/// DynamoDB; it is assembled on the fly by the relevant handler Lambda from data read from the
+/// ``Status`` or ``Follower`` tables.
 import Foundation
 
-/// An ActivityPub OrderedCollection, used for outbox, followers, following, featured, and featured tags endpoints.
+/// An ActivityPub `OrderedCollection` or `OrderedCollectionPage`.
 ///
-/// Nil optional fields are omitted during JSON encoding (no `null` values in the output).
+/// Used for the outbox, followers, following, featured, and featured-tags endpoints.
+/// Nil fields are omitted during encoding so the JSON-LD output contains no null values.
 public struct OrderedCollection: Codable, Sendable {
     /// The JSON-LD context URI.
     public let context: String
@@ -24,6 +33,16 @@ public struct OrderedCollection: Codable, Sendable {
         case id, type, totalItems, first, last, orderedItems
     }
 
+    /// Create an OrderedCollection.
+    ///
+    /// - Parameters:
+    ///   - context: JSON-LD context URI (typically `"https://www.w3.org/ns/activitystreams"`).
+    ///   - id: Canonical URI for this collection or page.
+    ///   - type: `"OrderedCollection"` for root collections, `"OrderedCollectionPage"` for pages.
+    ///   - totalItems: Total item count across all pages.
+    ///   - first: URI of the first page; `nil` for inline collections.
+    ///   - last: URI of the last page; `nil` for inline collections.
+    ///   - orderedItems: Inline items for non-paginated or page responses; `nil` for root collections.
     public init(
         context: String, id: String, type: String, totalItems: Int,
         first: String?, last: String?, orderedItems: [String]?
@@ -37,7 +56,7 @@ public struct OrderedCollection: Codable, Sendable {
         self.orderedItems = orderedItems
     }
 
-    // Custom encoding to omit nil optional fields
+    /// Encode to JSON, omitting nil optional fields so the output contains no null values.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(context, forKey: .context)
@@ -49,7 +68,13 @@ public struct OrderedCollection: Codable, Sendable {
         if let orderedItems { try container.encode(orderedItems, forKey: .orderedItems) }
     }
 
-    /// Empty collection for stubs (outbox root -- no orderedItems)
+    /// An empty root collection with no inline items, used for outbox stubs.
+    ///
+    /// Produces `totalItems: 0`, no `orderedItems` field, and no page links. Mastodon fetches the
+    /// outbox root only to discover `totalItems`; it does not require inline items here.
+    ///
+    /// - Parameter id: Canonical URI for the outbox collection.
+    /// - Returns: An `OrderedCollection` suitable for the outbox root response.
     public static func emptyRoot(id: String) -> OrderedCollection {
         OrderedCollection(
             context: "https://www.w3.org/ns/activitystreams",
@@ -58,7 +83,14 @@ public struct OrderedCollection: Codable, Sendable {
         )
     }
 
-    /// Empty collection for featured/featuredTags (includes empty orderedItems)
+    /// An empty collection with an explicit empty `orderedItems` array, used for `featured` and
+    /// `featuredTags` endpoints.
+    ///
+    /// Some ActivityPub clients expect `orderedItems` to be present (even if empty) on these
+    /// endpoints. Unlike ``emptyRoot(id:)``, this variant includes `"orderedItems":[]` in the output.
+    ///
+    /// - Parameter id: Canonical URI for the collection.
+    /// - Returns: An `OrderedCollection` with `orderedItems: []`.
     public static func emptyWithItems(id: String) -> OrderedCollection {
         OrderedCollection(
             context: "https://www.w3.org/ns/activitystreams",

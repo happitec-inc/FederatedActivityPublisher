@@ -1,3 +1,14 @@
+/// Lambda handler for `GET /users/{username}/following`.
+///
+/// Returns the actor's following collection as an `OrderedCollection`. This URL is
+/// referenced in the actor JSON-LD's `following` field. AP clients use it to check
+/// whether the account follows others and to retrieve the following count.
+///
+/// These are service accounts that don't follow remote actors, so the collection is
+/// always an empty root stub with `totalItems: 0` and no inline items.
+///
+/// All responses use `content-type: application/activity+json`. The handler fatally
+/// exits at cold-start if `SERVER_DOMAIN` is absent.
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import ActivityPubCore

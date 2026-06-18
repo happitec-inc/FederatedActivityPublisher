@@ -1,3 +1,23 @@
+/// Lambda handler for `PATCH /api/v1/accounts/update_credentials` — the endpoint that
+/// updates an actor's profile.
+///
+/// The iOS client sends a `multipart/form-data` body containing any combination of
+/// `display_name`, `note`, `avatar`, `header`, and `fields_attributes[N][name/value]`
+/// fields. All fields are optional; only the ones present in the request are updated.
+///
+/// Authentication is bearer-token only (no session cookie path). The content type is
+/// sniffed from each image's raw bytes via `MediaType.contentType(forFileData:...)` rather
+/// than trusting the multipart part's declared type, because the swift-openapi client sends
+/// binary parts as `text/plain`.
+///
+/// On success, the handler:
+/// 1. Uploads any new avatar or header image to S3 under `media/avatars/{username}` or
+///    `media/headers/{username}`.
+/// 2. Converts the `note` field from plain text to HTML via `convertTextToHTML` and stores
+///    both versions (HTML summary + raw sourceNote) in DynamoDB.
+/// 3. Builds an `Update(Person)` ActivityPub activity and fans it out to follower inboxes
+///    via SQS so remote instances receive the updated actor document.
+/// 4. Returns a Mastodon-compatible account JSON response.
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import AWSS3
@@ -27,7 +47,7 @@ let ssmClient = try await SSMClient()
 /// Maximum file size for avatar and header images (2 MB).
 let maxImageSize = 2 * 1024 * 1024
 
-/// Allowed content types for avatar and header images.
+/// MIME types accepted for avatar and header uploads.
 let allowedImageTypes: Set<String> = ["image/png", "image/jpeg", "image/gif"]
 
 let runtime = LambdaRuntime {
@@ -311,7 +331,15 @@ let runtime = LambdaRuntime {
     }
 }
 
-/// Build a Mastodon-compatible account JSON response.
+/// Returns a Mastodon-compatible account JSON string for the given actor.
+///
+/// Profile field values are passed through `formatFieldValueForAPI` before serialization,
+/// which turns plain URLs into `<a>` tags matching Mastodon's field rendering convention.
+///
+/// - Parameters:
+///   - actor: The actor record from DynamoDB.
+///   - serverDomain: The server's canonical domain (e.g. `activity.happitec.com`).
+/// - Returns: A JSON string shaped like a Mastodon `Account` entity.
 func buildAccountJSON(actor: Actor, serverDomain: String) -> String {
     let avatarUrl = actor.avatarUrl ?? ""
     let headerUrl = actor.headerUrl ?? ""
@@ -334,7 +362,19 @@ func buildAccountJSON(actor: Actor, serverDomain: String) -> String {
     """
 }
 
-/// Build an Update activity wrapping the full actor JSON-LD document.
+/// Returns an `Update` activity JSON-LD string that wraps the full actor document.
+///
+/// The activity is addressed to the public collection and the actor's followers, so
+/// remote servers that receive it via the delivery queue will update their cached copy
+/// of the actor.
+///
+/// - Parameters:
+///   - updateId: A ULID used to make the activity `id` unique.
+///   - actorUrl: The actor's canonical URL (e.g. `https://activity.happitec.com/users/alice`).
+///   - username: The actor's username, used to construct the followers collection URL.
+///   - serverDomain: The server's canonical domain.
+///   - actorJSONLD: The serialized actor JSON-LD document to embed as the activity `object`.
+/// - Returns: A compact JSON-LD string.
 func buildUpdateActivityJSON(
     updateId: String,
     actorUrl: String,

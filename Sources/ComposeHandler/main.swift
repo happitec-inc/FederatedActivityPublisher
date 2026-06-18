@@ -1,3 +1,20 @@
+/// Lambda handler for `GET /compose` — the server-rendered web compose page.
+///
+/// This is the HTML front end for posting statuses from a browser. It is not part of the
+/// iOS client's API path; the iOS client posts to `POST /api/v1/statuses` directly.
+///
+/// The handler authenticates the request via the `session` JWT cookie. If the cookie is
+/// missing or the JWT is invalid, the response is a `302` redirect to `/auth/login`. On
+/// success, the handler generates a CSRF token derived from the session JWT and embeds it
+/// in a `<meta name="csrf-token">` tag so the page's JavaScript can include it on
+/// subsequent API requests (`POST /api/v1/statuses`, `POST /api/v2/media`).
+///
+/// The page is rendered by `ComposePage`, an `Elementary.HTMLDocument` that inlines all
+/// CSS and JavaScript. It loads up to 20 recent public or unlisted statuses from DynamoDB
+/// to display below the compose form.
+///
+/// The response carries `Cache-Control: no-store` so the browser never serves a cached
+/// version with a stale CSRF token.
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import AWSSSM
@@ -15,9 +32,14 @@ let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropL
 let ssmClient = try await SSMClient()
 let store = try await DynamoDBStore()
 
-/// Cached key for JWT session verification
+/// Signing key cached across invocations within the same Lambda execution environment.
+/// Used for both JWT session verification and CSRF token generation/validation.
 nonisolated(unsafe) var cachedSigningKey: String?
 
+/// Returns the session signing key, fetching it from SSM on the first call.
+///
+/// - Returns: The plaintext signing key.
+/// - Throws: A fatal error if the parameter is missing or empty; SSM errors are propagated.
 func getSigningKey() async throws -> String {
     if let key = cachedSigningKey { return key }
     let output = try await ssmClient.getParameter(input: .init(
@@ -77,6 +99,7 @@ let runtime = LambdaRuntime {
     }
 }
 
+/// Returns a `302 Found` response that redirects the browser to the login page.
 func redirectToLogin() -> APIGatewayResponse {
     APIGatewayResponse(
         statusCode: .found,
@@ -89,10 +112,23 @@ try await runtime.run()
 
 // MARK: - Compose Page
 
+/// The server-rendered compose page, built with the Elementary HTML DSL.
+///
+/// The page is self-contained: CSS and JavaScript are inlined, and the CSRF token is
+/// embedded in a `<meta>` tag rather than a hidden form field so the JavaScript fetch
+/// calls can read it from `document.querySelector('meta[name="csrf-token"]').content`.
+///
+/// The JavaScript submits to `POST /api/v1/statuses` (and optionally `POST /api/v2/media`
+/// first for image uploads) using `credentials: 'include'` so the session cookie travels
+/// with each request.
 struct ComposePage: HTMLDocument {
+    /// The authenticated user's username, shown in the page header.
     var username: String
+    /// CSRF token derived from the session JWT, embedded in the page for JavaScript reads.
     var csrfToken: String
+    /// The server's canonical domain, used to build post URLs and load the CSS stylesheet.
     var domain: String
+    /// Up to 20 recent public or unlisted statuses to display below the compose form.
     var recentStatuses: [Status]
 
     var title: String { "Compose - \(instanceTitle)" }
@@ -426,7 +462,10 @@ struct ComposePage: HTMLDocument {
 
 // MARK: - Helpers
 
-/// Format an ISO 8601 date string into a human-readable format.
+/// Truncates an ISO 8601 date string to its `YYYY-MM-DD` prefix for display.
+///
+/// - Parameter isoDate: An ISO 8601 date-time string (e.g. `2026-06-17T12:00:00.000Z`).
+/// - Returns: The first 10 characters of the string, or the full string if it's shorter.
 func formatDate(_ isoDate: String) -> String {
     if isoDate.count >= 10 {
         return String(isoDate.prefix(10))

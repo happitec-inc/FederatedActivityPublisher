@@ -1,3 +1,15 @@
+/// Multipart form-data parsing for media upload requests.
+///
+/// The media upload handler receives a `multipart/form-data` body containing the file bytes
+/// and optional metadata fields (description, etc.). This file exposes two public helpers:
+/// ``extractBoundary(from:)`` to pull the boundary parameter from the `Content-Type` header,
+/// and ``parseMultipart(data:boundary:)`` to split the body into ``MultipartPart`` values.
+///
+/// Parsing is delegated to `vapor/multipart-kit` (`MultipartKit`), which handles
+/// standards-compliant multipart bodies including quoted parameter values, missing
+/// `Content-Type` parts, CRLF endings, and preamble/epilogue sections. On a parse error
+/// the function returns whatever parts completed before the failure rather than throwing,
+/// matching the lenient behavior that was in place before the switch to the library.
 import Foundation
 import MultipartKit
 import NIOCore

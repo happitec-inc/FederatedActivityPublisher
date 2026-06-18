@@ -1,3 +1,22 @@
+/// Lambda handler for `GET /users/{username}/outbox`.
+///
+/// Returns the actor's public outbox as an ActivityPub `OrderedCollection`.
+/// The outbox has two modes, selected by the `page` query parameter:
+///
+/// - No `page` parameter (or `page` != `"true"`): returns the root collection
+///   object with `totalItems`, `first`, and `last` links but no inline items.
+/// - `page=true`: returns an `OrderedCollectionPage` containing up to 20 statuses,
+///   each wrapped in a `Create` activity around an ActivityPub `Note`. Pagination
+///   uses `max_id` (older) and `min_id` (newer) query parameters, matching the
+///   convention Mastodon uses for timeline pagination.
+///
+/// Only `SERVER_DOMAIN` is required here (no `HANDLE_DOMAIN`), because the outbox
+/// only constructs URLs on the server domain. The handler fatally exits at cold-start
+/// if `SERVER_DOMAIN` is absent.
+///
+/// Note and Create JSON is built by `buildNoteJSON` and `buildCreateActivityJSON`
+/// in `ActivityPubCore/Models/Note.swift`. All responses use
+/// `content-type: application/activity+json`; this endpoint has no browser redirect.
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import ActivityPubCore

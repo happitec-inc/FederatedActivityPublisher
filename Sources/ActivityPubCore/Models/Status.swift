@@ -1,10 +1,19 @@
+/// A post authored by a local actor, stored in DynamoDB and serialized to ActivityPub via ``Note``.
+///
+/// Statuses are written by `PostHandler` after the plain-text content from a
+/// ``CreateStatusRequest`` is converted to HTML. They live in the single-table design under
+/// `PK=ACTOR#{username}`, `SK=STATUS#{ulid}`, with a GSI on `PUBLISHED#{timestamp}` for
+/// time-ordered queries. `StatusHandler` reads the record to build the Mastodon-compatible
+/// API response, and `NoteHandler` reads it to serve the AP Note JSON to federated servers.
+/// Engagement counters (`likesCount`, `boostsCount`, `repliesCount`, `quotesCount`) are
+/// incremented by `InboxHandler` when the corresponding AP activities arrive.
 import AWSDynamoDB
 import Foundation
 
-/// A status (post) record stored in DynamoDB.
+/// A post authored by a local actor.
 ///
-/// Statuses are keyed by `PK=ACTOR#{username}`, `SK=STATUS#{ulid}`. The ULID ensures
-/// lexicographic time ordering, so reverse-scanning SK yields newest-first pagination.
+/// Keyed by `PK=ACTOR#{username}`, `SK=STATUS#{ulid}`. The ULID provides lexicographic
+/// time ordering so reverse-scanning the SK yields newest-first pagination.
 public struct Status: Codable, Sendable {
     /// ULID identifier for the status. Sorts lexicographically by creation time.
     public let id: String
@@ -49,6 +58,30 @@ public struct Status: Codable, Sendable {
     /// Number of accepted inbound quotes of this status.
     public let quotesCount: Int
 
+    /// Create a Status.
+    ///
+    /// - Parameters:
+    ///   - id: ULID identifier; sorts lexicographically by creation time.
+    ///   - username: Authoring actor's username.
+    ///   - content: HTML body of the post.
+    ///   - contentWarning: Spoiler text shown in place of content, if any.
+    ///   - visibility: One of `"public"`, `"unlisted"`, `"private"`, or `"direct"`.
+    ///   - sensitive: When `true`, media and content are hidden behind a disclosure.
+    ///   - language: ISO 639-1 language code, if specified.
+    ///   - published: ISO 8601 publication timestamp.
+    ///   - url: Human-readable permalink (e.g. `https://activity.happitec.com/@username/123`).
+    ///   - uri: ActivityPub object URI (e.g. `https://activity.happitec.com/users/username/statuses/123`).
+    ///   - to: ActivityPub `to` recipients.
+    ///   - cc: ActivityPub `cc` recipients.
+    ///   - tags: Hashtags, mentions, and emojis attached to this status.
+    ///   - attachments: Media attachment references.
+    ///   - inReplyTo: URI of the status being replied to, if this is a reply.
+    ///   - likesCount: Running total of AP Like activities received.
+    ///   - boostsCount: Running total of AP Announce activities received.
+    ///   - repliesCount: Running total of replies received.
+    ///   - quotedStatusUri: URI of the status being quoted, if any.
+    ///   - quoteApprovalState: Outbound quote approval state: `"pending"`, `"accepted"`, `"rejected"`, or `"failed"`.
+    ///   - quotesCount: Number of accepted inbound quotes of this status.
     public init(
         id: String, username: String, content: String, contentWarning: String?,
         visibility: String, sensitive: Bool, language: String?,
@@ -82,7 +115,14 @@ public struct Status: Codable, Sendable {
         self.quotesCount = quotesCount
     }
 
-    /// Convert a DynamoDB attribute map to a Status, returning nil if required fields are missing.
+    /// Parse a Status from a DynamoDB attribute map.
+    ///
+    /// `to` and `cc` are stored as JSON-encoded strings in `toRecipients` and `ccRecipients`
+    /// respectively; they are decoded here and default to empty arrays on parse failure. Tags and
+    /// attachments are also JSON-encoded strings and are `nil` when absent.
+    ///
+    /// - Parameter attributes: The raw DynamoDB item from a `GetItem` or `Query` call.
+    /// - Returns: A fully-populated `Status`, or `nil` if any required attribute is missing.
     public static func fromDynamoDB(_ attributes: [String: DynamoDBClientTypes.AttributeValue]) -> Status? {
         guard
             case .s(let id) = attributes["id"],
@@ -161,7 +201,15 @@ public struct Status: Codable, Sendable {
         )
     }
 
-    /// Convert to DynamoDB attribute map for storage.
+    /// Serialize to a DynamoDB attribute map for a `PutItem` call.
+    ///
+    /// Sets both the primary key (`PK`/`SK`) and the GSI key (`GSI1PK`/`GSI1SK`) so that
+    /// time-ordered queries work out of the box. `to` and `cc` are stored as JSON-encoded
+    /// strings (keyed `toRecipients`/`ccRecipients`) because DynamoDB has no native array-of-strings
+    /// type that sorts well here. Tags and attachments are similarly JSON-encoded. Optional fields
+    /// are omitted when nil.
+    ///
+    /// - Returns: A DynamoDB attribute map ready to pass to `PutItem`.
     public func toDynamoDB() -> [String: DynamoDBClientTypes.AttributeValue] {
         let encoder = JSONEncoder()
 
@@ -223,6 +271,12 @@ public struct Tag: Codable, Sendable {
     /// URL for the tag target, if applicable.
     public let href: String?
 
+    /// Create a Tag.
+    ///
+    /// - Parameters:
+    ///   - type: One of `"Hashtag"`, `"Mention"`, or `"Emoji"`.
+    ///   - name: The display name of the tag.
+    ///   - href: URL pointing to the tag's profile or search page; `nil` for emojis.
     public init(type: String, name: String, href: String?) {
         self.type = type
         self.name = name
@@ -246,6 +300,14 @@ public struct MediaAttachmentRef: Codable, Sendable {
     /// Blurhash placeholder string for the media.
     public let blurhash: String?
 
+    /// Create a MediaAttachmentRef.
+    ///
+    /// - Parameters:
+    ///   - id: Unique ID for the attachment, used to correlate with upload records.
+    ///   - url: CloudFront URL where the media is served.
+    ///   - contentType: MIME type (e.g. `"image/png"`, `"video/mp4"`).
+    ///   - description: Alt text for accessibility; `nil` when not provided.
+    ///   - blurhash: Blurhash placeholder string; `nil` when not computed.
     public init(id: String, url: String, contentType: String, description: String?, blurhash: String?) {
         self.id = id
         self.url = url

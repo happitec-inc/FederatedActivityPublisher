@@ -1,3 +1,13 @@
+/// Quote-post approval policy for inbound `QuoteRequest` activities.
+///
+/// When a remote server sends a `QuoteRequest` to `/users/{username}/inbox`,
+/// `InboxHandler` calls ``shouldAcceptQuoteRequest(quotedStatusVisibility:quoteApprovalPolicy:isFollower:)``
+/// to decide whether to emit an `Accept` or `Reject` response activity.
+///
+/// Two independent checks must pass: the quoted status must be publicly distributable
+/// (visibility `public` or `unlisted`), and the quoted actor's policy must permit quotes
+/// from the requesting actor. This file holds only the policy logic; the follower lookup
+/// and activity dispatch live in `InboxHandler`.
 import Foundation
 
 /// Determine whether an inbound QuoteRequest should be accepted or rejected.

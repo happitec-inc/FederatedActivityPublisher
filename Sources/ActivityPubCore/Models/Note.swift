@@ -1,9 +1,25 @@
+/// Functions that build ActivityPub Note and Create activity JSON strings from ``Status`` records.
+///
+/// These are free functions rather than methods because the JSON is constructed by hand (no
+/// `Codable` round-trip) to produce a compact, spec-compliant JSON-LD payload without relying
+/// on Foundation's `JSONEncoder` key ordering or escaping behavior. `PostHandler` calls
+/// ``buildNoteJSON(status:serverDomain:username:)`` and ``buildCreateActivityJSON(status:noteJSON:serverDomain:username:)``
+/// to assemble the activity, then passes the result to ``DeliveryJob`` for SQS fan-out.
+/// ``computeAddressing(visibility:serverDomain:username:)`` is also called by `PostHandler` to
+/// populate the `to`/`cc` fields on the ``Status`` record before it is written to DynamoDB.
 import Foundation
 
 /// Build an ActivityPub Note JSON-LD object from a Status.
 ///
-/// Returns the JSON string for the Note, suitable for embedding as the `object`
-/// in a Create activity.
+/// Produces the JSON string for the Note, suitable for embedding as the `object` value in a
+/// Create activity. Attachments are typed as `Image`, `Video`, `Audio`, or `Document` based on
+/// the MIME type prefix. Quote URIs are only emitted when the quote is accepted or local.
+///
+/// - Parameters:
+///   - status: The source ``Status`` record; its `content` field must already be HTML.
+///   - serverDomain: The server's domain (e.g. `activity.happitec.com`), used to build canonical URIs.
+///   - username: The local actor's username, used to build the actor and status URLs.
+/// - Returns: A compact JSON-LD string for the Note object.
 public func buildNoteJSON(status: Status, serverDomain: String, username: String) -> String {
     let actorUrl = "https://\(serverDomain)/users/\(username)"
     let statusUrl = "https://\(serverDomain)/users/\(username)/statuses/\(status.id)"
@@ -94,7 +110,12 @@ public func buildNoteJSON(status: Status, serverDomain: String, username: String
 
 /// Build a Create activity wrapping a Note.
 ///
-/// Returns the full Create activity JSON string.
+/// - Parameters:
+///   - status: The source ``Status``, used for `published`, `to`, and `cc` fields.
+///   - noteJSON: The Note JSON string produced by ``buildNoteJSON(status:serverDomain:username:)``.
+///   - serverDomain: The server's domain, used to build the activity and actor URIs.
+///   - username: The local actor's username.
+/// - Returns: A compact JSON string for the Create activity.
 public func buildCreateActivityJSON(status: Status, noteJSON: String, serverDomain: String, username: String) -> String {
     let actorUrl = "https://\(serverDomain)/users/\(username)"
     let activityId = "https://\(serverDomain)/users/\(username)/statuses/\(status.id)/activity"
@@ -108,14 +129,20 @@ public func buildCreateActivityJSON(status: Status, noteJSON: String, serverDoma
     return json.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-/// Compute to/cc arrays based on visibility.
+/// Compute ActivityPub `to` and `cc` arrays from a visibility value.
 ///
-/// - `public`: to=[as:Public], cc=[followers collection]
-/// - `unlisted`: to=[followers collection], cc=[as:Public]
-/// - `private`: to=[followers collection], cc=[] (no mentions for MVP)
-/// - `direct`: not supported for MVP
+/// | Visibility | `to` | `cc` |
+/// |---|---|---|
+/// | `public` | `[as:Public]` | `[followers collection]` |
+/// | `unlisted` | `[followers collection]` | `[as:Public]` |
+/// | `private` | `[followers collection]` | `[]` |
+/// | `direct` | not supported | — |
 ///
-/// Returns (to, cc) arrays, or nil if visibility is unsupported (direct).
+/// - Parameters:
+///   - visibility: One of `"public"`, `"unlisted"`, or `"private"`.
+///   - serverDomain: The server's domain, used to build the followers collection URI.
+///   - username: The local actor's username.
+/// - Returns: A `(to:, cc:)` tuple, or `nil` for unsupported visibilities (e.g. `"direct"`).
 public func computeAddressing(
     visibility: String,
     serverDomain: String,

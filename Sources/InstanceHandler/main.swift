@@ -1,3 +1,25 @@
+/// Lambda handler for the Mastodon instance metadata endpoints.
+///
+/// Remote fediverse software (Mastodon, Akkoma, Misskey, etc.) queries these endpoints
+/// to learn about this server's capabilities, limits, and identity before attempting
+/// federation. This handler covers both the v1 and v2 Mastodon instance APIs:
+///
+/// - `GET /api/v1/instance` — legacy format, used by older Mastodon clients and some
+///   third-party apps for initial discovery.
+/// - `GET /api/v2/instance` — current format, includes structured configuration blocks
+///   for statuses, media, and polls.
+///
+/// Both responses are static JSON payloads assembled from environment variables.
+/// No database access is required. CloudFront caches these responses; the TTL is
+/// controlled by the `Cache-Control` header set in the CloudFront distribution config.
+///
+/// Required environment variables:
+/// - `SERVER_DOMAIN`: the ActivityPub server domain (e.g. `activity.happitec.com`)
+///
+/// Optional environment variables (all have defaults):
+/// - `INSTANCE_TITLE`: display name of the instance
+/// - `INSTANCE_DESCRIPTION`: short description shown in federation UIs
+/// - `SOURCE_URL`: URL to the server's source code (shown in Mastodon's about page)
 import AWSLambdaEvents
 import AWSLambdaRuntime
 import Foundation

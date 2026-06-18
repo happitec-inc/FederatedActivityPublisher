@@ -1,3 +1,18 @@
+/// SQS-based outbound activity delivery for federated fan-out.
+///
+/// When a local actor creates a post, boosts, or follows someone, the handler needs to
+/// deliver a signed ActivityPub activity to each follower's inbox. Rather than making
+/// those HTTP calls inline (which would time out on Lambda for large follower counts),
+/// the handler enqueues ``DeliveryJob`` messages via ``SQSDeliveryClient`` and returns
+/// immediately. A separate delivery Lambda reads the queue and makes the signed `POST`
+/// to each remote inbox.
+///
+/// The queue URL is read from the `QUEUE_URL` environment variable at init time. For
+/// fan-out with many followers, ``SQSDeliveryClient/enqueueBatch(jobs:)`` chunks into
+/// groups of 10 to stay within the SQS `SendMessageBatch` limit.
+///
+/// `DeliveryJob` is defined in the `Delivery` module and contains the target inbox URL,
+/// the signed activity payload, and the key material needed to sign the request.
 import AWSSQS
 import Foundation
 

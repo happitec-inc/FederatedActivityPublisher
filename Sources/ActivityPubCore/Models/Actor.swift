@@ -1,11 +1,17 @@
+/// A local ActivityPub actor (account) stored in DynamoDB and serialized to ActivityPub JSON-LD.
+///
+/// Each actor corresponds to a Mastodon-compatible account on this server. Actor records live in the
+/// single-table DynamoDB design under `PK=ACTOR#{username}`, `SK=PROFILE`. The `ActorHandler` reads
+/// this record to produce the AP `Person` object served at `/users/{username}`, and the profile-edit
+/// handlers write back updated fields. The RSA private key used for HTTP Signature signing is kept
+/// separately in SSM Parameter Store; only the public key is stored here.
 import Foundation
 import AWSDynamoDB
 
 /// A local ActivityPub actor (account) stored in DynamoDB.
 ///
-/// Each actor has an RSA keypair for HTTP Signature signing, profile metadata,
-/// and counters for followers/following/statuses. The private key is stored in
-/// SSM Parameter Store; only the public key PEM is embedded in the actor record.
+/// Holds profile metadata, follower/following/status counters, and the public half of the
+/// RSA keypair. The private key lives in SSM Parameter Store under ``privateKeyArn``.
 public struct Actor: Codable, Sendable {
     /// The unique username (e.g. `randomforms`). Used in URIs like `/users/randomforms`.
     public let username: String
@@ -39,6 +45,24 @@ public struct Actor: Codable, Sendable {
     /// Total number of statuses posted.
     public let statusCount: Int
 
+    /// Create an Actor with the given profile data and key references.
+    ///
+    /// - Parameters:
+    ///   - username: Unique username used in all URI paths (e.g. `randomforms`).
+    ///   - displayName: Human-readable display name for the profile.
+    ///   - summary: HTML biography shown on the actor profile.
+    ///   - avatarUrl: CloudFront URL for the avatar image.
+    ///   - headerUrl: CloudFront URL for the header/banner image.
+    ///   - fields: JSON-encoded array of ``ProfileField`` key-value pairs.
+    ///   - sourceNote: Raw (non-HTML) bio text for editing; not federated.
+    ///   - publicKeyPem: PEM-encoded RSA public key.
+    ///   - privateKeyArn: SSM Parameter Store path for the corresponding private key.
+    ///   - createdAt: ISO 8601 creation timestamp.
+    ///   - discoverable: Whether the actor appears in directory listings. Defaults to `true`.
+    ///   - manuallyApprovesFollowers: Whether follow requests require approval. Defaults to `false`.
+    ///   - followerCount: Number of current followers. Defaults to `0`.
+    ///   - followingCount: Number of accounts being followed. Defaults to `0`.
+    ///   - statusCount: Total statuses posted. Defaults to `0`.
     public init(
         username: String, displayName: String, summary: String,
         avatarUrl: String? = nil, headerUrl: String? = nil,
@@ -65,7 +89,14 @@ public struct Actor: Codable, Sendable {
         self.statusCount = statusCount
     }
 
-    /// Convert a DynamoDB attribute map to an Actor, returning nil if required fields are missing.
+    /// Parse an Actor from a DynamoDB attribute map.
+    ///
+    /// Returns `nil` when any required field is absent or has the wrong type. Optional fields
+    /// (`avatarUrl`, `headerUrl`, `fields`, `sourceNote`) are decoded when present and silently
+    /// omitted otherwise.
+    ///
+    /// - Parameter attributes: The raw DynamoDB item returned from a `GetItem` or `Query` call.
+    /// - Returns: A fully-populated `Actor`, or `nil` if the item is missing required attributes.
     public static func fromDynamoDB(_ attributes: [String: DynamoDBClientTypes.AttributeValue]) -> Actor? {
         guard
             case .s(let username) = attributes["username"],

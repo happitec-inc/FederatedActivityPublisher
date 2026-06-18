@@ -1,3 +1,16 @@
+/// Stateless JWT session management for browser-facing handlers.
+///
+/// After a successful WebAuthn authentication, the profile and settings handlers issue a
+/// signed session cookie using ``JWTSession/sign(claims:key:)``. Subsequent requests from
+/// the browser carry that cookie and are verified with ``JWTSession/verify(jwt:key:expectedIssuer:)``.
+///
+/// Tokens are HMAC-SHA256 signed (HS256), with no external key store: the signing key comes
+/// from SSM (`{ssmKeyPrefix}/jwt-signing-key`) and is passed in by each handler at startup.
+/// CSRF protection derives a per-session token from the same key via a second HMAC over
+/// `sub + iat`, so CSRF tokens are stateless and rotate with each new session.
+///
+/// `JWTError` cases propagate through ``BearerAuth`` so that callers can distinguish an
+/// expired cookie (redirect to login) from a tampered one (401).
 import Crypto
 import Foundation
 
@@ -6,9 +19,13 @@ public struct JWTSession: Sendable {
 
     /// JWT claims for a session token.
     public struct Claims: Codable, Sendable {
+        /// Subject: the authenticated username.
         public let sub: String
+        /// Issued-at timestamp (seconds since epoch).
         public let iat: Int
+        /// Expiry timestamp (seconds since epoch).
         public let exp: Int
+        /// Issuer: the server domain (e.g. `activity.happitec.com`).
         public let iss: String
 
         public init(sub: String, iss: String, duration: TimeInterval = 86400) {
@@ -117,14 +134,19 @@ public struct JWTSession: Sendable {
 }
 
 public enum JWTError: Error, Sendable {
+    /// The token does not have exactly three dot-separated parts, or a part cannot be base64url-decoded.
     case malformed
+    /// The HMAC-SHA256 signature does not match the header and payload.
     case invalidSignature
+    /// The `exp` claim is in the past.
     case expired
+    /// The `iss` claim does not match the expected server domain.
     case invalidIssuer
 }
 
 // MARK: - Base64URL helpers
 
+/// Encode data as base64url (RFC 4648 §5): replaces `+` with `-`, `/` with `_`, strips `=` padding.
 public func base64urlEncode(_ data: Data) -> String {
     data.base64EncodedString()
         .replacingOccurrences(of: "+", with: "-")
@@ -132,6 +154,7 @@ public func base64urlEncode(_ data: Data) -> String {
         .replacingOccurrences(of: "=", with: "")
 }
 
+/// Decode a base64url string, re-adding `=` padding before calling the standard decoder.
 public func base64urlDecode(_ string: String) -> Data? {
     var base64 = string
         .replacingOccurrences(of: "-", with: "+")
