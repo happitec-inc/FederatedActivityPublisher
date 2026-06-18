@@ -1,13 +1,17 @@
-# Public DocC deploy. No private dependencies: uses the public swift-docc-render
-# fork (Mermaid support) and a committed static OG image (docs-assets/og-image.png)
-# with a local post-process step. Jobs are gated to the canonical repo, so forks
-# skip cleanly without any secret or variable.
+# DISABLED — parked template (the `.disabled` suffix keeps this out of GitHub Actions).
 #
-# The dynamic-OG variant (which generated the OG image via the private
-# happitec-logo-generator) is parked at deploy-docc.dynamic-og.yml.disabled and can
-# return once a public, gated logo API exists (happitec-inc/happitec-logo-generator#52).
+# This is the dynamic-OG variant of the DocC deploy. It depends on the PRIVATE
+# happitec-logo-generator repo (the `generate-og-image` reusable workflow and the
+# `docc-og-postprocess` action). Because GitHub resolves reusable-workflow `uses:`
+# references at run-creation time — before any job `if:` is evaluated — a public repo
+# that cannot read that private repo fails the whole run at startup (zero jobs). That
+# made every release startup-fail.
+#
+# The active deploy lives in `deploy-docc.yml`, which uses a committed static OG image
+# and has no private dependency. Re-enable a dynamic path here once the public, gated
+# logo API exists: see happitec-inc/happitec-logo-generator#52.
 
-name: Deploy DocC Documentation
+name: Deploy DocC Documentation (dynamic OG — disabled)
 
 on:
   release:
@@ -24,8 +28,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  generate-og-image:
+    if: vars.ENABLE_DOCC_DEPLOY == 'true'
+    uses: happitec-inc/happitec-logo-generator/.github/workflows/generate-og-image.yml@main
+    with:
+      secondary-text: "FederatedActivityPublisher"
+    secrets:
+      token: ${{ secrets.HAPPITEC_READ_ONLY_PAT }}
+
   build:
-    if: github.repository == 'happitec-inc/FederatedActivityPublisher'
+    if: vars.ENABLE_DOCC_DEPLOY == 'true'
+    needs: [generate-og-image]
     runs-on: ${{ vars.RUNNER_LABELS_MACOS && fromJSON(vars.RUNNER_LABELS_MACOS) || 'macos-26' }}
     env:
       PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -50,11 +63,26 @@ jobs:
           bash scripts/substitute-variables.sh
 
       - name: Checkout swift-docc-render fork (Mermaid support)
+        if: vars.ENABLE_DOCC_DEPLOY == 'true'
         uses: actions/checkout@v6
         with:
           repository: happitec-inc/swift-docc-render
           ref: feature/mermaid-diagrams
           path: swift-docc-render-fork
+
+      - name: Checkout upstream swift-docc-render (fallback)
+        if: vars.ENABLE_DOCC_DEPLOY != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: apple/swift-docc-render
+          path: swift-docc-render-fork
+
+      - name: Download OG image
+        if: vars.ENABLE_DOCC_DEPLOY == 'true'
+        uses: actions/download-artifact@v6
+        with:
+          name: og-image
+          path: ./og-image/
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -79,14 +107,15 @@ jobs:
             --transform-for-static-hosting \
             --hosting-base-path FederatedActivityPublisher
 
-      - name: Inject OG image and meta tags
-        run: |
-          bash scripts/docc-og-postprocess.sh \
-            ./docs \
-            docs-assets/og-image.png \
-            "${{ vars.DOCC_BASE_URL || format('https://{0}.github.io/FederatedActivityPublisher', github.repository_owner) }}" \
-            "FederatedActivityPublisher — Documentation" \
-            "A serverless ActivityPub server for brand accounts. Swift 6.3 on AWS Lambda, federated with Mastodon."
+      - name: Post-process DocC OG images and meta tags
+        if: vars.ENABLE_DOCC_DEPLOY == 'true'
+        uses: happitec-inc/happitec-logo-generator/.github/actions/docc-og-postprocess@main
+        with:
+          docs-path: ./docs
+          og-image-path: ./og-image/og-image.png
+          base-url: ${{ vars.DOCC_BASE_URL || format('https://{0}.github.io/FederatedActivityPublisher', github.repository_owner) }}
+          title: "FederatedActivityPublisher — Documentation"
+          description: "A serverless ActivityPub server for brand accounts. Swift 6.3 on AWS Lambda, federated with Mastodon."
 
       - name: Add root redirect
         run: |
@@ -109,7 +138,7 @@ jobs:
           path: ./docs
 
   deploy:
-    if: github.repository == 'happitec-inc/FederatedActivityPublisher'
+    if: vars.ENABLE_DOCC_DEPLOY == 'true'
     needs: build
     runs-on: ${{ vars.RUNNER_LABELS_MACOS && fromJSON(vars.RUNNER_LABELS_MACOS) || 'macos-26' }}
     environment:
