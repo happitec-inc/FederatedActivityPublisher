@@ -1,6 +1,6 @@
 /// A bearer token stored in DynamoDB, used to authenticate API requests.
 ///
-/// Token records live under `PK=TOKEN#<sha256-hex>`, `SK=TOKEN` in the single-table design.
+/// Token records live under `PK=TOKEN#<sha256-hex>`, `SK=META` in the single-table design.
 /// They are written by the `ActivityProvisioner` CLI (and the `provision-actor` workflow) and
 /// read by the authentication middleware on every protected API call. The raw token string is
 /// never stored; only its SHA-256 hex digest appears in the key. Expiry is enforced by comparing
@@ -11,7 +11,7 @@ import Foundation
 
 /// A stored bearer token record.
 ///
-/// Keyed by `PK=TOKEN#{sha256-hex}`, `SK=TOKEN`. The raw token string is never stored;
+/// Keyed by `PK=TOKEN#{sha256-hex}`, `SK=META`. The raw token string is never stored;
 /// only its SHA-256 hex digest appears in the partition key.
 public struct BearerTokenRecord: Sendable {
     /// The authenticated username this token belongs to.

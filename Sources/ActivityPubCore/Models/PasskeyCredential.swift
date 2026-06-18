@@ -1,7 +1,7 @@
 /// A WebAuthn credential registered by a local actor for passwordless authentication.
 ///
 /// Credentials are written to DynamoDB during passkey registration under
-/// `PK=PASSKEY#{credentialId}`, `SK=CREDENTIAL`. On each authentication attempt, the
+/// `PK=PASSKEY#{credentialId}`, `SK=META`. On each authentication attempt, the
 /// `AuthHandler` loads the credential by ID, verifies the authenticator's signature against
 /// `publicKey`, and checks that `signCount` has increased (replay prevention). After a
 /// successful authentication, `AuthHandler` updates `signCount` and `lastUsedAt` in place.

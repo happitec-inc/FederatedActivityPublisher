@@ -3,8 +3,9 @@
 /// Statuses are written by `PostHandler` after the plain-text content from a
 /// ``CreateStatusRequest`` is converted to HTML. They live in the single-table design under
 /// `PK=ACTOR#{username}`, `SK=STATUS#{ulid}`, with a GSI on `PUBLISHED#{timestamp}` for
-/// time-ordered queries. `StatusHandler` reads the record to build the Mastodon-compatible
-/// API response, and `NoteHandler` reads it to serve the AP Note JSON to federated servers.
+/// time-ordered queries. `PostHandler` builds the Mastodon-compatible API response when a status
+/// is created; `ObjectHandler` reads the record to serve the AP Note JSON for a single status, and
+/// `OutboxHandler` reads them to serve the paginated outbox collection to federated servers.
 /// Engagement counters (`likesCount`, `boostsCount`, `repliesCount`, `quotesCount`) are
 /// incremented by `InboxHandler` when the corresponding AP activities arrive.
 import AWSDynamoDB
