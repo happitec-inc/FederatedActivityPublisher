@@ -79,15 +79,9 @@ jobs:
             --transform-for-static-hosting \
             --hosting-base-path FederatedActivityPublisher
 
-      - name: Inject OG image and meta tags
-        run: |
-          bash scripts/docc-og-postprocess.sh \
-            ./docs \
-            docs-assets/og-image.png \
-            "${{ vars.DOCC_BASE_URL || format('https://{0}.github.io/FederatedActivityPublisher', github.repository_owner) }}" \
-            "FederatedActivityPublisher — Documentation" \
-            "A serverless ActivityPub server for brand accounts. Swift 6.3 on AWS Lambda, federated with Mastodon."
-
+      # Write the root redirect BEFORE OG injection so the post-process step stamps
+      # og:/twitter: meta into it too. The bare site root is the most-shared URL, so
+      # it must carry the social card.
       - name: Add root redirect
         run: |
           cat > ./docs/index.html << 'EOF'
@@ -102,6 +96,15 @@ jobs:
           </body>
           </html>
           EOF
+
+      - name: Inject OG image and meta tags
+        run: |
+          bash scripts/docc-og-postprocess.sh \
+            ./docs \
+            docs-assets/og-image.png \
+            "${{ vars.DOCC_BASE_URL || format('https://{0}.github.io/FederatedActivityPublisher', github.repository_owner) }}" \
+            "FederatedActivityPublisher — Documentation" \
+            "A serverless ActivityPub server for brand accounts. Swift 6.3 on AWS Lambda, federated with Mastodon."
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
