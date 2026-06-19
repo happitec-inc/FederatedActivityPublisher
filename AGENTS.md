@@ -29,21 +29,11 @@ This creates:
 - RSA private key in SSM at `/activity/prod/keys/myapp`
 - The actor is immediately discoverable at `@myapp@{{HANDLE_DOMAIN}}`
 
-### Alternative: Provision via GitHub Actions
+Provisioning is CLI-only. There is no GitHub Actions provisioning workflow: this repository is public, and the bearer token must never touch CI, so both actor provisioning and token minting run locally with the `ActivityProvisioner` CLI.
 
-Instead of running the CLI directly, use the **Provision Actor** workflow:
+### Running with a specific AWS profile or credentials
 
-1. Go to **Actions** > **Provision Actor**
-2. Click **Run workflow**
-3. Fill in username, display name, and optional summary
-4. Choose the target stage
-5. Run the workflow
-
-The workflow summary displays the bearer token (copy it immediately -- it cannot be retrieved later). Each account gets its own independent token stored in DynamoDB, so multiple accounts can post without interference.
-
-### Running locally with AWS credentials
-
-If you do not have a self-hosted runner, you can run ActivityProvisioner on any machine with Swift 6.3 and AWS credentials:
+You can run `ActivityProvisioner` on any machine with Swift 6.3 and AWS credentials:
 
 ```bash
 # Using an AWS profile
@@ -66,33 +56,19 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_DEFAULT_REGION=us-east-1 \
 
 Requirements: Swift 6.3 (macOS or Linux), network access to AWS APIs.
 
-### 2. Create a bearer token for posting
+### 2. Mint a bearer token for posting
 
-Store a per-account bearer token in DynamoDB. The token is hashed with SHA-256 so the raw value is never persisted.
+Minting an actor's token is a separate CLI step from provisioning. The raw token is printed to your terminal exactly once (and, with `--out`, written to the named file). Only its SHA-256 hash is stored in DynamoDB, so the plaintext never touches CI and cannot be recovered later.
 
 ```bash
-TOKEN=$(openssl rand -hex 32)
-TOKEN_HASH=$(echo -n "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
-TTL=$(( $(date +%s) + 31536000 ))  # 1 year
-NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-aws dynamodb put-item \
-  --table-name "activity-prod" \
-  --item "{
-    \"PK\": {\"S\": \"TOKEN#${TOKEN_HASH}\"},
-    \"SK\": {\"S\": \"META\"},
-    \"username\": {\"S\": \"myapp\"},
-    \"scope\": {\"S\": \"read write\"},
-    \"createdAt\": {\"S\": \"${NOW}\"},
-    \"ttl\": {\"N\": \"${TTL}\"},
-    \"description\": {\"S\": \"manual provisioning\"}
-  }" \
-  --region us-east-1
-echo "Bearer token: $TOKEN"
+swift run ActivityProvisioner mint-token \
+  --stage prod \
+  --username myapp \
+  --out token.txt
+chmod 600 token.txt
 ```
 
-Each account gets its own token. Multiple accounts can post independently.
-
-> Note: The Provision Actor workflow handles token creation automatically. The manual approach above is only needed when provisioning via CLI.
+The defaults are `--scope "read write"` and `--ttl-days 365`; override either when you need a narrower scope or a shorter lifetime. Each account gets its own token, so multiple accounts can post independently. To list, rotate, or revoke tokens, use the `list-tokens`, `rotate-token`, and `revoke-token` subcommands.
 
 ### 3. Verify the account
 

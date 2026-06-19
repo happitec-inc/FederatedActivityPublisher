@@ -117,7 +117,7 @@ The normal arc of a token is issue, use, rotate, revoke:
 
 ## Security posture
 
-Tokens are minted off-CI, on purpose. This repository is public, and a GitHub Actions log or job summary is readable by anyone who can see the run. A raw token printed there would be exposed. The `Provision Actor` workflow therefore provisions the actor only; token minting happens locally, where the plaintext stays on your machine.
+Tokens are minted off-CI, on purpose. This repository is public, and a GitHub Actions log or job summary is readable by anyone who can see the run. A raw token printed there would be exposed. There is therefore no provisioning workflow: both actor provisioning and token minting happen locally with this CLI, where the plaintext stays on your machine.
 
 When a token is printed on mint or rotate, treat it as a credential:
 

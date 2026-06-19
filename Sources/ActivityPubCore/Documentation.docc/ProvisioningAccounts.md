@@ -41,31 +41,19 @@ This will:
 
 ### Setting Up Bearer Tokens
 
-The client posting API (`POST /api/v1/statuses`, `POST /api/v2/media`, `PATCH /api/v1/accounts/update_credentials`) uses bearer token authentication. Tokens are stored as per-account records in DynamoDB, keyed by the SHA-256 hash of the raw token:
+The client posting API (`POST /api/v1/statuses`, `POST /api/v2/media`, `PATCH /api/v1/accounts/update_credentials`) uses bearer token authentication. Tokens are stored as per-account records in DynamoDB, keyed by the SHA-256 hash of the raw token. Mint one with the `mint-token` subcommand:
 
 ```bash
-TOKEN=$(openssl rand -hex 32)
-TOKEN_HASH=$(echo -n "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
-TTL=$(( $(date +%s) + 31536000 ))  # 1 year
-NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-aws dynamodb put-item \
-  --table-name "activity-prod" \
-  --item "{
-    \"PK\": {\"S\": \"TOKEN#${TOKEN_HASH}\"},
-    \"SK\": {\"S\": \"META\"},
-    \"username\": {\"S\": \"randomforms\"},
-    \"scope\": {\"S\": \"read write\"},
-    \"createdAt\": {\"S\": \"${NOW}\"},
-    \"ttl\": {\"N\": \"${TTL}\"},
-    \"description\": {\"S\": \"manual provisioning\"}
-  }" \
-  --region us-east-1
-echo "Bearer token: $TOKEN"
+swift run ActivityProvisioner mint-token \
+  --stage prod \
+  --username randomforms \
+  --out token.txt
+chmod 600 token.txt
 ```
 
-The raw token is never stored -- only its SHA-256 hash appears in DynamoDB. Each account gets its own independent token, so multiple actors can post without interference.
+The raw token is printed to your terminal once and, with `--out`, also written to the named file; only its SHA-256 hash appears in DynamoDB, so the raw token cannot be recovered afterward. The defaults are `--scope "read write"` and `--ttl-days 365`. Each account gets its own independent token, so multiple actors can post without interference. See <doc:ManagingActorsAndTokens> for the full set of token commands (list, rotate, revoke).
 
-> Note: The Provision Actor workflow (`provision-actor.yml`) handles token creation automatically and displays the raw token in the workflow summary. The manual approach above is only needed when provisioning via CLI.
+> Note: Token minting runs locally via the CLI, never in CI. This repository is public, and a raw token written to a GitHub Actions log or job summary would be publicly exposed.
 
 When calling the client API, include the token in the Authorization header:
 

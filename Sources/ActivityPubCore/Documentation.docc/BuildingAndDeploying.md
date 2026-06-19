@@ -4,7 +4,7 @@ Build Lambda binaries with Docker, deploy with SAM, and manage CI/CD pipelines.
 
 ## Overview
 
-The project builds Swift Lambda binaries targeting Amazon Linux 2023 (ARM64). A custom Docker image handles cross-compilation, and SAM CLI manages packaging and CloudFormation deployment. Eight GitHub Actions workflows automate the full lifecycle from deployment through documentation publishing.
+The project builds Swift Lambda binaries targeting Amazon Linux 2023 (ARM64). A custom Docker image handles cross-compilation, and SAM CLI manages packaging and CloudFormation deployment. Seven GitHub Actions workflows automate the full lifecycle from deployment through documentation publishing. Actor provisioning and token minting are deliberately not among them — they run locally via the `ActivityProvisioner` CLI (see <doc:ProvisioningAccounts>).
 
 ## GitHub Actions Workflows
 
@@ -119,15 +119,6 @@ Runs the `ActivityPubCoreTests` unit test suite on every pull request.
 **Triggers:**
 - Pull request targeting `main`
 - Manual dispatch
-
-### Provision Actor (`provision-actor.yml`)
-
-Creates a new ActivityPub actor account with an RSA keypair and per-account bearer token stored in DynamoDB.
-
-**Triggers:**
-- Manual dispatch -- caller provides username, display name, optional summary, and target stage
-
-The bearer token is displayed in the workflow summary. Each account gets its own token stored as a `TOKEN#<sha256-hash>` record in DynamoDB, so multiple accounts can post independently.
 
 ### Run Integration Tests (`run-integration-tests.yml`)
 
