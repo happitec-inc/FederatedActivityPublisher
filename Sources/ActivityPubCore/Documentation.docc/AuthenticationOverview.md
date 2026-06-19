@@ -24,7 +24,7 @@ The client API endpoints (posting statuses, uploading media, updating profiles) 
 
 The ``BearerAuthResult`` returned on success includes the authenticated username and scope (e.g., `"read write"`). Invalid or missing tokens produce a ``BearerAuthError``.
 
-Per-account tokens stored in DynamoDB mean multiple actors can post independently without sharing or swapping a single SSM parameter. The Provision Actor workflow (`provision-actor.yml`) automatically creates a DynamoDB token record for each new account.
+Per-account tokens stored in DynamoDB mean multiple actors can post independently without sharing or swapping a single SSM parameter. Token records are created locally with the `ActivityProvisioner` CLI's `mint-token` subcommand; see <doc:ManagingActorsAndTokens>.
 
 ### Session Authentication (Web UI)
 

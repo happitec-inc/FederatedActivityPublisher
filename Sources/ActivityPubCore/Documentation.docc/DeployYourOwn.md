@@ -106,21 +106,11 @@ If these return valid JSON, the server is running.
 
 ## Step 9: Provision your first actor
 
-### Option A: GitHub Actions workflow (recommended)
-
-1. Go to **Actions > Provision Actor**
-2. Click **Run workflow**
-3. Enter username, display name, and optional summary
-4. Choose the stage
-5. Run the workflow
-6. **Copy the bearer token** from the workflow summary -- it is displayed once and cannot be retrieved later
-
-The workflow creates the actor profile in DynamoDB, generates an RSA keypair in SSM, and stores a per-account bearer token as a `TOKEN#<sha256-hash>` record in DynamoDB. Each account gets its own independent token.
-
-### Option B: CLI on a machine with Swift and AWS credentials
+Provisioning and token minting are done with the `ActivityProvisioner` CLI, run on a machine with Swift 6.3 and AWS credentials (DynamoDB and SSM write access). There is no GitHub Actions provisioning workflow: this repository is public, and a bearer token printed into a CI log or job summary would be exposed, so token issuance never runs in CI.
 
 ```bash
-# Provision the actor (RSA keypair to SSM, profile to DynamoDB)
+# Provision the actor (RSA keypair to SSM, profile to DynamoDB).
+# "provision" is the default subcommand and may be omitted.
 swift run ActivityProvisioner provision \
   --stage stage \
   --username mybot \
@@ -134,6 +124,7 @@ swift run ActivityProvisioner mint-token \
   --stage stage \
   --username mybot \
   --out token.txt
+chmod 600 token.txt
 ```
 
 Provisioning the actor and minting its token are separate steps. The token is shown only at mint time — store it securely and never commit it. See <doc:ManagingActorsAndTokens> for the full set of token commands (list, rotate, revoke) and the reasoning behind minting tokens locally rather than in CI.
@@ -180,7 +171,7 @@ Once you have verified everything works on `stage`:
 1. Re-run the environment workflow with `prod`
 2. Set `ACTIVITY_DISTRIBUTION_ID_PROD` and `CLIENT_API_DOMAIN_PROD` repository variables after the first prod deploy
 3. Create a GitHub release with a `v`-prefixed tag (e.g. `v1.0.0`) to trigger a prod deploy via `deploy-prod.yml`
-4. Re-provision your actor with `--stage prod` (or re-run the Provision Actor workflow targeting prod)
+4. Re-provision your actor with the CLI using `--stage prod`, then mint a prod token with `mint-token --stage prod`
 
 ## Troubleshooting
 

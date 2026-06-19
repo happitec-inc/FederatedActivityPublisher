@@ -4,24 +4,7 @@ This guide covers creating a new ActivityPub actor account from scratch, verifyi
 
 ## Step 1: Provision the actor
 
-Use the **Provision Actor** GitHub Actions workflow:
-
-1. Go to **Actions** > **Provision Actor** > **Run workflow**
-2. Fill in the inputs:
-   - **username**: lowercase, no spaces (e.g. `dailydigest`)
-   - **display-name**: human-readable name (e.g. `Daily Digest`)
-   - **summary**: bio text (optional)
-   - **stage**: `stage` for testing, `prod` for production
-3. Click **Run workflow**
-
-This creates:
-- A 2048-bit RSA keypair (private key stored in SSM at `/activity/{stage}/keys/{username}`)
-- An actor record in DynamoDB with the profile, inbox/outbox URLs, and public key
-- A per-account bearer token stored as a `TOKEN#<sha256-hash>` record in DynamoDB
-
-### CLI alternative
-
-If you prefer to run it locally (requires Swift 6.3 and AWS credentials):
+Provisioning is done with the `ActivityProvisioner` CLI, run locally (requires Swift 6.3 and AWS credentials with DynamoDB and SSM write access). `provision` is the default subcommand, so it may be omitted:
 
 ```bash
 swift run ActivityProvisioner \
@@ -32,6 +15,12 @@ swift run ActivityProvisioner \
   --server-domain {{SERVER_DOMAIN}} \
   --handle-domain {{HANDLE_DOMAIN}}
 ```
+
+This creates:
+- A 2048-bit RSA keypair (private key stored in SSM at `/activity/{stage}/keys/{username}`)
+- An actor record in DynamoDB with the profile, inbox/outbox URLs, and public key
+
+Minting the bearer token is a separate CLI step (see Step 3). This repository is public, so token issuance never runs in CI.
 
 ## Step 2: Verify the actor
 
@@ -50,11 +39,19 @@ curl -s -o /dev/null -w "%{http_code}" "https://{{SERVER_DOMAIN}}/@dailydigest"
 
 CloudFront caching may delay visibility by up to an hour. If you get 404s, wait and retry.
 
-## Step 3: Get the bearer token
+## Step 3: Mint the bearer token
 
-The provisioning workflow displays the bearer token in the **workflow summary** after the run completes. The raw token is shown once and cannot be retrieved later (only its SHA-256 hash is stored in DynamoDB).
+Mint a token with the `mint-token` subcommand. The raw token is printed to your terminal once and, with `--out`, also written to the named file. Only its SHA-256 hash is stored in DynamoDB, so the raw token cannot be retrieved later.
 
-Each account gets its own independent token. Provisioning a new actor does not affect existing accounts' tokens.
+```bash
+swift run ActivityProvisioner mint-token \
+  --stage prod \
+  --username dailydigest \
+  --out token.txt
+chmod 600 token.txt
+```
+
+The defaults are `--scope "read write"` and `--ttl-days 365`. Each account gets its own independent token, and provisioning a new actor does not affect existing accounts' tokens. See <doc:ManagingActorsAndTokens> for listing, rotating, and revoking tokens.
 
 ## Step 4: Test posting
 
