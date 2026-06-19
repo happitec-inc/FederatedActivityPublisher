@@ -1,6 +1,6 @@
 /// A one-time token that authorizes passkey enrollment for a specific user.
 ///
-/// The `ActivityProvisioner` `register-passkey` command (run via the `provision-actor` workflow)
+/// The `ActivityProvisioner` `register-passkey` command (run locally)
 /// generates a registration token and returns it to the operator. The operator hands it to the
 /// user out-of-band. When the user starts passkey registration, `AuthHandler` validates the token
 /// against a DynamoDB record under `PK=REGISTRATION_TOKEN#{token}`, `SK=META`, creates a

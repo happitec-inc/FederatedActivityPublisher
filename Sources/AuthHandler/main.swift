@@ -19,8 +19,8 @@
 ///
 /// ## Registration flow
 ///
-/// New passkeys require a pre-issued registration token (created via the
-/// `provision-actor` GitHub Actions workflow):
+/// New passkeys require a pre-issued registration token (created with the
+/// `ActivityProvisioner` CLI's `register-passkey` command, run locally):
 /// 1. Admin shares the one-time token URL (`GET /auth/register?token=...`).
 /// 2. Browser hits `POST /api/internal/passkeys/register-challenge` with the token
 ///    to get a `navigator.credentials.create()` challenge.
@@ -335,7 +335,7 @@ func handleAuthVerify(event: APIGatewayRequest, context: LambdaContext) async th
 /// Generates a WebAuthn registration challenge for a validated registration token.
 ///
 /// Called by the registration page before invoking `navigator.credentials.create()`.
-/// The registration token (a one-time value provisioned via the `provision-actor` workflow)
+/// The registration token (a one-time value provisioned via the `ActivityProvisioner` CLI)
 /// is validated but not yet consumed here — consumption happens in ``handleRegisterPasskey(event:context:)``
 /// to allow the browser to retry the authenticator step without needing a new token.
 ///
