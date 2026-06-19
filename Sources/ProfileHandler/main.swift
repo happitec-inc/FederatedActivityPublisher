@@ -177,6 +177,8 @@ let sharedStyles = """
     .post-entry { margin-bottom: 2rem; }
     .post-meta { font-size: 0.85rem; color: #888; margin-top: 0.5rem; }
     .post-cw { background: #fff3cd; border: 1px solid #ffc107; padding: 0.5rem 0.8rem; border-radius: 4px; margin-bottom: 0.8rem; font-weight: bold; }
+    .post-cw-details > summary.post-cw { cursor: pointer; list-style: revert; }
+    .post-cw-details[open] > summary.post-cw { margin-bottom: 0.8rem; }
     .post-media img { max-width: 100%; height: auto; border-radius: 4px; margin-top: 0.5rem; }
     .post-content { overflow-wrap: break-word; }
     .visibility-label { text-transform: capitalize; }
@@ -325,34 +327,46 @@ struct StatusEntry: HTML {
     var status: Status
     var domain: String
 
-    var body: some HTML {
-        div(.class("post-entry")) {
-            // Content warning
-            if let cw = status.contentWarning, !cw.isEmpty {
-                div(.class("post-cw")) {
-                    "Content Warning: \(cw)"
-                }
-            }
+    /// The post body (HTML content + image attachments), shared between the
+    /// content-warning and no-content-warning render paths.
+    @HTMLBuilder var postBody: some HTML {
+        // Post content
+        div(.class("post-content")) {
+            HTMLRaw(status.content)
+        }
 
-            // Post content
-            div(.class("post-content")) {
-                HTMLRaw(status.content)
-            }
-
-            // Media attachments
-            if let attachments = status.attachments, !attachments.isEmpty {
-                div(.class("post-media")) {
-                    for attachment in attachments {
-                        if attachment.isImage {
-                            figure {
-                                img(.src(attachment.url), .alt(attachment.description ?? "Media attachment"))
-                                if let desc = attachment.description, !desc.isEmpty {
-                                    figcaption { desc }
-                                }
+        // Media attachments
+        if let attachments = status.attachments, !attachments.isEmpty {
+            div(.class("post-media")) {
+                for attachment in attachments {
+                    if attachment.isImage {
+                        figure {
+                            img(.src(attachment.url), .alt(attachment.description ?? "Media attachment"))
+                            if let desc = attachment.description, !desc.isEmpty {
+                                figcaption { desc }
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+
+    var body: some HTML {
+        div(.class("post-entry")) {
+            // Content warning: when present, hide the body + media behind a
+            // native <details>/<summary> so the reader must reveal them
+            // (mirrors Mastodon's spoiler behavior). No content warning means
+            // the body renders inline as before.
+            if let cw = status.contentWarning, !cw.isEmpty {
+                details(.class("post-cw-details")) {
+                    summary(.class("post-cw")) {
+                        "Content Warning: \(cw)"
+                    }
+                    postBody
+                }
+            } else {
+                postBody
             }
 
             // Metadata line
@@ -453,6 +467,31 @@ struct PostPage: HTMLDocument {
         HTMLRaw("<style>\(sharedStyles)</style>")
     }
 
+    /// The post body (HTML content + image attachments), shared between the
+    /// content-warning and no-content-warning render paths.
+    @HTMLBuilder var postBody: some HTML {
+        // Post content
+        section(.class("post-content")) {
+            HTMLRaw(status.content)
+        }
+
+        // Media attachments
+        if let attachments = status.attachments, !attachments.isEmpty {
+            div(.class("post-media")) {
+                for attachment in attachments {
+                    if attachment.isImage {
+                        figure {
+                            img(.src(attachment.url), .alt(attachment.description ?? "Media attachment"))
+                            if let desc = attachment.description, !desc.isEmpty {
+                                figcaption { desc }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     var body: some HTML {
         article {
             // Author info
@@ -470,32 +509,19 @@ struct PostPage: HTMLDocument {
                 }
             }
 
-            // Content warning
+            // Content warning: when present, hide the body + media behind a
+            // native <details>/<summary> so the reader must reveal them
+            // (mirrors Mastodon's spoiler behavior). No content warning means
+            // the body renders inline as before.
             if let cw = status.contentWarning, !cw.isEmpty {
-                div(.class("post-cw")) {
-                    "Content Warning: \(cw)"
-                }
-            }
-
-            // Post content
-            section(.class("post-content")) {
-                HTMLRaw(status.content)
-            }
-
-            // Media attachments
-            if let attachments = status.attachments, !attachments.isEmpty {
-                div(.class("post-media")) {
-                    for attachment in attachments {
-                        if attachment.isImage {
-                            figure {
-                                img(.src(attachment.url), .alt(attachment.description ?? "Media attachment"))
-                                if let desc = attachment.description, !desc.isEmpty {
-                                    figcaption { desc }
-                                }
-                            }
-                        }
+                details(.class("post-cw-details")) {
+                    summary(.class("post-cw")) {
+                        "Content Warning: \(cw)"
                     }
+                    postBody
                 }
+            } else {
+                postBody
             }
 
             // Timestamp and visibility
