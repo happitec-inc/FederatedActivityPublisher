@@ -4,9 +4,9 @@
 /// It creates and manages ActivityPub actors directly in the same DynamoDB table the Lambda
 /// handlers read from, without going through the HTTP API.
 ///
-/// In production this tool is normally invoked via the `provision-actor.yml` GitHub Actions
-/// workflow rather than with local AWS credentials. The workflow logs sensitive output (bearer
-/// tokens, SSM paths) to the job summary, which is visible only to repository members.
+/// This tool is run locally with AWS credentials that have write access to DynamoDB and SSM.
+/// Sensitive output (bearer tokens, SSM paths) is printed to the operator's terminal (and, for
+/// `mint-token`, optionally written to an `--out` file); it never touches CI.
 ///
 /// Subcommands:
 /// - `provision` (default): create a new actor with an RSA keypair
@@ -45,8 +45,7 @@ struct ActivityProvisioner: AsyncParsableCommand {
 /// every request. The private key is stored as a `SecureString` in SSM Parameter Store at
 /// `/activity/{stage}/keys/{username}` and referenced by path in the DynamoDB item.
 ///
-/// Run this via the `provision-actor.yml` workflow in normal operation. Running locally
-/// requires AWS credentials with write access to both DynamoDB and SSM.
+/// Run this locally with AWS credentials that have write access to both DynamoDB and SSM.
 struct ProvisionActor: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "provision",

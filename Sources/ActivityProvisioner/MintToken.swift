@@ -5,8 +5,8 @@
 /// way to recover the raw token after this command exits, so copy it immediately.
 ///
 /// The Lambda API handlers authenticate requests by hashing the `Authorization: Bearer`
-/// header value and comparing it against the stored hash. Tokens minted here follow the
-/// same DynamoDB schema as those created by the `provision-actor.yml` workflow.
+/// header value and comparing it against the stored hash. Tokens are minted locally with this
+/// command (requires AWS credentials with DynamoDB write access); the raw token never touches CI.
 import ArgumentParser
 import AWSDynamoDB
 import Foundation

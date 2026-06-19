@@ -9,7 +9,7 @@
 ///
 /// The registration token in the URL is single-use and time-limited. The actor must complete
 /// the passkey registration flow at the printed URL before it expires. The table name defaults
-/// to the `TABLE_NAME` environment variable, which the GitHub Actions workflow sets.
+/// to the `TABLE_NAME` environment variable, which the operator sets when running the CLI.
 import ArgumentParser
 import ActivityPubCore
 import Foundation

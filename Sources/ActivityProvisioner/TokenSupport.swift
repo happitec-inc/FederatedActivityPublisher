@@ -1,8 +1,7 @@
 /// Shared helpers used by the token-management subcommands (mint, list, revoke, rotate).
 ///
 /// `TokenSupport` centralizes the DynamoDB item schema for bearer tokens so that tokens
-/// minted by this CLI validate against the same schema the `provision-actor.yml` workflow
-/// produces and the Lambda handlers verify against.
+/// minted by this CLI follow the same schema the Lambda handlers verify against.
 ///
 /// Token storage model: a raw 64-character hex token (32 random bytes) is generated locally
 /// and shown to the operator once. Only its lowercase SHA-256 hex hash is written to DynamoDB
@@ -13,7 +12,7 @@ import AWSDynamoDB
 import Crypto
 import Foundation
 
-/// DynamoDB item schema for token items (matches what `provision-actor.yml` writes):
+/// DynamoDB item schema for token items (matches what this CLI writes):
 ///
 ///     PK          = "TOKEN#<sha256hex>"
 ///     SK          = "META"
@@ -68,7 +67,7 @@ enum TokenSupport {
         bytes.map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Current timestamp formatted as the workflow writes it: "%Y-%m-%dT%H:%M:%SZ" (UTC).
+    /// Current timestamp formatted as the token items store it: "%Y-%m-%dT%H:%M:%SZ" (UTC).
     static func iso8601Now() -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -77,7 +76,7 @@ enum TokenSupport {
         return formatter.string(from: Date())
     }
 
-    /// Build the DynamoDB item for a minted token, matching the workflow schema.
+    /// Build the DynamoDB item for a minted token, matching the token item schema.
     static func tokenItem(
         hash: String,
         username: String,
