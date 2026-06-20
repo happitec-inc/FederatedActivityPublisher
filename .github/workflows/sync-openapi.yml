@@ -1,0 +1,14 @@
+name: Sync OpenAPI Spec
+on:
+  push:
+    branches: [main]
+    paths: ['openapi.yaml']
+permissions: {}
+jobs:
+  sync:
+    uses: happitec-inc/public-actions/.github/workflows/sync-openapi-spec.yml@main
+    secrets: inherit
+    with:
+      source-path: openapi.yaml
+      target-repo: happitec-inc/FederatedActivityClient
+      target-path: Sources/FACGenerated/openapi.yaml
