@@ -107,7 +107,7 @@ jobs:
             "A serverless ActivityPub server for brand accounts. Swift 6.3 on AWS Lambda, federated with Mastodon."
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: ./docs
 
@@ -120,4 +120,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
