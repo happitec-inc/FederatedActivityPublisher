@@ -56,7 +56,7 @@ runs:
 
     - name: Install SAM CLI via setup-sam action
       if: steps.check.outputs.method == 'action' && inputs.use-installer == 'true'
-      uses: aws-actions/setup-sam@v2
+      uses: aws-actions/setup-sam@v3
       with:
         use-installer: true
         token: ${{ inputs.token }}

@@ -111,7 +111,7 @@ jobs:
           sudo chmod 666 /var/run/docker.sock
 
       - name: Cache Docker image
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/docker-image.tar
           key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
@@ -299,7 +299,7 @@ jobs:
           docker --version
 
       - name: Cache Docker image
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/docker-image.tar
           key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
@@ -433,7 +433,7 @@ jobs:
           sudo chmod 666 /var/run/docker.sock
 
       - name: Cache Docker image
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/docker-image.tar
           key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
