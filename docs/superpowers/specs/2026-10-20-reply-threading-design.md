@@ -426,19 +426,25 @@ separately (FederatedActivityPublisher#277). These requirements match Mastodon's
 - **Ships first.** Every control except the address check ships first, on the existing
   `URLSession` fetch (`FetchRemoteObject.swift:36-58`).
   - The body cap, deadline and per-hop checks need the response delivered incrementally and
-    redirects surfaced to FAP code: a delegate-based data task with `urlSession(_:dataTask:didReceive:)`
-    and `urlSession(_:task:willPerformHTTPRedirection:newRequest:completionHandler:)`, not
+    redirects surfaced to FAP code: a delegate-based data task with
+    `urlSession(_:dataTask:didReceive:)` and
+    `urlSession(_:task:willPerformHTTPRedirection:newRequest:completionHandler:)`, not
     `data(for:)`. In `swift-corelibs-foundation`, both callbacks fire only when a delegate is
     attached: `HTTPURLProtocol.redirectFor(request:)` asks the task delegate and otherwise follows
     up to 20 redirects itself, and `NativeProtocol.notifyDelegate(aboutReceivedData:)` calls
     `didReceive` only for delegate-backed tasks (`Sources/FoundationNetworking/URLSession/`). The
     Step 0 tests on Linux are the measurement.
-  - Step 0b moves these controls into the FAP-written transport. The tests stay the same and must
-    pass on both.
+  - Step 0b moves these controls into the FAP-written transport. The step 0 tests carry over
+    unchanged and must pass on both; 0b adds the TLS and address tests (Testing).
 - **Quote-path behaviour change.** A `quoted_status_id` that is `http://`, redirects too often,
   is oversize or has a non-AP type now fails. The quote is then marked `failed`, through the
   existing path (`PostHandler/main.swift:282-287`).
-- **Release notes:** that behaviour change.
+- **Inbound key-fetch behaviour change.** Verifying an inbound signature now fetches the key
+  through `fetchRemoteObject`: only status 200 and the two ActivityStreams content types are
+  accepted, with at most 3 redirects and a 1 MB cap. The deadline is 10 seconds, the value
+  `fetchActorDocument` uses today (`KeyManager.swift:75`). A remote server whose actor document
+  fails these checks can no longer deliver to FAP.
+- **Release notes:** both behaviour changes.
 - **Tests:** these are the Step 0 tests listed under Testing.
 - **Components:** none. This is a change to one existing function.
 
@@ -977,18 +983,27 @@ removed before it counts.
 
 **Step 0 and 0b**, each against a local test server, run on Linux as well as macOS.
 
-The harness is real sockets and TLS, not a `URLProtocol` stub, because a stub skips the layer under
-test:
-- **TLS.** The test server presents a certificate from a test-only CA. The fetch takes its trust
-  configuration as an injected value; tests pass the test CA, production passes nothing and uses
-  the system store. Negative control: a production-configured fetch refuses the test server.
-- **Loopback.** The address policy is an injected value. Tests pass one that admits only the test
-  server's loopback port; production uses the default. Negative control: the default policy
-  refuses the test server.
-- **Server and trust mechanism.** Which server runs the harness on Linux, and how trust is
-  injected into the chosen connection layer, are decided with Open question 1. A new test-only
-  package is flagged there. It must not pull `libxml2-dev` or `libicu-dev` onto the runner, which
-  crashes `FoundationNetworking` test binaries.
+The harness uses real sockets, not a `URLProtocol` stub, because a stub skips the layer under test.
+
+- **Step 0 server.** A minimal HTTP/1.1 server written in the test target on POSIX sockets,
+  listening on loopback over plain `http`. No new package. It serves fixed responses, redirects,
+  oversize bodies and a slow drip.
+- **Scheme policy is injected.** `fetchRemoteObject` takes its scheme policy as a value.
+  Production passes `https` only. Step 0 tests pass one that also admits `http` to the test
+  server's port. Negative control: the production policy refuses the test server's `http` URI.
+  The `https`→`http` hop test uses the production policy for the hop.
+- **Why plain http in step 0.** On Linux, `FoundationNetworking` reads its CA bundle from fixed
+  system paths and handles no server-trust challenge, so a test CA can't be injected per task.
+  Plain http still exercises the delegate callbacks, incremental delivery and redirects on Linux,
+  which is what step 0 measures.
+- **Step 0b adds TLS and the address check.** The test server presents a certificate from a
+  test-only CA, passed to the transport as an injected trust value; production passes none and
+  uses the system store. The address policy is injected the same way; tests admit only the test
+  server's loopback port. Negative controls: a production-configured client refuses the test
+  server, on trust and on address.
+- **0b server.** Which TLS server runs the 0b harness on Linux is decided with Open question 1,
+  and any new test-only package is flagged there. It must not pull `libxml2-dev` or
+  `libicu-dev` onto the runner, which crashes `FoundationNetworking` test binaries.
 
 Tests:
 - **Redirects:** 3 pass, and a 4th fails.
@@ -1003,7 +1018,8 @@ Tests:
 - **LD profile:** `application/ld+json; profile="https://www.w3.org/ns/activitystreams"` passes,
   and bare `application/ld+json` fails.
 - **Key fetch:** `KeyManager` fetching a `keyId` that redirects 4 times, or returns over 1 MB,
-  fails. Negative control: before the move onto `fetchRemoteObject`, it passes.
+  fails. Negative control: run against the pre-move `fetchActorDocument`, the same test goes red
+  (the fetch succeeds).
 - **Address check (0b):** redirects to `127.0.0.1`, `169.254.169.254` and `10.0.0.1` fail.
 - **Request target (0b):** a URI with a query string and percent-encoded characters reaches the
   test server byte for byte. Negative control: the same URI through a plain `/{path}` template
@@ -1214,9 +1230,7 @@ The maintainer decided the following on 2026-10-20.
       has set the path and query, so `(request-target)` is the real one. Content-type and status
       checks can run on the response in FAP code.
     - **Dependencies.** The generator and runtime are already declared. Whether the transport adds a
-      package entry is part of Open question 1: SwiftPM resolves `.product(name:package:)` only
-      against packages the root manifest declares, so a connection layer that is only transitive
-      today becomes a new entry. Nothing imports `APIClient` today
+      package entry to `Package.swift` is part of Open question 1. Nothing imports `APIClient` today
       (only `Package.swift:240` names it), so `swift-openapi-runtime` and the generator plugin
       reach the deployed Lambdas, and the plugin runs in the `swift package archive` Docker build,
       for the first time.
@@ -1238,7 +1252,7 @@ The maintainer decided the following on 2026-10-20.
    - So the transport needs a TLS-capable connection layer that either exposes a connect-time hook
      or connects to a pre-validated address while keeping the original `Host` and SNI.
 
-   - The same choice settles the Linux test harness: which https server the Step 0/0b tests run
+   - The same choice settles the Linux test harness: which https server the step 0b tests run
      against, and how a test-only CA is injected (Testing, Step 0 and 0b).
 
    **Proposed:** while planning step 0b, list what the resolved dependency graph already provides
