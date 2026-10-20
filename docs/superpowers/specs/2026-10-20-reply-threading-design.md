@@ -1043,6 +1043,9 @@ Tests:
 - **Request target (0b):** a URI with a query string and percent-encoded characters reaches the
   test server byte for byte. Negative control: the same URI through a plain `/{path}` template
   fails.
+- **One client (0b):** two fetches to different origins through the same client instance each
+  reach their own test server. A fetch with no target bound throws before any connection, and
+  the placeholder origin receives nothing.
 
 **Phase 1**
 - **`buildNoteJSON`** emits `inReplyTo` when `inReplyToId` is set.
@@ -1240,8 +1243,13 @@ The maintainer decided the following on 2026-10-20.
       and `allowReserved` applies only to query parameters, so one `/{path}` template can't carry an
       arbitrary path and query. Instead:
       - the document's `servers:` holds a placeholder origin and the operation path is `/`;
-      - a client is built per request with `serverURL` set to the URI's origin;
-      - a FAP `ClientMiddleware` sets the request's path and query to the URI's, byte for byte.
+      - **one client** is built once per Lambda container and reused for every fetch;
+      - `fetchRemoteObject` binds the target URI in a `@TaskLocal` for the duration of the call;
+      - a FAP `ClientMiddleware` reads it and calls `next` with the URI's origin as the base URL
+        and the request's path and query set to the URI's, byte for byte. `next` takes the
+        request and the base URL as arguments: `next: @Sendable (HTTPRequest, HTTPBody?, URL)`
+        (`apple/swift-openapi-runtime`, `Sources/OpenAPIRuntime/Interface/ClientTransport.swift`).
+      - With no target bound, the middleware throws, so the placeholder origin is never contacted.
       The signed `(request-target)` (§3.2) and the `id == q` check (§3.3) both depend on this.
     - **Where the controls live.** The transport owns everything that happens during the exchange:
       redirects, per-hop scheme checks, signing of every hop including the first, the body cap,
