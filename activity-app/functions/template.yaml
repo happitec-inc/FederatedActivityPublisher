@@ -438,6 +438,13 @@ Resources:
             - Effect: Allow
               Action: kms:Decrypt
               Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+            # The inbox signs with actor keys only; the client-session key shares the prefix
+            - Effect: Deny
+              Action:
+                - ssm:GetParameter
+                - ssm:GetParameters
+                - ssm:GetParametersByPath
+              Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/activity/${Stage}/keys/session-signing-key"
       Events:
         PostInbox:
           Type: Api
