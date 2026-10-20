@@ -33,7 +33,8 @@ work.
 **Why 3a waits for 0b.** Phase 3a adds a new way for an authenticated user to make the server fetch
 an arbitrary URL (`resolve=true` search, §3.3) and adds signed actor fetches in `DeliverHandler`
 (§3.5). Without the address check, search adds a path to loopback and link-local addresses that
-a signed-in user controls directly and whose result is returned to that user. Steps 1 and 2 don't fetch remote URLs and don't wait.
+a signed-in user controls directly and whose result is returned to that user. Steps 1 and 2 don't
+fetch remote URLs and don't wait.
 
 **Why 3b goes last.** Delivery degrades to unsigned when signing fails (§3.6). Remote replies
 therefore work without 3b. Only forwarding to the parent author's followers waits for it.
@@ -434,19 +435,22 @@ separately (FederatedActivityPublisher#277). These requirements match Mastodon's
     up to 20 redirects itself, and `NativeProtocol.notifyDelegate(aboutReceivedData:)` calls
     `didReceive` only for delegate-backed tasks (`Sources/FoundationNetworking/URLSession/`). The
     Step 0 tests on Linux are the measurement.
-  - Step 0b moves these controls into the FAP-written transport. The step 0 tests carry over
-    unchanged and must pass on both; 0b adds the TLS and address tests (Testing).
+  - Step 0b moves these controls into the FAP-written transport. The step 0 tests carry over and
+    must pass on both, with the test address policy added so the plain-http test server stays
+    reachable; 0b adds the TLS and address tests (Testing).
 - **Quote-path behaviour change.** A `quoted_status_id` that is `http://`, redirects too often,
   is oversize or has a non-AP type now fails. The quote is then marked `failed`, through the
   existing path (`PostHandler/main.swift:282-287`).
 - **Inbound key-fetch behaviour change.** Verifying an inbound signature now fetches the key
   through `fetchRemoteObject`: only status 200 and the two ActivityStreams content types are
-  accepted, with at most 3 redirects and a 1 MB cap. The deadline is 10 seconds, the value
-  `fetchActorDocument` uses today (`KeyManager.swift:75`). A remote server whose actor document
+  accepted, with at most 3 redirects and a 1 MB cap. The deadline is an absolute 10 seconds.
+  Today's 10 seconds (`KeyManager.swift:75`) is an idle timeout, so a slow response that keeps
+  sending bytes now fails where it used to succeed. A remote server whose actor document
   fails these checks can no longer deliver to FAP.
 - **Release notes:** both behaviour changes.
 - **Tests:** these are the Step 0 tests listed under Testing.
-- **Components:** none. This is a change to one existing function.
+- **Components:** none. `fetchRemoteObject` changes, and `KeyManager.fetchActorDocument` moves
+  onto it.
 
 ## Phase 1 — Self-replies
 
@@ -988,10 +992,14 @@ The harness uses real sockets, not a `URLProtocol` stub, because a stub skips th
 - **Step 0 server.** A minimal HTTP/1.1 server written in the test target on POSIX sockets,
   listening on loopback over plain `http`. No new package. It serves fixed responses, redirects,
   oversize bodies and a slow drip.
-- **Scheme policy is injected.** `fetchRemoteObject` takes its scheme policy as a value.
-  Production passes `https` only. Step 0 tests pass one that also admits `http` to the test
-  server's port. Negative control: the production policy refuses the test server's `http` URI.
-  The `https`→`http` hop test uses the production policy for the hop.
+- **Scheme policy is injected.** `fetchRemoteObject` takes its scheme policy as a parameter
+  whose default is `https` only, and `KeyManager` and every production call site use the
+  default. The permissive policy is built only in the test target. Step 0 tests pass one that
+  admits `http` to the test server's port only, on the initial request and on every hop.
+  Negative control: the default policy refuses the test server's `http` URI.
+- **Per-hop scheme check in step 0.** A redirect to an `http` URI the policy doesn't admit (a
+  different loopback port) fails. The full `https`→`http` hop test needs a TLS server and runs
+  in 0b.
 - **Why plain http in step 0.** On Linux, `FoundationNetworking` reads its CA bundle from fixed
   system paths and handles no server-trust challenge, so a test CA can't be injected per task.
   Plain http still exercises the delegate callbacks, incremental delivery and redirects on Linux,
@@ -1007,7 +1015,8 @@ The harness uses real sockets, not a `URLProtocol` stub, because a stub skips th
 
 Tests:
 - **Redirects:** 3 pass, and a 4th fails.
-- **Scheme:** an `http://` initial URI fails, and an `https`→`http` hop fails.
+- **Scheme:** an `http://` initial URI fails under the default policy, and a hop to a
+  non-admitted `http` URI fails. In 0b, an `https`→`http` hop fails.
 - **Body:** a body over 1 MB fails.
 - **Content type:** a `text/html` response fails.
 - **Status:** a non-200 fails.
@@ -1188,8 +1197,8 @@ The maintainer decided the following on 2026-10-20.
       commit each, whether FAP's code ends up using them or only learns from them.
     - **Credit, prominently.** Both authors are listed as contributors: in a new
       `CONTRIBUTORS.md`, and in an Acknowledgements section in `README.md` that links both
-      packages (this spec's reading of "list them as contributors"; Open question 2). This applies whether the
-      vendored files are in use or were only inspiration. FAP source informed by them links to
+      packages (this spec's reading of "list them as contributors"; Open question 2). This
+      applies whether the vendored files are in use or were only inspiration. FAP source informed by them links to
       the vendored file it follows. The wording credits their work and doesn't suggest they
       endorse FAP (BSD-3-Clause clause 3).
     - **Implementation rules** (added by this spec for the signing-path rule, not part of the
@@ -1253,7 +1262,8 @@ The maintainer decided the following on 2026-10-20.
      or connects to a pre-validated address while keeping the original `Host` and SNI.
 
    - The same choice settles the Linux test harness: which https server the step 0b tests run
-     against, and how a test-only CA is injected (Testing, Step 0 and 0b).
+     against, and how a test-only CA is injected (Testing, Step 0 and 0b). The transport must also
+     accept plain `http` under an injected test policy, so the step 0 tests carry over.
 
    **Proposed:** while planning step 0b, list what the resolved dependency graph already provides
    for both, with receipts, name any new package (runtime or test-only), and bring the choice back
