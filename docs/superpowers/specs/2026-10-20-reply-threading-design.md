@@ -32,8 +32,8 @@ work.
 
 **Why 3a waits for 0b.** Phase 3a adds a new way for an authenticated user to make the server fetch
 an arbitrary URL (`resolve=true` search, §3.3) and adds signed actor fetches in `DeliverHandler`
-(§3.5). Without the address check, search becomes a second path to loopback and link-local
-addresses. Steps 1 and 2 don't fetch remote URLs and don't wait.
+(§3.5). Without the address check, search adds a path to loopback and link-local addresses that
+a signed-in user controls directly and whose result is returned to that user. Steps 1 and 2 don't fetch remote URLs and don't wait.
 
 **Why 3b goes last.** Delivery degrades to unsigned when signing fails (§3.6). Remote replies
 therefore work without 3b. Only forwarding to the parent author's followers waits for it.
@@ -375,7 +375,10 @@ unlisted `[followers]`/`[Public]`, and private `[followers]`/`[]`.
   - It accepts any URL `URL(string:)` parses, including `http://` and any host (`:37-39`).
   - It uses `URLSession.shared`, which follows redirects (`:45`).
   - Its timeout is idle-only, and it has no body cap or content-type check.
-- `KeyManager.fetchActorDocument` is unsigned (`KeyManager.swift:68-74`), and parses at `:89-105`.
+- `KeyManager.fetchActorDocument` fetches with `URLSession.shared` directly, not through
+  `fetchRemoteObject`, unsigned (`KeyManager.swift:68-77`), and parses at `:89-105`. Its URI comes
+  from the `keyId` of an inbound `Signature` header (`InboxHandler/main.swift:115,125,153`).
+- `DeliverHandler` POSTs to stored inbox URLs with `URLSession.shared` (`DeliverHandler/main.swift:98`).
 - The PostHandler session key lives under the keys prefix: `"\(ssmKeyPrefix)/session-signing-key"`
   (`PostHandler/main.swift:51-52`).
 
@@ -404,8 +407,11 @@ unlisted `[followers]`/`[Public]`, and private `[followers]`/`[]`.
 
 ## Step 0 — Fetch hardening (security)
 
-Every control is added inside `fetchRemoteObject`, so every caller is covered, the quote path
-included. These requirements match Mastodon's `Request` and `fetch_resource`:
+Every control is added inside `fetchRemoteObject`. `KeyManager.fetchActorDocument` moves onto
+`fetchRemoteObject` in the same change, keeping its parser (`KeyManager.swift:89-105`), so every
+remote GET is covered: the quote path, inbox object fetches and key fetches. Delivery POSTs from
+`DeliverHandler` are not fetches and are outside this spec; their address check is tracked
+separately (FederatedActivityPublisher#277). These requirements match Mastodon's `Request` and `fetch_resource`:
 
 | Control | Requirement | Reference |
 |---|---|---|
@@ -422,8 +428,11 @@ included. These requirements match Mastodon's `Request` and `fetch_resource`:
   - The body cap, deadline and per-hop checks need the response delivered incrementally and
     redirects surfaced to FAP code: a delegate-based data task with `urlSession(_:dataTask:didReceive:)`
     and `urlSession(_:task:willPerformHTTPRedirection:newRequest:completionHandler:)`, not
-    `data(for:)`. That `FoundationNetworking` on Linux delivers both callbacks is [inferred]. The
-    Step 0 tests run on Linux and are the measurement.
+    `data(for:)`. In `swift-corelibs-foundation`, both callbacks fire only when a delegate is
+    attached: `HTTPURLProtocol.redirectFor(request:)` asks the task delegate and otherwise follows
+    up to 20 redirects itself, and `NativeProtocol.notifyDelegate(aboutReceivedData:)` calls
+    `didReceive` only for delegate-backed tasks (`Sources/FoundationNetworking/URLSession/`). The
+    Step 0 tests on Linux are the measurement.
   - Step 0b moves these controls into the FAP-written transport. The tests stay the same and must
     pass on both.
 - **Quote-path behaviour change.** A `quoted_status_id` that is `http://`, redirects too often,
@@ -966,7 +975,22 @@ removed before it counts.
 
 ### Unit (`Tests/ActivityPubCoreTests`, Swift Testing)
 
-**Step 0 and 0b**, each against a local test server, run on Linux as well as macOS:
+**Step 0 and 0b**, each against a local test server, run on Linux as well as macOS.
+
+The harness is real sockets and TLS, not a `URLProtocol` stub, because a stub skips the layer under
+test:
+- **TLS.** The test server presents a certificate from a test-only CA. The fetch takes its trust
+  configuration as an injected value; tests pass the test CA, production passes nothing and uses
+  the system store. Negative control: a production-configured fetch refuses the test server.
+- **Loopback.** The address policy is an injected value. Tests pass one that admits only the test
+  server's loopback port; production uses the default. Negative control: the default policy
+  refuses the test server.
+- **Server and trust mechanism.** Which server runs the harness on Linux, and how trust is
+  injected into the chosen connection layer, are decided with Open question 1. A new test-only
+  package is flagged there. It must not pull `libxml2-dev` or `libicu-dev` onto the runner, which
+  crashes `FoundationNetworking` test binaries.
+
+Tests:
 - **Redirects:** 3 pass, and a 4th fails.
 - **Scheme:** an `http://` initial URI fails, and an `https`→`http` hop fails.
 - **Body:** a body over 1 MB fails.
@@ -976,6 +1000,10 @@ removed before it counts.
 - Negative control: a compliant response passes.
 - **Content type with parameters:** `application/activity+json; charset=utf-8` passes, and
   `text/html; charset=utf-8` fails.
+- **LD profile:** `application/ld+json; profile="https://www.w3.org/ns/activitystreams"` passes,
+  and bare `application/ld+json` fails.
+- **Key fetch:** `KeyManager` fetching a `keyId` that redirects 4 times, or returns over 1 MB,
+  fails. Negative control: before the move onto `fetchRemoteObject`, it passes.
 - **Address check (0b):** redirects to `127.0.0.1`, `169.254.169.254` and `10.0.0.1` fail.
 - **Request target (0b):** a URI with a query string and percent-encoded characters reaches the
   test server byte for byte. Negative control: the same URI through a plain `/{path}` template
@@ -1095,17 +1123,17 @@ Phase 3 needs a third-party server, so it is in the manual federation checks bel
 ### Build gate
 
 - Build every target for Linux with `swift package archive --allow-network-connections docker`.
-- Run the Step 0, 0b and 3b unit tests on Linux.
   The deployed binary is the Linux build, and a macOS `swift build` doesn't catch Linux-only
   compile errors.
+- Run the Step 0, 0b and 3b unit tests on Linux.
 - Build the generated consumers against the branch's `openapi.yaml`.
 
 ## Unverified
 
 - **The transport under the FAP-generated fetch client.** The client is decided (decision 14).
   The transport is Open question 1.
-- **Incremental delivery and redirect callbacks in `FoundationNetworking`.** [inferred]; the
-  Step 0 Linux tests measure it.
+- **Incremental delivery and redirect callbacks in `FoundationNetworking`.** Read in
+  `swift-corelibs-foundation` source (Step 0); the Step 0 Linux tests measure it.
 - **Live secure-mode acceptance of a regular actor key.** The source has been read
   (`signature_verification.rb:45` onward). The phase 3a secure-mode check is the measurement.
 - **Mastodon internals.** The `items_context_url` path shape, a read of `context` on intake, the
@@ -1136,14 +1164,15 @@ The maintainer decided the following on 2026-10-20.
     (§2.6, §3.5).
 
 13. **LD-signature canonicalization: reference implementations, vendored and credited**
-    (Open Question 1, option B).
+    (former Open Question 1, option B; the revision at `6271b24`).
     - FAP owns the canonicalization in ActivityPubCore: `toRdf` for the closed set of terms and
       shapes FAP emits, plus RDFC-1.0.
     - **Vendor the reference code.** The source files of `1amageek/swift-knowledge-graph` (MIT)
       and `mattmassicotte/JSONLD` (BSD-3-Clause) are copied into the repository at one pinned
       commit each, whether FAP's code ends up using them or only learns from them.
-    - **Credit, prominently.** Both authors are listed in a new `CONTRIBUTORS.md`, and in an
-      Acknowledgements section in `README.md` that links both packages. This applies whether the
+    - **Credit, prominently.** Both authors are listed as contributors: in a new
+      `CONTRIBUTORS.md`, and in an Acknowledgements section in `README.md` that links both
+      packages (this spec's reading of "list them as contributors"; Open question 2). This applies whether the
       vendored files are in use or were only inspiration. FAP source informed by them links to
       the vendored file it follows. The wording credits their work and doesn't suggest they
       endorse FAP (BSD-3-Clause clause 3).
@@ -1166,7 +1195,7 @@ The maintainer decided the following on 2026-10-20.
     - The gate in §3.6 applies to all of it. Step 3b stays last, because delivery degrades to
       unsigned.
 14. **HTTP client for remote fetches: FAP's own, generated with swift-openapi-generator**
-    (Open Question 2).
+    (former Open Question 2; the revision at `6271b24`).
     - FAP writes an OpenAPI document for the remote ActivityPub object fetch: a `GET` with the
       AS `Accept` header, a 200 response in `application/activity+json` or
       `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`, and redirects.
@@ -1180,9 +1209,14 @@ The maintainer decided the following on 2026-10-20.
       - a FAP `ClientMiddleware` sets the request's path and query to the URI's, byte for byte.
       The signed `(request-target)` (§3.2) and the `id == q` check (§3.3) both depend on this.
     - **Where the controls live.** The transport owns everything that happens during the exchange:
-      redirects, per-hop scheme checks and re-signing, the body cap, the deadline and the address
-      check. Content-type and status checks can run on the response in FAP code.
-    - **Dependencies.** No new package in `Package.swift`. But nothing imports `APIClient` today
+      redirects, per-hop scheme checks, signing of every hop including the first, the body cap,
+      the deadline and the address check. Signing in the transport happens after the middleware
+      has set the path and query, so `(request-target)` is the real one. Content-type and status
+      checks can run on the response in FAP code.
+    - **Dependencies.** The generator and runtime are already declared. Whether the transport adds a
+      package entry is part of Open question 1: SwiftPM resolves `.product(name:package:)` only
+      against packages the root manifest declares, so a connection layer that is only transitive
+      today becomes a new entry. Nothing imports `APIClient` today
       (only `Package.swift:240` names it), so `swift-openapi-runtime` and the generator plugin
       reach the deployed Lambdas, and the plugin runs in the `swift package archive` Docker build,
       for the first time.
@@ -1193,13 +1227,24 @@ The maintainer decided the following on 2026-10-20.
    per-hop scheme checks and re-signing, the 1 MB cap, the absolute deadline and the address check
    (decision 14).
    - `OpenAPIURLSession` won't do. Its README says streaming is available only on Apple platforms
-     and points Linux users to the AsyncHTTPClient transport, so on the Lambda the body arrives
-     buffered. `URLSession` also follows redirects inside the session.
-   - `URLSessionTaskTransactionMetrics.remoteAddress` is documented for Apple platforms only, and
-     it reports a connection after it is made, so it can't refuse one.
+     and points Linux users to the AsyncHTTPClient transport
+     (https://github.com/apple/swift-openapi-urlsession), so on the Lambda the body arrives
+     buffered. The per-hop checks also need the redirect callback on a delegate FAP owns, so they
+     live in the transport FAP writes.
+   - `URLSessionTaskTransactionMetrics.remoteAddress`
+     (https://developer.apple.com/documentation/foundation/urlsessiontasktransactionmetrics/remoteaddress)
+     is documented for Apple platforms only, and it reports a connection after it is made, so it
+     can't refuse one.
    - So the transport needs a TLS-capable connection layer that either exposes a connect-time hook
      or connects to a pre-validated address while keeping the original `Host` and SNI.
 
+   - The same choice settles the Linux test harness: which https server the Step 0/0b tests run
+     against, and how a test-only CA is injected (Testing, Step 0 and 0b).
+
    **Proposed:** while planning step 0b, list what the resolved dependency graph already provides
-   for that, with receipts, and bring the choice back to the maintainer before writing it. Step 0
-   ships first, on the existing fetch, and step 3a waits for 0b.
+   for both, with receipts, name any new package (runtime or test-only), and bring the choice back
+   to the maintainer before writing it. Step 0 ships first, on the existing fetch, and step 3a
+   waits for 0b.
+2. **"List them as contributors."** This spec reads it as a new `CONTRIBUTORS.md` plus a README
+   Acknowledgements section (decision 13). Confirm, or name another place (for example GitHub's
+   co-author trailers on the vendoring commit).
