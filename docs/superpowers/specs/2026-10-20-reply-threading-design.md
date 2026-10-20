@@ -285,11 +285,34 @@ contains no `visibility` handling.
 
 ### Swift JSON-LD and RDF canonicalization
 
-No third-party Swift JSON-LD or RDF canonicalization package is relied on. Code on the signing
-path must be code FAP owns, or a dependency the maintainer has vetted and approved explicitly in
-its own review. Candidate packages found by searching package indexes are not evidence. A
+Code on the signing path must be code FAP owns, or a dependency the maintainer has vetted and
+approved explicitly. Candidate packages found by searching package indexes are not evidence. A
 project's own README and CI results are statements from the party being evaluated, so they don't
 count as vetting.
+
+The maintainer has vetted two packages on the strength of their authors (2026-10-20). Both were
+read from their repository pages only, and their scope comes from their own READMEs, so it is
+unverified until FAP's gate runs:
+
+- **`mattmassicotte/JSONLD`** (BSD-3-Clause, no tagged releases).
+  - Codable decoding and encoding of JSON-LD documents, centred on `@context` (`ContextOnlyDocument`).
+  - Its README does not mention expansion, compaction, `toRdf`, canonicalization or document
+    loaders.
+- **`1amageek/swift-knowledge-graph`** (MIT, no tagged releases, no third-party dependencies).
+  - A JSON-LD 1.1 parser that "implements the toRdf algorithm and is exercised against the W3C
+    `toRdf` test suite", plus N-Quads and other RDF parsers.
+  - Unsupported features are rejected with `ParserError.unsupportedFeature`, including scoped
+    contexts and term-driven container maps.
+  - Its README does not mention canonicalization, compaction, document loaders or Linux.
+
+Neither package provides RDFC-1.0, so canonicalization is FAP's to own either way.
+
+**Gaps to check against FAP's documents** [inferred]:
+- **Container definitions.** The Note `@context` FAP emits, and Mastodon's `full_context`, contain
+  container definitions (`focalPoint` with `@container: @list`). A parser that rejects
+  term-driven container maps may reject exactly the documents FAP signs.
+- **Context loading.** Contexts must load from bundled copies with no network access.
+- **Linux.** The deployed binary is a Linux build, and neither README states Linux support.
 
 ## Current FAP behaviour
 
@@ -1086,17 +1109,29 @@ The maintainer decided the following on 2026-10-20.
 
 ## Open questions
 
-1. **LD-signature canonicalization.** The proposal is that FAP owns a narrow implementation in
-   ActivityPubCore:
-   - JSON-LD `toRdf` for the closed set of terms and shapes FAP emits
-   - RDFC-1.0
-   - either a JSON-LD compactor against Mastodon's `full_context`, or reliance on the committed
-     Ruby compaction fixture for the compaction-safety test
-
-   This keeps third-party code off the signing path. The cost is a substantial module that FAP
-   owns. The gate in §3.6 applies, and step 3b stays last, because delivery degrades to unsigned.
-   Any third-party alternative needs its own explicit vetting decision by the maintainer before
-   it is considered.
+1. **LD-signature canonicalization: depend, or reference and own?** RDFC-1.0 is FAP's in both
+   options.
+   - **Option A: depend on the vetted packages.**
+     - Use `1amageek/swift-knowledge-graph` for JSON-LD → RDF, and optionally
+       `mattmassicotte/JSONLD` for typed `@context` modelling.
+     - Pin both to exact commits, since neither has releases.
+     - **Gate:**
+       - a Linux build (`swift package archive`);
+       - the W3C `toRdf` and RDFC-1.0 suites in FAP's CI;
+       - FAP's own Note, Create and Delete documents parsing without `unsupportedFeature`;
+       - the Mastodon-generated signature and compaction fixtures.
+     - Any commit bump is a reviewed change that re-runs the gate.
+   - **Option B: reference implementations, FAP-owned code.** Do what was done for DisplayCtrl:
+     - FAP owns a narrow implementation in ActivityPubCore. It covers `toRdf` for the closed set of
+       terms and shapes FAP emits, plus RDFC-1.0.
+     - The code links to the reference implementations it was informed by, for credit and
+       provenance: the two packages above, Mastodon's `linked_data_signature.rb`, and ruby-rdf's
+       `rdf-normalize`.
+     - No third-party code runs on the signing path.
+     - It is gated by the same suites and fixtures as Option A.
+     - The compaction-safety test relies on the committed Ruby compaction fixture.
+   - **In both options:** the gate in §3.6 applies, and step 3b stays last, because delivery
+     degrades to unsigned. This is the maintainer's call.
 2. **HTTP client for the Step 0 address check.** A solution can take one of two shapes:
    - **(a)** A client that exposes a resolver or connect hook, so the address is checked at
      connect time.
