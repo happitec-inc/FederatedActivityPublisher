@@ -283,36 +283,13 @@ contains no `visibility` handling.
   remains idle for longer than the timeout interval, the request is considered to have timed out"
   (https://developer.apple.com/documentation/foundation/nsurlrequest/timeoutinterval).
 
-### Swift JSON-LD and RDF canonicalization (checked 2026-10-20)
+### Swift JSON-LD and RDF canonicalization
 
-A Swift Package Index and GitHub search found one Swift stack that covers JSON-LD `toRdf` plus
-RDF canonicalization. Other Swift JSON-LD packages found are expansion-only or Codable types.
-
-**`Kingpin-Apps/swift-jsonld` 0.1.3.**
-- **Scope.** The README states "100% conformance" against the W3C JSON-LD 1.1 test suite. Its
-  conformance table lists ToRDF 335/335 and a total of 1245/1245.
-- **Context loading.** It provides `JSONLD.toRDF`, `JSONLD.canonize` (delegating to
-  `swift-rdf-canonize`) and a pluggable `JSONLDDocumentLoader`.
-  - "By default a string-shaped `@context` reference throws `loadingRemoteContextFailed` — the
-    library does not touch the network unless a loader is supplied".
-- **Its own dependency.** It depends on `swift-rdf-canonize` `from: "0.2.2"` (`Package.swift:22`).
-
-**`Kingpin-Apps/swift-rdf-canonize` 0.2.2.** Its README states that it passes "every entry in
-the W3C `rdf-canon` conformance suite — all 86 tests".
-
-**CI for both.**
-- Both repositories run `swift build` and `swift test --parallel`, with the suites checked out as
-  submodules, on `macos-latest` and on `ubuntu-latest` in a `swift:6.3` container
-  (`.github/workflows/swift.yml`).
-- The latest `main` runs are green: `swift-jsonld` `626a0cc` and `swift-rdf-canonize` `65dae36`,
-  both 2026-09-22.
-
-**Risk profile.**
-- Both are MIT, single-author and pre-1.0. The first release was 2026-06-05/06, and the last code
-  release was 2026-06-06. The September commits only bump CI actions.
-- `swift-jsonld` has 3 stars, and `swift-rdf-canonize` has 0.
-- **The risk is maintenance and supply chain on a signing path, not conformance** (Open
-  Question 1).
+No third-party Swift JSON-LD or RDF canonicalization package is relied on. Code on the signing
+path must be code FAP owns, or a dependency the maintainer has vetted and approved explicitly in
+its own review. Candidate packages found by searching package indexes are not evidence. A
+project's own README and CI results are statements from the party being evaluated, so they don't
+count as vetting.
 
 ## Current FAP behaviour
 
@@ -929,7 +906,7 @@ direct parent is remote**. Those are exactly the activities `forward_for_reply` 
 | Component | What it is |
 |---|---|
 | LD signer | A new ActivityPubCore module: canonicalization, three embedded contexts, RSA-SHA256 |
-| Canonicalization stack | A new dependency (Option A) or a module FAP owns (Option B) |
+| Canonicalization | A module FAP owns in ActivityPubCore (Open Question 1) |
 | Context alignment | A change to `buildNoteJSON` / `buildCreateActivityJSON` |
 | Fixture generator | A committed script, run once outside CI |
 
@@ -1073,14 +1050,9 @@ Phase 3 needs a third-party server, so it is in the manual federation checks bel
   The deployed binary is the Linux build, and a macOS `swift build` doesn't catch Linux-only
   compile errors.
 - Build the generated consumers against the branch's `openapi.yaml`.
-- **Option A only:** pin both `swift-jsonld` and `swift-rdf-canonize` with `exact:` in
-  `Package.swift`. `swift-jsonld` itself depends on `swift-rdf-canonize` `from: "0.2.2"`, and
-  `Package.resolved` isn't committed.
 
 ## Unverified
 
-- **Kingpin maintenance.** Whether `swift-jsonld` and `swift-rdf-canonize` will be maintained. The
-  last code release was 2026-06-06, and later commits only touch CI.
 - **The HTTP client for per-connection address checks.** No client has been chosen (Open
   Question 2).
 - **Live secure-mode acceptance of a regular actor key.** The source has been read
@@ -1114,27 +1086,17 @@ The maintainer decided the following on 2026-10-20.
 
 ## Open questions
 
-1. **LD-signature canonicalization: adopt or own?**
-   - **Option A.** Adopt `Kingpin-Apps/swift-jsonld` 0.1.3 and `swift-rdf-canonize` 0.2.2,
-     pinned `exact:`.
-     - Both README-claim full W3C conformance, and run the suites in CI on Linux.
-     - `swift-jsonld`'s loader doesn't touch the network unless one is supplied.
-     - **The risk is maintenance and supply chain on a signing path.** Both are single-author,
-       pre-1.0 and four months old, with the last code release on 2026-06-06. A compromised or
-       abandoned release would sit on the code that signs FAP's activities.
-   - **Option B.** Own a narrow implementation in ActivityPubCore:
-     - JSON-LD `toRdf` for the closed set of terms and shapes FAP emits
-     - RDFC-1.0
-     - either a JSON-LD compactor against Mastodon's `full_context`, or reliance on the committed
-       Ruby compaction fixture for the compaction-safety test
+1. **LD-signature canonicalization.** The proposal is that FAP owns a narrow implementation in
+   ActivityPubCore:
+   - JSON-LD `toRdf` for the closed set of terms and shapes FAP emits
+   - RDFC-1.0
+   - either a JSON-LD compactor against Mastodon's `full_context`, or reliance on the committed
+     Ruby compaction fixture for the compaction-safety test
 
-     There is no third-party code on the signing path. The cost is a substantial module that FAP
-     owns.
-   - **Either way:** the gate in §3.6 applies, and step 3b stays last, because delivery degrades
-     to unsigned.
-   - **Proposed:** Option A, pinned `exact:`, gated by the W3C suites in FAP's CI and the
-     Mastodon fixtures. Any version bump is a reviewed change that re-runs the gate. Fall back to
-     B if the gate fails, or if the packages are abandoned.
+   This keeps third-party code off the signing path. The cost is a substantial module that FAP
+   owns. The gate in §3.6 applies, and step 3b stays last, because delivery degrades to unsigned.
+   Any third-party alternative needs its own explicit vetting decision by the maintainer before
+   it is considered.
 2. **HTTP client for the Step 0 address check.** A solution can take one of two shapes:
    - **(a)** A client that exposes a resolver or connect hook, so the address is checked at
      connect time.
