@@ -14,20 +14,26 @@ remote servers as N unrelated posts.
 
 ## Sequence
 
-The work ships as five changes, in order. Each can be released on its own.
+The work ships as six changes, in order. Each can be released on its own.
 
 | Step | Change | Depends on | New components (full list in each section) |
 |---|---|---|---|
-| 0 | **Fetch hardening**, a security change to the existing shared fetch | — | None. Scheme, redirect, body, content-type and deadline controls on `fetchRemoteObject`. The per-connection address check lands with the FAP-generated fetch client (decision 14). |
+| 0 | **Fetch hardening**, a security change to the existing shared fetch | — | None. Scheme, redirect, body, content-type, status and deadline controls on `fetchRemoteObject`. |
+| 0b | **Generated fetch client and transport** (decision 14) | 0, Open question 1 | A FAP-authored OpenAPI document, a generated client target, a FAP-written `ClientTransport` that owns redirects, per-hop checks and re-signing, the body cap, the deadline and the per-connection address check |
 | 1 | Self-replies | — | None |
 | 2 | Replies to other local actors | 1 | `SearchHandler` Lambda; `GET /api/v2/search` route and CloudFront behaviour; `REF#` item type |
-| 3a | Replies to remote statuses, delivered unsigned | 0, 2 | Remote resolve in `SearchHandler`; remote `REF#` entries; `signGet`; actor-URI delivery in `DeliverHandler` |
+| 3a | Replies to remote statuses, delivered unsigned | 0b, 2 | Remote resolve in `SearchHandler`; remote `REF#` entries; `signGet`; actor-URI delivery in `DeliverHandler` |
 | 3b | Linked Data Signatures on remote replies | 3a | LD signing in ActivityPubCore: FAP-owned canonicalization with vendored, credited reference code (decision 13), and `@context` alignment |
 
 **Why step 0 goes first.** The quote path already sends client-supplied URIs to `fetchRemoteObject`
 with no scheme check, unlimited redirects and no body cap (`FetchRemoteObject.swift:37-45`;
 `PostHandler/main.swift:252,264`). That exposure exists today and depends on nothing in the reply
 work.
+
+**Why 3a waits for 0b.** Phase 3a adds a new way for an authenticated user to make the server fetch
+an arbitrary URL (`resolve=true` search, §3.3) and adds signed actor fetches in `DeliverHandler`
+(§3.5). Without the address check, search becomes a second path to loopback and link-local
+addresses. Steps 1 and 2 don't fetch remote URLs and don't wait.
 
 **Why 3b goes last.** Delivery degrades to unsigned when signing fails (§3.6). Remote replies
 therefore work without 3b. Only forwarding to the parent author's followers waits for it.
@@ -305,9 +311,9 @@ unverified until FAP's gate runs:
     contexts and term-driven container maps.
   - Its README does not mention canonicalization, compaction, document loaders or Linux.
 
-Neither package provides RDFC-1.0, so canonicalization is FAP's to own either way.
+Neither package provides RDFC-1.0, so FAP writes its own (decision 13).
 
-**Gaps to check against FAP's documents** [inferred]:
+**Gaps that apply to any vendored file put to use** [inferred]. These are checked by the §3.6 gate:
 - **Container definitions.** The Note `@context` FAP emits, and Mastodon's `full_context`, contain
   container definitions (`focalPoint` with `@container: @list`). A parser that rejects
   term-driven container maps may reject exactly the documents FAP signs.
@@ -409,9 +415,17 @@ included. These requirements match Mastodon's `Request` and `fetch_resource`:
 | Content type | `application/activity+json`, or `application/ld+json` with the AS profile | `json_ld_helper.rb:281,351` onward |
 | Status | Only 200 counts as success | `json_ld_helper.rb:281` |
 | Deadline | An absolute deadline from the caller, enforced even while bytes keep arriving | Platform limits |
-| Address | Reject loopback, private (RFC 1918 / ULA), link-local and unspecified addresses on every connection, applied to the address actually connected to | `request.rb:325-334,389-394`. **Ships with the FAP-generated fetch client (decision 14).** |
+| Address | Reject loopback, private (RFC 1918 / ULA), link-local and unspecified addresses on every connection, applied to the address actually connected to | `request.rb:325-334,389-394`. **Ships in step 0b, with the transport (Open question 1).** |
 
-- **Ships first.** Every control except the address check ships first, on its own.
+- **Ships first.** Every control except the address check ships first, on the existing
+  `URLSession` fetch (`FetchRemoteObject.swift:36-58`).
+  - The body cap, deadline and per-hop checks need the response delivered incrementally and
+    redirects surfaced to FAP code: a delegate-based data task with `urlSession(_:dataTask:didReceive:)`
+    and `urlSession(_:task:willPerformHTTPRedirection:newRequest:completionHandler:)`, not
+    `data(for:)`. That `FoundationNetworking` on Linux delivers both callbacks is [inferred]. The
+    Step 0 tests run on Linux and are the measurement.
+  - Step 0b moves these controls into the FAP-written transport. The tests stay the same and must
+    pass on both.
 - **Quote-path behaviour change.** A `quoted_status_id` that is `http://`, redirects too often,
   is oversize or has a non-AP type now fails. The quote is then marked `failed`, through the
   existing path (`PostHandler/main.swift:282-287`).
@@ -914,6 +928,11 @@ direct parent is remote**. Those are exactly the activities `forward_for_reply` 
   unsigned and the failure is logged. Only forwarding is lost.
 
 **Gate (decision 13).** Vendored code that is in use passes the same gate as code FAP writes.
+- **FAP's own documents.** Every Note, Create and Delete shape FAP emits, including the
+  `focalPoint` `@container: @list` definition, goes through `toRdf` without an unsupported-feature
+  error.
+- **No network.** Contexts load only from the embedded copies.
+- **Linux.** The canonicalization tests run on Linux, not only a Linux build.
 - **W3C suites in FAP's CI.** The W3C RDFC-1.0 suite, and the JSON-LD `toRdf` tests for the
   features FAP's documents use, run in FAP's own CI.
 - **Mastodon-generated fixtures.** These are committed together with the generator script that
@@ -928,8 +947,8 @@ direct parent is remote**. Those are exactly the activities `forward_for_reply` 
 
 | Component | What it is |
 |---|---|
-| LD signer | A new ActivityPubCore module: canonicalization, three embedded contexts, RSA-SHA256 |
-| Canonicalization | A module FAP owns in ActivityPubCore (decision 13) |
+| LD signer | A new ActivityPubCore module: three embedded contexts, RSA-SHA256, using the canonicalization module |
+| Canonicalization | A module FAP owns in ActivityPubCore: `toRdf` for FAP's shapes and RDFC-1.0 (decision 13) |
 | Vendored reference code | The two vetted packages' source at a pinned commit, licences retained, authors credited (decision 13) |
 | Credits | `CONTRIBUTORS.md` and a README Acknowledgements section (decision 13) |
 | Context alignment | A change to `buildNoteJSON` / `buildCreateActivityJSON` |
@@ -937,7 +956,7 @@ direct parent is remote**. Those are exactly the activities `forward_for_reply` 
 
 **Invariants.**
 - LD signing is required by decision 10.
-- Its cost is the canonicalization stack, and that cost is surfaced.
+- Its cost is a canonicalization module FAP owns and maintains, and that cost is surfaced.
 - It is isolated to remote public and unlisted replies.
 
 ## Testing
@@ -947,7 +966,7 @@ removed before it counts.
 
 ### Unit (`Tests/ActivityPubCoreTests`, Swift Testing)
 
-**Step 0**, each against a local test server:
+**Step 0 and 0b**, each against a local test server, run on Linux as well as macOS:
 - **Redirects:** 3 pass, and a 4th fails.
 - **Scheme:** an `http://` initial URI fails, and an `https`→`http` hop fails.
 - **Body:** a body over 1 MB fails.
@@ -955,8 +974,12 @@ removed before it counts.
 - **Status:** a non-200 fails.
 - **Deadline:** a slow drip fails at the deadline.
 - Negative control: a compliant response passes.
-- **Address check, with the FAP-generated fetch client:** redirects to `127.0.0.1`, `169.254.169.254` and
-  `10.0.0.1` fail.
+- **Content type with parameters:** `application/activity+json; charset=utf-8` passes, and
+  `text/html; charset=utf-8` fails.
+- **Address check (0b):** redirects to `127.0.0.1`, `169.254.169.254` and `10.0.0.1` fail.
+- **Request target (0b):** a URI with a query string and percent-encoded characters reaches the
+  test server byte for byte. Negative control: the same URI through a plain `/{path}` template
+  fails.
 
 **Phase 1**
 - **`buildNoteJSON`** emits `inReplyTo` when `inReplyToId` is set.
@@ -1072,6 +1095,7 @@ Phase 3 needs a third-party server, so it is in the manual federation checks bel
 ### Build gate
 
 - Build every target for Linux with `swift package archive --allow-network-connections docker`.
+- Run the Step 0, 0b and 3b unit tests on Linux.
   The deployed binary is the Linux build, and a macOS `swift build` doesn't catch Linux-only
   compile errors.
 - Build the generated consumers against the branch's `openapi.yaml`.
@@ -1079,7 +1103,9 @@ Phase 3 needs a third-party server, so it is in the manual federation checks bel
 ## Unverified
 
 - **The transport under the FAP-generated fetch client.** The client is decided (decision 14).
-  How its transport checks the address actually connected to is the open question below.
+  The transport is Open question 1.
+- **Incremental delivery and redirect callbacks in `FoundationNetworking`.** [inferred]; the
+  Step 0 Linux tests measure it.
 - **Live secure-mode acceptance of a regular actor key.** The source has been read
   (`signature_verification.rb:45` onward). The phase 3a secure-mode check is the measurement.
 - **Mastodon internals.** The `items_context_url` path shape, a read of `context` on intake, the
@@ -1116,19 +1142,25 @@ The maintainer decided the following on 2026-10-20.
     - **Vendor the reference code.** The source files of `1amageek/swift-knowledge-graph` (MIT)
       and `mattmassicotte/JSONLD` (BSD-3-Clause) are copied into the repository at one pinned
       commit each, whether FAP's code ends up using them or only learns from them.
-      - Location: `Vendor/<package>/`, outside every SwiftPM target until a file is put to use.
-        A file in use moves into the ActivityPubCore source tree, keeping its header.
-      - Each directory keeps the upstream `LICENSE` verbatim and a `VENDORED.md` that names the
-        source URL, the commit, the licence and every local change.
-      - Source files only. Nothing from the packages is built, run or added to `Package.swift`
-        while vendoring, and their manifests, plugins and scripts are not copied.
-      - The vendoring PR shows the full copied source in its diff, and is reviewed like FAP code.
-      - The fetch is limited to these two repositories at the pinned commit. These are the only
-        third-party repositories approved for this.
     - **Credit, prominently.** Both authors are listed in a new `CONTRIBUTORS.md`, and in an
       Acknowledgements section in `README.md` that links both packages. This applies whether the
       vendored files are in use or were only inspiration. FAP source informed by them links to
-      the vendored file it follows.
+      the vendored file it follows. The wording credits their work and doesn't suggest they
+      endorse FAP (BSD-3-Clause clause 3).
+    - **Implementation rules** (added by this spec for the signing-path rule, not part of the
+      maintainer's words):
+      - Location: `Vendor/<package>/`, outside every SwiftPM target. That copy stays pristine.
+      - A file put to use is **copied**, not moved, into ActivityPubCore. The copy carries an SPDX
+        identifier, the upstream copyright line and the path of the retained `LICENSE`, and is
+        listed in `VENDORED.md`, so the change from the pristine copy can be diffed.
+      - Each directory keeps the upstream `LICENSE` verbatim and a `VENDORED.md` that names the
+        source URL, the commit, the licence and every local change.
+      - Source files only. Nothing from the packages is built, run or added to `Package.swift`
+        while vendoring, and their manifests, plugins and scripts are not copied. Upstream tests
+        are source files and come along. Any W3C suite data committed for the §3.6 gate is listed
+        in `VENDORED.md` with its own licence.
+      - The vendoring PR shows the full copied source in its diff, and is reviewed like FAP code.
+      - The fetch is limited to these two repositories at the pinned commit.
     - **Other references.** Mastodon's `linked_data_signature.rb` and ruby-rdf's
       `rdf-normalize` are linked from the code as references. Nothing is copied from them.
     - The gate in §3.6 applies to all of it. Step 3b stays last, because delivery degrades to
@@ -1138,22 +1170,36 @@ The maintainer decided the following on 2026-10-20.
     - FAP writes an OpenAPI document for the remote ActivityPub object fetch: a `GET` with the
       AS `Accept` header, a 200 response in `application/activity+json` or
       `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`, and redirects.
-    - The client is generated by `swift-openapi-generator`, which `Package.swift` already uses for
-      `APIClient` (`Package.swift:36-38,238-248`). The new client gets its own target, so the
-      integration-test client is unchanged.
-    - `fetchRemoteObject` moves onto the generated client. The Step 0 controls are enforced in
-      FAP code around it and in its transport.
-    - No new third-party dependency.
+    - The client is generated by `swift-openapi-generator`, which `Package.swift` already declares
+      (`Package.swift:36-38`) for the `APIClient` target (`:238-248`). It gets its own target.
+    - **Mapping a remote URI to the operation.** OpenAPI path parameters default to `simple` style
+      and `allowReserved` applies only to query parameters, so one `/{path}` template can't carry an
+      arbitrary path and query. Instead:
+      - the document's `servers:` holds a placeholder origin and the operation path is `/`;
+      - a client is built per request with `serverURL` set to the URI's origin;
+      - a FAP `ClientMiddleware` sets the request's path and query to the URI's, byte for byte.
+      The signed `(request-target)` (§3.2) and the `id == q` check (§3.3) both depend on this.
+    - **Where the controls live.** The transport owns everything that happens during the exchange:
+      redirects, per-hop scheme checks and re-signing, the body cap, the deadline and the address
+      check. Content-type and status checks can run on the response in FAP code.
+    - **Dependencies.** No new package in `Package.swift`. But nothing imports `APIClient` today
+      (only `Package.swift:240` names it), so `swift-openapi-runtime` and the generator plugin
+      reach the deployed Lambdas, and the plugin runs in the `swift package archive` Docker build,
+      for the first time.
 
 ## Open questions
 
-1. **The transport under the generated fetch client.** The generated client calls a
-   `ClientTransport`. `OpenAPIURLSession`, the transport `APIClient` uses today, is built on
-   `URLSession`, and `URLSession` offers neither a connect hook nor connecting to a pinned address
-   while keeping the original `Host` and TLS SNI. So the address check needs a FAP-written
-   transport, and that transport needs a TLS-capable connection layer that exposes the connected
-   address.
+1. **The transport under the generated fetch client (step 0b).** The transport owns redirects,
+   per-hop scheme checks and re-signing, the 1 MB cap, the absolute deadline and the address check
+   (decision 14).
+   - `OpenAPIURLSession` won't do. Its README says streaming is available only on Apple platforms
+     and points Linux users to the AsyncHTTPClient transport, so on the Lambda the body arrives
+     buffered. `URLSession` also follows redirects inside the session.
+   - `URLSessionTaskTransactionMetrics.remoteAddress` is documented for Apple platforms only, and
+     it reports a connection after it is made, so it can't refuse one.
+   - So the transport needs a TLS-capable connection layer that either exposes a connect-time hook
+     or connects to a pre-validated address while keeping the original `Host` and SNI.
 
-   **Proposed:** while planning Step 0's address check, list what the resolved dependency graph
-   already provides for that, with receipts, and bring the choice back to the maintainer before
-   writing it. The other Step 0 controls ship first, on the existing fetch.
+   **Proposed:** while planning step 0b, list what the resolved dependency graph already provides
+   for that, with receipts, and bring the choice back to the maintainer before writing it. Step 0
+   ships first, on the existing fetch, and step 3a waits for 0b.
