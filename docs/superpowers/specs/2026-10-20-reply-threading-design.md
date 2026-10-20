@@ -467,7 +467,7 @@ Per the repo's CLAUDE.md, build every target on the Linux runner VM with
 - **The AS2 Vocabulary's "intentionally vague" remark on `context`.** It is known only through
   FEP-7888's quotation of it.
 
-## Open questions for Erin
+## Open questions
 
 1. **Replies to other local actors.** Is replying to another FAP actor's status on the same server
    in scope? It needs an id→owner lookup, such as a GSI on status id or accepting a full status
@@ -499,7 +499,8 @@ Per the repo's CLAUDE.md, build every target on the Linux runner VM with
 8. **Server-side length check.** `PostHandler` doesn't enforce the advertised 5,000-character
    limit. Should that be fixed alongside this, so an over-long chunk fails loudly instead of being
    published? Or should it be a separate issue?
-9. **Object endpoint and private statuses (observed, separate issue?).** `ObjectHandler` returns
-   404 for private and direct statuses only on the HTML branch (`ObjectHandler/main.swift:52-62`).
-   A request with `Accept: application/activity+json` gets the Note regardless of visibility.
-   Threading makes parent URIs more discoverable. Should this be filed as its own issue?
+9. **Object endpoint and private statuses.** `ObjectHandler` returns 404 for private and direct
+   statuses only on the HTML branch (`ObjectHandler/main.swift:52-62`). A request with
+   `Accept: application/activity+json` gets the Note regardless of visibility. This is already
+   tracked as FederatedActivityPublisher#270. Threading makes parent URIs more discoverable, but
+   that issue owns the fix.
