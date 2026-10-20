@@ -995,8 +995,8 @@ The harness uses real sockets, not a `URLProtocol` stub, because a stub skips th
 - **Scheme policy is injected.** `fetchRemoteObject` takes its scheme policy as a parameter
   whose default is `https` only. `KeyManager` takes the same defaulted parameter and passes it
   through. Every production call site uses the default, and the permissive policy is built only
-  in the test target. Step 0 tests pass one that
-  admits `http` to the test server's port only, on the initial request and on every hop.
+  in the test target. Step 0 tests pass one that admits `http` to the test server's ports they
+  name (A, or A and B below) and nothing else, on the initial request and on every hop.
   Negative control: the default policy refuses the test server's `http` URI.
 - **Per-hop scheme check in step 0.** The test server listens on two loopback ports, A and B.
   With a policy admitting only A, a redirect from A to B fails with the policy's refusal.
@@ -1031,10 +1031,13 @@ Tests:
   `text/html; charset=utf-8` fails.
 - **LD profile:** `application/ld+json; profile="https://www.w3.org/ns/activitystreams"` passes,
   and bare `application/ld+json` fails.
-- **Key fetch:** with the test policy, `KeyManager` fetches a valid key document from the test
-  server. A `keyId` that redirects 4 times fails with the redirect error, and one over 1 MB fails
-  with the size error. Negative control: run against the pre-move `fetchActorDocument`, both
-  failing cases go red (the fetch succeeds).
+- **Key fetch:** the test calls the internal `fetchActorDocument(actorUri:schemePolicy:)` through
+  `@testable import ActivityPubCore`, so no `DynamoDBStore` is needed (`KeyManager.swift:68`).
+  The policy is a method parameter with the `https`-only default. With the test policy, it
+  fetches a valid key document from the test server. A `keyId` that redirects 4 times fails with the redirect error, and one over 1 MB fails
+  with the size error. Negative control: the same calls against the pre-move
+  `fetchActorDocument(actorUri:)`, with no policy argument, succeed, because that code has no
+  scheme check, redirect cap or size cap.
 - **Address check (0b):** redirects to `127.0.0.1`, `169.254.169.254` and `10.0.0.1` fail.
 - **Request target (0b):** a URI with a query string and percent-encoded characters reaches the
   test server byte for byte. Negative control: the same URI through a plain `/{path}` template
@@ -1205,8 +1208,8 @@ The maintainer decided the following on 2026-10-20.
       `CONTRIBUTORS.md`, and in an Acknowledgements section in `README.md` that links both
       packages (this spec's reading of "list them as contributors"; Open question 2). This
       applies whether the vendored files are in use or were only inspiration. FAP source
-      informed by them links to the vendored file it follows. The wording credits their work and doesn't suggest they
-      endorse FAP (BSD-3-Clause clause 3).
+      informed by them links to the vendored file it follows. The wording credits their work
+      and doesn't suggest they endorse FAP (BSD-3-Clause clause 3).
     - **Implementation rules** (added by this spec for the signing-path rule, not part of the
       maintainer's words):
       - Location: `Vendor/<package>/`, outside every SwiftPM target. That copy stays pristine.
