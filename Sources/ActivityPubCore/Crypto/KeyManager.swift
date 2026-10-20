@@ -10,7 +10,8 @@
 /// calls ``KeyManager/refreshKey(keyId:store:)`` to force a fresh fetch before retrying.
 ///
 /// Actor documents are fetched with `Accept: application/activity+json` and a 10-second
-/// timeout. The same `FoundationNetworking` conditional import pattern as ``FetchRemoteObject``
+/// timeout. The fetch is signed with a local actor's key (``FetchSigningKey``) because servers
+/// in authorized fetch mode, mastodon.social among them, answer an unsigned fetch with 401. The same `FoundationNetworking` conditional import pattern as ``FetchRemoteObject``
 /// applies here for Linux Lambda compatibility.
 import Foundation
 
@@ -33,8 +34,15 @@ public struct KeyManager: Sendable {
     /// - Parameters:
     ///   - keyId: The key ID from the Signature header (e.g., "https://remote.server/users/alice#main-key").
     ///   - store: DynamoDBStore for cache reads/writes.
+    ///   - signingKey: Supplies the local actor key that signs the actor-document fetch. Called
+    ///     only on a cache miss. If `nil`, the fetch is unsigned, which servers in authorized
+    ///     fetch mode reject.
     /// - Returns: The PEM-encoded public key string.
-    public func getPublicKey(keyId: String, store: DynamoDBStore) async throws -> String {
+    public func getPublicKey(
+        keyId: String,
+        store: DynamoDBStore,
+        signingKey: (() async throws -> FetchSigningKey)? = nil
+    ) async throws -> String {
         let actorUri = extractActorUri(from: keyId)
 
         // Check cache
@@ -43,15 +51,21 @@ public struct KeyManager: Sendable {
         }
 
         // Fetch fresh
-        let actor = try await fetchActorDocument(actorUri: actorUri)
+        let actor = try await fetchActorDocument(actorUri: actorUri, signingKey: try await signingKey?())
         try await store.storeRemoteActor(actor)
         return actor.publicKeyPem
     }
 
     /// Force-refresh the public key for a given keyId (for key rotation retry).
-    public func refreshKey(keyId: String, store: DynamoDBStore) async throws -> String {
+    ///
+    /// `signingKey` is as for ``getPublicKey(keyId:store:signingKey:)``.
+    public func refreshKey(
+        keyId: String,
+        store: DynamoDBStore,
+        signingKey: (() async throws -> FetchSigningKey)? = nil
+    ) async throws -> String {
         let actorUri = extractActorUri(from: keyId)
-        let actor = try await fetchActorDocument(actorUri: actorUri)
+        let actor = try await fetchActorDocument(actorUri: actorUri, signingKey: try await signingKey?())
         try await store.storeRemoteActor(actor)
         return actor.publicKeyPem
     }
@@ -64,15 +78,51 @@ public struct KeyManager: Sendable {
         return keyId
     }
 
+    /// Build the `GET` request for a remote actor document, signed if `signingKey` is given.
+    ///
+    /// The signed `(request-target)` is the URL's path plus its query string, and `host`
+    /// carries the port when the URL names one.
+    static func actorDocumentRequest(
+        url: URL,
+        signingKey: FetchSigningKey?,
+        date: Date = Date()
+    ) throws -> URLRequest {
+        var request = URLRequest(url: url)
+        request.setValue("application/activity+json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 10
+
+        guard let signingKey else { return request }
+
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let host = components.host else {
+            throw KeyManagerError.invalidActorUri(url.absoluteString)
+        }
+        var path = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+        if let query = components.percentEncodedQuery {
+            path += "?\(query)"
+        }
+        let hostHeader = components.port.map { "\(host):\($0)" } ?? host
+
+        let signedHeaders = try HTTPSignature.signGet(
+            privateKeyPem: signingKey.privateKeyPem,
+            keyId: signingKey.keyId,
+            path: path,
+            host: hostHeader,
+            date: date
+        )
+        for (key, value) in signedHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        return request
+    }
+
     /// Fetch a remote actor's ActivityPub document and parse it.
-    func fetchActorDocument(actorUri: String) async throws -> RemoteActor {
+    func fetchActorDocument(actorUri: String, signingKey: FetchSigningKey?) async throws -> RemoteActor {
         guard let url = URL(string: actorUri) else {
             throw KeyManagerError.invalidActorUri(actorUri)
         }
 
-        var request = URLRequest(url: url)
-        request.setValue("application/activity+json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 10
+        let request = try Self.actorDocumentRequest(url: url, signingKey: signingKey)
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -115,6 +165,20 @@ public struct KeyManager: Sendable {
             sharedInbox: sharedInbox,
             fetchedAt: fetchedAt
         )
+    }
+}
+
+/// A local actor's key, used to sign fetches of remote actor documents.
+public struct FetchSigningKey: Sendable {
+    /// The key ID URI (e.g., "https://server/users/alice#main-key").
+    public let keyId: String
+    /// The PEM-encoded RSA private key matching `keyId`.
+    public let privateKeyPem: String
+
+    /// Create a signing key.
+    public init(keyId: String, privateKeyPem: String) {
+        self.keyId = keyId
+        self.privateKeyPem = privateKeyPem
     }
 }
 

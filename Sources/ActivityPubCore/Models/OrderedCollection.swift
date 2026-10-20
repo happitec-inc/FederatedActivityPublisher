@@ -83,6 +83,48 @@ public struct OrderedCollection: Codable, Sendable {
         )
     }
 
+    /// A root collection that reports a count but lists no items.
+    ///
+    /// Used for the followers and following collections: Mastodon reads an account's follower
+    /// and following counts from `totalItems`, while the members themselves stay private.
+    /// A negative count (which a drifted counter can produce) is reported as `0`.
+    ///
+    /// - Parameters:
+    ///   - id: Canonical URI for the collection.
+    ///   - totalItems: The number of items to report.
+    /// - Returns: An `OrderedCollection` with no `orderedItems` field and no page links.
+    public static func countOnly(id: String, totalItems: Int) -> OrderedCollection {
+        OrderedCollection(
+            context: "https://www.w3.org/ns/activitystreams",
+            id: id, type: "OrderedCollection", totalItems: max(0, totalItems),
+            first: nil, last: nil, orderedItems: nil
+        )
+    }
+
+    /// The followers collection for a local actor: the stored follower count, no members.
+    ///
+    /// - Parameters:
+    ///   - actor: The local actor.
+    ///   - serverDomain: The domain in the actor's URIs.
+    public static func followers(of actor: Actor, serverDomain: String) -> OrderedCollection {
+        countOnly(
+            id: "https://\(serverDomain)/users/\(actor.username)/followers",
+            totalItems: actor.followerCount
+        )
+    }
+
+    /// The following collection for a local actor: the stored following count, no members.
+    ///
+    /// - Parameters:
+    ///   - actor: The local actor.
+    ///   - serverDomain: The domain in the actor's URIs.
+    public static func following(of actor: Actor, serverDomain: String) -> OrderedCollection {
+        countOnly(
+            id: "https://\(serverDomain)/users/\(actor.username)/following",
+            totalItems: actor.followingCount
+        )
+    }
+
     /// An empty collection with an explicit empty `orderedItems` array, used for `featured` and
     /// `featuredTags` endpoints.
     ///
