@@ -4,8 +4,9 @@
 /// referenced in the actor JSON-LD's `following` field. AP clients use it to check
 /// whether the account follows others and to retrieve the following count.
 ///
-/// These are service accounts that don't follow remote actors, so the collection is
-/// always an empty root stub with `totalItems: 0` and no inline items.
+/// The collection is a root stub with no inline items whose `totalItems` is the actor's
+/// stored `followingCount`. These are service accounts that don't follow remote actors,
+/// so in practice the count is 0.
 ///
 /// All responses use `content-type: application/activity+json`. The handler fatally
 /// exits at cold-start if `SERVER_DOMAIN` is absent.
@@ -32,7 +33,7 @@ let runtime = LambdaRuntime {
     }
 
     do {
-        guard try await store.actorExists(username: username) else {
+        guard let actor = try await store.getActor(username: username) else {
             return APIGatewayResponse(
                 statusCode: .notFound,
                 headers: ["content-type": "application/json"],
@@ -40,9 +41,7 @@ let runtime = LambdaRuntime {
             )
         }
 
-        let collection = OrderedCollection.emptyRoot(
-            id: "https://\(serverDomain)/users/\(username)/following"
-        )
+        let collection = OrderedCollection.following(of: actor, serverDomain: serverDomain)
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         let data = try encoder.encode(collection)

@@ -154,43 +154,117 @@ public struct DynamoDBStore: Sendable {
 
     // MARK: - Follower Storage
 
-    /// Store a follower record. Uses conditional write to prevent duplicates.
-    /// Returns `true` if newly stored, `false` if the follower already exists.
+    /// Store a follower record, or refresh it if the actor already follows.
+    ///
+    /// The write is an upsert: a repeated Follow from the same actor replaces the stored
+    /// `followActivityId` and `acceptedAt` with the newest Follow, so a later Undo of the
+    /// earlier Follow no longer matches (see ``removeFollower(username:actorUri:followActivityId:)``).
+    /// Returns `true` if the record is new, `false` if the actor was already a follower.
+    /// The answer comes from the item's state before this write, so two concurrent Follows
+    /// from the same actor yield exactly one `true`.
     public func storeFollower(username: String, follower: Follower) async throws -> Bool {
-        let now = iso8601Formatter.string(from: Date())
+        let input = Self.storeFollowerInput(
+            tableName: tableName,
+            username: username,
+            follower: follower,
+            now: iso8601Formatter.string(from: Date())
+        )
+        let output = try await client.updateItem(input: input)
+        return output.attributes?.isEmpty ?? true
+    }
 
-        var item: [String: DynamoDBClientTypes.AttributeValue] = [
-            "PK": .s("ACTOR#\(username)"),
-            "SK": .s("FOLLOWER#\(follower.actorUri)"),
-            "GSI1PK": .s("FOLLOWERS#\(username)"),
-            "GSI1SK": .s(follower.acceptedAt),
-            "actorUri": .s(follower.actorUri),
-            "inboxUrl": .s(follower.inboxUrl),
-            "followActivityId": .s(follower.followActivityId),
-            "acceptedAt": .s(follower.acceptedAt),
-            "createdAt": .s(now),
+    /// Build the upsert behind ``storeFollower(username:follower:)``.
+    static func storeFollowerInput(
+        tableName: String,
+        username: String,
+        follower: Follower,
+        now: String
+    ) -> UpdateItemInput {
+        var setParts = [
+            "GSI1PK = :gsi1pk",
+            "GSI1SK = :acceptedAt",
+            "actorUri = :actorUri",
+            "inboxUrl = :inboxUrl",
+            "followActivityId = :followActivityId",
+            "acceptedAt = :acceptedAt",
+            "createdAt = if_not_exists(createdAt, :now)",
         ]
+        var values: [String: DynamoDBClientTypes.AttributeValue] = [
+            ":gsi1pk": .s("FOLLOWERS#\(username)"),
+            ":actorUri": .s(follower.actorUri),
+            ":inboxUrl": .s(follower.inboxUrl),
+            ":followActivityId": .s(follower.followActivityId),
+            ":acceptedAt": .s(follower.acceptedAt),
+            ":now": .s(now),
+        ]
+        var updateExpression: String
         if let sharedInboxUrl = follower.sharedInboxUrl {
-            item["sharedInboxUrl"] = .s(sharedInboxUrl)
+            setParts.append("sharedInboxUrl = :sharedInboxUrl")
+            values[":sharedInboxUrl"] = .s(sharedInboxUrl)
+            updateExpression = "SET " + setParts.joined(separator: ", ")
+        } else {
+            updateExpression = "SET " + setParts.joined(separator: ", ") + " REMOVE sharedInboxUrl"
         }
 
-        let input = PutItemInput(
-            conditionExpression: "attribute_not_exists(SK)",
-            item: item,
-            tableName: tableName
+        return UpdateItemInput(
+            expressionAttributeValues: values,
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("FOLLOWER#\(follower.actorUri)"),
+            ],
+            returnValues: .allOld,
+            tableName: tableName,
+            updateExpression: updateExpression
         )
+    }
 
+    /// Remove a follower record only if it was created by the given Follow activity.
+    ///
+    /// Used for Undo(Follow). The delete is conditional on the stored `followActivityId`, so an
+    /// Undo of a Follow that a newer Follow has since replaced is a no-op. Returns `true` if
+    /// the record was deleted, `false` if it was absent or belongs to a different Follow.
+    public func removeFollower(
+        username: String,
+        actorUri: String,
+        followActivityId: String
+    ) async throws -> Bool {
+        let input = Self.removeFollowerInput(
+            tableName: tableName,
+            username: username,
+            actorUri: actorUri,
+            followActivityId: followActivityId
+        )
         do {
-            _ = try await client.putItem(input: input)
+            _ = try await client.deleteItem(input: input)
             return true
-        } catch let error as ConditionalCheckFailedException {
-            // Duplicate follower — already exists
-            _ = error
+        } catch is ConditionalCheckFailedException {
             return false
         }
     }
 
-    /// Remove a follower record. Returns true if the follower existed, false if not found.
+    /// Build the conditional delete behind ``removeFollower(username:actorUri:followActivityId:)``.
+    static func removeFollowerInput(
+        tableName: String,
+        username: String,
+        actorUri: String,
+        followActivityId: String
+    ) -> DeleteItemInput {
+        DeleteItemInput(
+            conditionExpression: "attribute_exists(SK) AND followActivityId = :followActivityId",
+            expressionAttributeValues: [":followActivityId": .s(followActivityId)],
+            key: [
+                "PK": .s("ACTOR#\(username)"),
+                "SK": .s("FOLLOWER#\(actorUri)"),
+            ],
+            tableName: tableName
+        )
+    }
+
+    /// Remove a follower record whatever Follow created it. Returns true if the follower
+    /// existed, false if not found.
+    ///
+    /// Use this only when the actor itself is gone (actor self-deletion). An Undo(Follow) must
+    /// use ``removeFollower(username:actorUri:followActivityId:)`` instead.
     public func removeFollower(username: String, actorUri: String) async throws -> Bool {
         let input = DeleteItemInput(
             conditionExpression: "attribute_exists(SK)",
@@ -255,49 +329,102 @@ public struct DynamoDBStore: Sendable {
 
     // MARK: - Activity Idempotency
 
-    /// Store a received activity with deduplication.
-    /// Returns `true` if newly stored, `false` if duplicate (activity already processed).
-    public func storeReceivedActivity(
+    /// How long a `pending` claim on an inbound activity blocks redeliveries.
+    ///
+    /// Longer than the inbox Lambda's 60-second timeout, so a claim can only expire once the
+    /// invocation holding it has ended. An expired claim means that invocation died without
+    /// releasing it (a timeout or crash), and the next delivery takes the activity over.
+    public static let activityClaimLease: TimeInterval = 300
+
+    /// Claim an inbound activity for processing.
+    ///
+    /// Writes the `ACTIVITY_DEDUP` record in the `pending` state. The write succeeds when no
+    /// record exists, or when the existing one is `pending` with an expired lease. Once the
+    /// handler has succeeded, call ``completeReceivedActivity(username:activityId:type:actorUri:objectUri:raw:)``
+    /// to mark it processed; if the handler fails, call ``releaseReceivedActivity(activityId:)``
+    /// so that the sender's retry runs it again.
+    ///
+    /// Dedup records written before the `pending` state existed carry no `processingState`
+    /// and count as processed.
+    public func claimReceivedActivity(
+        activityId: String,
+        type: String,
+        actorUri: String
+    ) async throws -> ActivityClaim {
+        let input = Self.claimReceivedActivityInput(
+            tableName: tableName,
+            activityId: activityId,
+            type: type,
+            actorUri: actorUri,
+            now: Date()
+        )
+        do {
+            _ = try await client.putItem(input: input)
+            return .claimed
+        } catch let error as ConditionalCheckFailedException {
+            if case .s("pending") = error.properties.item?["processingState"] {
+                return .inProgress
+            }
+            return .alreadyProcessed
+        }
+    }
+
+    /// Build the conditional write behind ``claimReceivedActivity(activityId:type:actorUri:)``.
+    static func claimReceivedActivityInput(
+        tableName: String,
+        activityId: String,
+        type: String,
+        actorUri: String,
+        now: Date
+    ) -> PutItemInput {
+        let nowSeconds = Int(now.timeIntervalSince1970)
+        let item: [String: DynamoDBClientTypes.AttributeValue] = [
+            "PK": .s("ACTIVITY_DEDUP"),
+            "SK": .s(activityId),
+            "actorUri": .s(actorUri),
+            "type": .s(type),
+            "receivedAt": .s(iso8601Formatter.string(from: now)),
+            "processingState": .s("pending"),
+            "claimExpiresAt": .n(String(nowSeconds + Int(activityClaimLease))),
+            // Dedup records expire after 30 days
+            "ttl": .n(String(nowSeconds + (30 * 24 * 3600))),
+        ]
+        return PutItemInput(
+            conditionExpression:
+                "attribute_not_exists(SK) OR (processingState = :pending AND claimExpiresAt < :now)",
+            expressionAttributeValues: [
+                ":pending": .s("pending"),
+                ":now": .n(String(nowSeconds)),
+            ],
+            item: item,
+            returnValuesOnConditionCheckFailure: .allOld,
+            tableName: tableName
+        )
+    }
+
+    /// Mark a claimed activity as processed and store the full activity record.
+    ///
+    /// Call only after the handler has succeeded. Redeliveries of the activity are then
+    /// answered as duplicates.
+    public func completeReceivedActivity(
         username: String,
         activityId: String,
         type: String,
         actorUri: String,
         objectUri: String?,
         raw: String
-    ) async throws -> Bool {
+    ) async throws {
         let now = iso8601Formatter.string(from: Date())
-        let ulid = generateULID()
 
-        // Write dedup record with conditional check
-        var dedupItem: [String: DynamoDBClientTypes.AttributeValue] = [
-            "PK": .s("ACTIVITY_DEDUP"),
-            "SK": .s(activityId),
-            "actorUri": .s(actorUri),
-            "type": .s(type),
-            "receivedAt": .s(now),
-        ]
-
-        // Set TTL to 30 days for dedup records
-        let ttl = Int(Date().timeIntervalSince1970) + (30 * 24 * 3600)
-        dedupItem["ttl"] = .n(String(ttl))
-
-        let dedupInput = PutItemInput(
-            conditionExpression: "attribute_not_exists(SK)",
-            item: dedupItem,
-            tableName: tableName
-        )
-
-        do {
-            _ = try await client.putItem(input: dedupInput)
-        } catch is ConditionalCheckFailedException {
-            // Duplicate activity
-            return false
-        }
+        _ = try await client.updateItem(input: Self.completeReceivedActivityInput(
+            tableName: tableName,
+            activityId: activityId
+        ))
 
         // Store the full activity record
         var activityItem: [String: DynamoDBClientTypes.AttributeValue] = [
             "PK": .s("ACTOR#\(username)"),
-            "SK": .s("ACTIVITY#\(type)#\(ulid)"),
+            "SK": .s("ACTIVITY#\(type)#\(generateULID())"),
             "activityId": .s(activityId),
             "type": .s(type),
             "actorUri": .s(actorUri),
@@ -313,8 +440,45 @@ public struct DynamoDBStore: Sendable {
             tableName: tableName
         )
         _ = try await client.putItem(input: activityInput)
+    }
 
-        return true
+    /// Build the update behind ``completeReceivedActivity(username:activityId:type:actorUri:objectUri:raw:)``.
+    static func completeReceivedActivityInput(tableName: String, activityId: String) -> UpdateItemInput {
+        UpdateItemInput(
+            expressionAttributeValues: [":processed": .s("processed")],
+            key: [
+                "PK": .s("ACTIVITY_DEDUP"),
+                "SK": .s(activityId),
+            ],
+            tableName: tableName,
+            updateExpression: "SET processingState = :processed REMOVE claimExpiresAt"
+        )
+    }
+
+    /// Drop a `pending` claim after the handler failed, so a redelivery processes the
+    /// activity again. Does nothing if the activity has already been marked processed.
+    public func releaseReceivedActivity(activityId: String) async throws {
+        do {
+            _ = try await client.deleteItem(input: Self.releaseReceivedActivityInput(
+                tableName: tableName,
+                activityId: activityId
+            ))
+        } catch is ConditionalCheckFailedException {
+            // Not pending (processed, or already released): nothing to drop
+        }
+    }
+
+    /// Build the conditional delete behind ``releaseReceivedActivity(activityId:)``.
+    static func releaseReceivedActivityInput(tableName: String, activityId: String) -> DeleteItemInput {
+        DeleteItemInput(
+            conditionExpression: "processingState = :pending",
+            expressionAttributeValues: [":pending": .s("pending")],
+            key: [
+                "PK": .s("ACTIVITY_DEDUP"),
+                "SK": .s(activityId),
+            ],
+            tableName: tableName
+        )
     }
 
     // MARK: - Interaction Storage

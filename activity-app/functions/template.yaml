@@ -431,6 +431,13 @@ Resources:
               Fn::Sub: "${EnvironmentStackName}-TableName"
         - SQSSendMessagePolicy:
             QueueName: !Select [4, !Split ["/", !ImportValue { "Fn::Sub": "${EnvironmentStackName}-QueueUrl" }]]
+        # Actor private keys, to sign fetches of remote actor documents (authorized fetch)
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub "activity/${Stage}/keys/*"
+        - Statement:
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
       Events:
         PostInbox:
           Type: Api

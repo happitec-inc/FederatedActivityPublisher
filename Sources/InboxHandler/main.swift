@@ -11,12 +11,16 @@
 /// 2. Decode the raw body (handles base64-encoded payloads from API Gateway).
 /// 3. Parse and verify the HTTP Signature using the remote actor's public key from
 ///    `KeyManager` (which caches keys in DynamoDB). On first failure, the key is refreshed
-///    in case the remote server rotated its key pair.
+///    in case the remote server rotated its key pair. Fetches of the remote actor document
+///    are signed with the inbox owner's key, as servers in authorized fetch mode require.
 /// 4. Confirm that the `actor` field in the JSON body matches the key owner — prevents one
 ///    server from impersonating another.
-/// 5. Dedup via `storeReceivedActivity` (DynamoDB conditional write); duplicate activities
-///    return 202 immediately.
-/// 6. Dispatch to the appropriate `handle*` function by `type`.
+/// 5. Claim the activity id via `claimReceivedActivity` (DynamoDB conditional write).
+///    Activities already processed return 202 immediately; one still being processed by
+///    another delivery returns 503 so the sender retries later.
+/// 6. Dispatch to the appropriate `handle*` function by `type`. The activity is marked
+///    processed only if the handler returns a 2xx response; otherwise the claim is released
+///    so the sender's retry processes it again.
 ///
 /// ## Activity types handled
 ///
@@ -36,6 +40,7 @@
 /// `HTTPSignature`, `HTMLSanitizer`, `shouldAcceptQuoteRequest`, `buildNoteJSON`.
 import AWSLambdaEvents
 import AWSLambdaRuntime
+import AWSSSM
 import ActivityPubCore
 import Foundation
 
@@ -45,9 +50,42 @@ guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] el
 guard let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] else {
     fatalError("HANDLE_DOMAIN environment variable is required")
 }
+let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "/activity/stage/keys/"
+/// SSM path prefix for actor private keys, with any trailing slash stripped.
+let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw
+
 let store = try await DynamoDBStore()
 let sqsClient = try await SQSDeliveryClient()
+let ssmClient = try await SSMClient()
 let keyManager = KeyManager()
+
+/// Local actors' private keys, cached across invocations within the same Lambda execution
+/// environment. Keyed by username.
+nonisolated(unsafe) var cachedActorKeys: [String: String] = [:]
+
+/// Returns the key that signs this inbox's fetches of remote actor documents.
+///
+/// The inbox owner signs: servers in authorized fetch mode (mastodon.social among them)
+/// reject unsigned fetches with 401, and the owner is the local actor the remote server is
+/// talking to. The private key is read from SSM at `{ssmKeyPrefix}/{username}` on first use.
+///
+/// - Parameter username: The local actor whose inbox received the activity.
+func fetchSigningKey(for username: String) async throws -> FetchSigningKey {
+    let keyId = "https://\(serverDomain)/users/\(username)#main-key"
+    if let privateKeyPem = cachedActorKeys[username] {
+        return FetchSigningKey(keyId: keyId, privateKeyPem: privateKeyPem)
+    }
+    let parameterName = "\(ssmKeyPrefix)/\(username)"
+    let output = try await ssmClient.getParameter(input: GetParameterInput(
+        name: parameterName,
+        withDecryption: true
+    ))
+    guard let privateKeyPem = output.parameter?.value, !privateKeyPem.isEmpty else {
+        throw InboxError.missingActorKey(parameterName)
+    }
+    cachedActorKeys[username] = privateKeyPem
+    return FetchSigningKey(keyId: keyId, privateKeyPem: privateKeyPem)
+}
 
 let runtime = LambdaRuntime {
     (event: APIGatewayRequest, context: LambdaContext) -> APIGatewayResponse in
@@ -122,7 +160,11 @@ let runtime = LambdaRuntime {
         }
 
         // Fetch the remote actor's public key
-        let publicKeyPem = try await keyManager.getPublicKey(keyId: keyId, store: store)
+        let publicKeyPem = try await keyManager.getPublicKey(
+            keyId: keyId,
+            store: store,
+            signingKey: { try await fetchSigningKey(for: username) }
+        )
 
         // Build headers map for verification (lowercase keys)
         // Override host with SERVER_DOMAIN — CloudFront strips the original Host header
@@ -150,7 +192,11 @@ let runtime = LambdaRuntime {
         // If verification failed, try refreshing the key (key rotation)
         if !verified {
             context.logger.info("Signature verification failed, trying key refresh for \(keyId)")
-            let refreshedKey = try await keyManager.refreshKey(keyId: keyId, store: store)
+            let refreshedKey = try await keyManager.refreshKey(
+                keyId: keyId,
+                store: store,
+                signingKey: { try await fetchSigningKey(for: username) }
+            )
             verified = try HTTPSignature.verify(
                 signatureHeader: signatureHeader,
                 method: "post",
@@ -205,31 +251,10 @@ let runtime = LambdaRuntime {
         let activityId = json["id"] as? String ?? ""
         let actorUri = json["actor"] as? String ?? ""
 
-        // Activity idempotency check
-        if !activityId.isEmpty {
-            let objectUri = extractObjectUri(from: json)
-            let isNew = try await store.storeReceivedActivity(
-                username: username,
-                activityId: activityId,
+        // An activity without an id cannot be deduplicated: handle it directly
+        guard !activityId.isEmpty else {
+            return try await routeActivity(
                 type: activityType,
-                actorUri: actorUri,
-                objectUri: objectUri,
-                raw: bodyString
-            )
-            if !isNew {
-                context.logger.info("Duplicate activity \(activityId), returning 202")
-                return APIGatewayResponse(
-                    statusCode: .accepted,
-                    headers: ["content-type": "application/json"],
-                    body: #"{"status":"already processed"}"#
-                )
-            }
-        }
-
-        // Route by activity type
-        switch activityType {
-        case "Follow":
-            return try await handleFollow(
                 json: json,
                 username: username,
                 actorUri: actorUri,
@@ -238,105 +263,71 @@ let runtime = LambdaRuntime {
                 bodyString: bodyString,
                 context: context
             )
+        }
 
-        case "Undo":
-            return try await handleUndo(
-                json: json,
-                username: username,
-                actorUri: actorUri,
-                context: context
-            )
+        // Activity idempotency: claim the id, and mark it processed only once the handler
+        // has succeeded, so a failed attempt is retried rather than reported as a duplicate.
+        let delivery = try await processActivityOnce(
+            claim: {
+                try await store.claimReceivedActivity(
+                    activityId: activityId,
+                    type: activityType,
+                    actorUri: actorUri
+                )
+            },
+            complete: {
+                do {
+                    try await store.completeReceivedActivity(
+                        username: username,
+                        activityId: activityId,
+                        type: activityType,
+                        actorUri: actorUri,
+                        objectUri: extractObjectUri(from: json),
+                        raw: bodyString
+                    )
+                } catch {
+                    // The activity took effect; a stale claim only means a redelivery
+                    // after the lease would run the (idempotent) handler again.
+                    context.logger.error("Failed to mark activity \(activityId) processed: \(error)")
+                }
+            },
+            release: { try await store.releaseReceivedActivity(activityId: activityId) },
+            succeeded: { (200..<300).contains($0.statusCode.code) },
+            handle: {
+                try await routeActivity(
+                    type: activityType,
+                    json: json,
+                    username: username,
+                    actorUri: actorUri,
+                    activityId: activityId,
+                    keyId: keyId,
+                    bodyString: bodyString,
+                    context: context
+                )
+            }
+        )
 
-        case "Like":
-            return try await handleLike(
-                json: json,
-                username: username,
-                actorUri: actorUri,
-                context: context
-            )
-
-        case "Announce":
-            return try await handleAnnounce(
-                json: json,
-                username: username,
-                actorUri: actorUri,
-                context: context
-            )
-
-        case "Create":
-            return try await handleCreate(
-                json: json,
-                username: username,
-                actorUri: actorUri,
-                bodyString: bodyString,
-                context: context
-            )
-
-        case "Delete":
-            return try await handleDelete(
-                json: json,
-                username: username,
-                actorUri: actorUri,
-                context: context
-            )
-
-        case "Update":
-            return try await handleUpdate(
-                json: json,
-                username: username,
-                actorUri: actorUri,
-                context: context
-            )
-
-        case "QuoteRequest":
-            let activityId = json["id"] as? String
-            return try await handleQuoteRequest(
-                json: json,
-                username: username,
-                actorUri: actorUri,
-                activityId: activityId,
-                context: context
-            )
-
-        case "Accept":
-            return try await handleAcceptActivity(
-                json: json,
-                username: username,
-                actorUri: actorUri,
-                context: context
-            )
-
-        case "Reject":
-            return try await handleRejectActivity(
-                json: json,
-                username: username,
-                actorUri: actorUri,
-                context: context
-            )
-
-        case "Block", "Move", "Add", "Remove", "Flag":
-            let objectUri = extractObjectUri(from: json) ?? "unknown"
-            context.logger.info("Stub handler: \(activityType) from \(actorUri), object=\(objectUri)")
+        switch delivery {
+        case .handled(let response):
+            return response
+        case .alreadyProcessed:
+            context.logger.info("Duplicate activity \(activityId), returning 202")
             return APIGatewayResponse(
                 statusCode: .accepted,
                 headers: ["content-type": "application/json"],
-                body: #"{"status":"accepted"}"#
+                body: #"{"status":"already processed"}"#
             )
-
-        case "EmojiReact":
-            context.logger.info("Ignored EmojiReact from \(actorUri)")
+        case .inProgress:
+            // A 5xx makes the sender retry later. By then the other delivery has either
+            // finished (the retry gets 202 "already processed") or released its claim.
+            context.logger.info("Activity \(activityId) is being processed by another delivery, returning 503")
             return APIGatewayResponse(
-                statusCode: .accepted,
-                headers: ["content-type": "application/json"],
-                body: #"{"status":"accepted"}"#
-            )
-
-        default:
-            context.logger.info("Unhandled activity type: \(activityType) from \(actorUri)")
-            return APIGatewayResponse(
-                statusCode: .accepted,
-                headers: ["content-type": "application/json"],
-                body: #"{"status":"accepted"}"#
+                statusCode: .serviceUnavailable,
+                headers: [
+                    "content-type": "application/json",
+                    "retry-after": String(Int(DynamoDBStore.activityClaimLease)),
+                ],
+                body: #"{"error":"Activity is being processed"}"#
             )
         }
 
@@ -350,6 +341,144 @@ let runtime = LambdaRuntime {
     }
 }
 
+// MARK: - Activity Routing
+
+/// Dispatches a verified inbound activity to the `handle*` function for its `type`.
+///
+/// - Parameters:
+///   - type: The activity's `type`.
+///   - json: The parsed activity JSON.
+///   - username: The local actor whose inbox received the activity.
+///   - actorUri: The remote actor that sent the activity.
+///   - activityId: The activity's `id` (empty if it had none).
+///   - keyId: The HTTP Signature key ID, needed by the Follow handler.
+///   - bodyString: The raw request body.
+///   - context: Lambda context for logging.
+/// - Returns: The handler's response; 202 Accepted for types that are acknowledged but not handled.
+func routeActivity(
+    type activityType: String,
+    json: [String: Any],
+    username: String,
+    actorUri: String,
+    activityId: String,
+    keyId: String,
+    bodyString: String,
+    context: LambdaContext
+) async throws -> APIGatewayResponse {
+    switch activityType {
+    case "Follow":
+        return try await handleFollow(
+            json: json,
+            username: username,
+            actorUri: actorUri,
+            activityId: activityId,
+            keyId: keyId,
+            bodyString: bodyString,
+            context: context
+        )
+
+    case "Undo":
+        return try await handleUndo(
+            json: json,
+            username: username,
+            actorUri: actorUri,
+            context: context
+        )
+
+    case "Like":
+        return try await handleLike(
+            json: json,
+            username: username,
+            actorUri: actorUri,
+            context: context
+        )
+
+    case "Announce":
+        return try await handleAnnounce(
+            json: json,
+            username: username,
+            actorUri: actorUri,
+            context: context
+        )
+
+    case "Create":
+        return try await handleCreate(
+            json: json,
+            username: username,
+            actorUri: actorUri,
+            bodyString: bodyString,
+            context: context
+        )
+
+    case "Delete":
+        return try await handleDelete(
+            json: json,
+            username: username,
+            actorUri: actorUri,
+            context: context
+        )
+
+    case "Update":
+        return try await handleUpdate(
+            json: json,
+            username: username,
+            actorUri: actorUri,
+            context: context
+        )
+
+    case "QuoteRequest":
+        let activityId = json["id"] as? String
+        return try await handleQuoteRequest(
+            json: json,
+            username: username,
+            actorUri: actorUri,
+            activityId: activityId,
+            context: context
+        )
+
+    case "Accept":
+        return try await handleAcceptActivity(
+            json: json,
+            username: username,
+            actorUri: actorUri,
+            context: context
+        )
+
+    case "Reject":
+        return try await handleRejectActivity(
+            json: json,
+            username: username,
+            actorUri: actorUri,
+            context: context
+        )
+
+    case "Block", "Move", "Add", "Remove", "Flag":
+        let objectUri = extractObjectUri(from: json) ?? "unknown"
+        context.logger.info("Stub handler: \(activityType) from \(actorUri), object=\(objectUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+
+    case "EmojiReact":
+        context.logger.info("Ignored EmojiReact from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+
+    default:
+        context.logger.info("Unhandled activity type: \(activityType) from \(actorUri)")
+        return APIGatewayResponse(
+            statusCode: .accepted,
+            headers: ["content-type": "application/json"],
+            body: #"{"status":"accepted"}"#
+        )
+    }
+}
+
 // MARK: - Follow Handling
 
 /// Handles an inbound Follow activity.
@@ -357,7 +486,8 @@ let runtime = LambdaRuntime {
 /// Stores the remote actor as a follower of `username`, increments the follower count if
 /// the follow is new, then enqueues an Accept activity back to the remote actor's inbox
 /// via SQS. The Accept wraps the original Follow JSON as its `object`, which Mastodon
-/// requires for correlation.
+/// requires for correlation. A repeated Follow from an existing follower replaces the
+/// stored Follow id with this one and is Accepted again, without changing the count.
 ///
 /// The remote actor's inbox URL comes from the DynamoDB cache populated during HTTP
 /// Signature verification. On a cache miss (rare), the key is refreshed to repopulate it.
@@ -387,7 +517,11 @@ func handleFollow(
     let remoteActorUri = KeyManager().extractActorUri(from: keyId)
     var remoteActor = try await store.getRemoteActor(actorUri: remoteActorUri)
     if remoteActor == nil {
-        let _ = try await keyManager.refreshKey(keyId: keyId, store: store)
+        let _ = try await keyManager.refreshKey(
+            keyId: keyId,
+            store: store,
+            signingKey: { try await fetchSigningKey(for: username) }
+        )
         remoteActor = try await store.getRemoteActor(actorUri: remoteActorUri)
     }
     guard let resolvedActor = remoteActor else {
@@ -463,7 +597,9 @@ func handleFollow(
 /// when the object is a bare URI (the common case from Mastodon).
 ///
 /// Supported inner types:
-/// - `Follow`: removes the follower record and decrements the follower count.
+/// - `Follow`: removes the follower record and decrements the follower count, but only if
+///   the undone Follow's id matches the stored `followActivityId`. An Undo of a Follow that
+///   a newer Follow has replaced is ignored.
 /// - `Like`: removes the Like interaction and decrements the likes counter on the status.
 /// - `Announce`: removes the Announce interaction and decrements the boosts counter.
 ///
@@ -498,9 +634,22 @@ func handleUndo(
 
     if objectType == "Follow" {
         context.logger.info("Processing Undo Follow from \(actorUri) for \(username)")
-        let wasRemoved = try await store.removeFollower(username: username, actorUri: actorUri)
-        if wasRemoved {
-            try await store.decrementFollowerCount(username: username)
+        // Remove the follower only if the undone Follow is the one stored. After an unfollow
+        // and refollow, the stored record holds the newer Follow, and a late Undo of the
+        // older one must leave it in place.
+        if let followActivityId = extractObjectUri(from: json) {
+            let wasRemoved = try await store.removeFollower(
+                username: username,
+                actorUri: actorUri,
+                followActivityId: followActivityId
+            )
+            if wasRemoved {
+                try await store.decrementFollowerCount(username: username)
+            } else {
+                context.logger.info("Undo of \(followActivityId) does not match the stored Follow from \(actorUri), ignoring")
+            }
+        } else {
+            context.logger.warning("Undo Follow without an object id from \(actorUri), ignoring")
         }
     } else if objectType == "Like" {
         context.logger.info("Processing Undo Like from \(actorUri) for \(username)")
@@ -1128,27 +1277,12 @@ func parseStatusUri(_ uri: String) -> (username: String, statusId: String)? {
     return nil
 }
 
-/// Extracts the object URI from an ActivityPub JSON object.
-///
-/// The `object` field may be a bare URI string or an inline object containing an `id`.
-/// Returns `nil` if neither form is present.
-///
-/// - Parameter json: An activity or nested object dictionary.
-/// - Returns: The URI string, or `nil`.
-func extractObjectUri(from json: [String: Any]) -> String? {
-    if let objectStr = json["object"] as? String {
-        return objectStr
-    }
-    if let objectDict = json["object"] as? [String: Any] {
-        return objectDict["id"] as? String
-    }
-    return nil
-}
-
 /// Errors thrown internally by InboxHandler.
 enum InboxError: Error {
     /// JSON serialization to a UTF-8 string failed, which should not happen in practice.
     case encodingFailed
+    /// The local actor's private key is missing from SSM at the given parameter path.
+    case missingActorKey(String)
 }
 
 // MARK: - Accept Handling

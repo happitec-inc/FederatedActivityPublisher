@@ -4,10 +4,11 @@
 /// referenced in the actor JSON-LD's `followers` field, and AP clients fetch it to
 /// determine whether an account is followable and to discover the follower count.
 ///
-/// The collection is always returned as a root stub (no pagination, no inline items)
-/// with `totalItems: 0`. The server tracks follower relationships in DynamoDB and
+/// The collection is returned as a root stub (no pagination, no inline items) whose
+/// `totalItems` is the actor's stored `followerCount`. Mastodon shows that number as the
+/// account's follower count. The server tracks follower relationships in DynamoDB and
 /// delivers activities to followers via SQS, but the follower list itself is not
-/// currently exposed through this endpoint for privacy reasons.
+/// exposed through this endpoint for privacy reasons.
 ///
 /// All responses use `content-type: application/activity+json`. The handler fatally
 /// exits at cold-start if `SERVER_DOMAIN` is absent.
@@ -34,7 +35,7 @@ let runtime = LambdaRuntime {
     }
 
     do {
-        guard try await store.actorExists(username: username) else {
+        guard let actor = try await store.getActor(username: username) else {
             return APIGatewayResponse(
                 statusCode: .notFound,
                 headers: ["content-type": "application/json"],
@@ -42,9 +43,7 @@ let runtime = LambdaRuntime {
             )
         }
 
-        let collection = OrderedCollection.emptyRoot(
-            id: "https://\(serverDomain)/users/\(username)/followers"
-        )
+        let collection = OrderedCollection.followers(of: actor, serverDomain: serverDomain)
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         let data = try encoder.encode(collection)

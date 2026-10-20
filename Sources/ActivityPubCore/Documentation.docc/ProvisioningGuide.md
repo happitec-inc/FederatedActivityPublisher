@@ -20,6 +20,8 @@ This creates:
 - A 2048-bit RSA keypair (private key stored in SSM at `/activity/{stage}/keys/{username}`)
 - An actor record in DynamoDB with the profile, inbox/outbox URLs, and public key
 
+`provision` only creates actors. If the username already has a key in SSM or a profile in DynamoDB, it exits with an error and changes nothing, so it cannot rotate an existing actor's keypair or reset its follower and status counts. To change an existing actor's display name or bio, use `PATCH /api/v1/accounts/update_credentials` instead. If a previous run stored the key but failed before writing the profile, the error names the leftover SSM parameter: delete it and run `provision` again.
+
 Minting the bearer token is a separate CLI step (see Step 3). This repository is public, so token issuance never runs in CI.
 
 ## Step 2: Verify the actor

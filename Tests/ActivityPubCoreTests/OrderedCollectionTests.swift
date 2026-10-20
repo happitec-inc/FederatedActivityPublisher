@@ -50,3 +50,37 @@ import Foundation
     #expect(decoded.first == "https://example.com/outbox?page=1")
     #expect(decoded.last == "https://example.com/outbox?page=2")
 }
+
+private func actor(followerCount: Int, followingCount: Int = 0) -> Actor {
+    Actor(
+        username: "memes", displayName: "Memes", summary: "",
+        publicKeyPem: "pub", privateKeyArn: "/activity/stage/keys/memes",
+        createdAt: "2026-10-20T00:00:00Z",
+        followerCount: followerCount, followingCount: followingCount
+    )
+}
+
+@Test func followersCollectionReportsStoredFollowerCount() throws {
+    let collection = OrderedCollection.followers(of: actor(followerCount: 3), serverDomain: "activity.example")
+    let data = try JSONEncoder().encode(collection)
+    let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    #expect(json["id"] as? String == "https://activity.example/users/memes/followers")
+    #expect(json["totalItems"] as? Int == 3)
+    #expect(json["orderedItems"] == nil) // the follower list stays private
+    #expect(json["first"] == nil)
+}
+
+@Test func followingCollectionReportsStoredFollowingCount() throws {
+    let collection = OrderedCollection.following(
+        of: actor(followerCount: 3, followingCount: 2),
+        serverDomain: "activity.example"
+    )
+    #expect(collection.id == "https://activity.example/users/memes/following")
+    #expect(collection.totalItems == 2)
+    #expect(collection.orderedItems == nil)
+}
+
+@Test func negativeFollowerCountIsReportedAsZero() throws {
+    let collection = OrderedCollection.followers(of: actor(followerCount: -1), serverDomain: "activity.example")
+    #expect(collection.totalItems == 0)
+}

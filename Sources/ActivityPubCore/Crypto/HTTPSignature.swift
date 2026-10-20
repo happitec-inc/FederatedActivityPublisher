@@ -11,6 +11,10 @@
 ///   to produce the `Signature`, `Date`, `Digest`, and `Host` headers needed on each
 ///   outbound `POST` to a remote inbox. The private key comes from SSM.
 ///
+/// - **Signed fetches**: ``KeyManager`` calls ``HTTPSignature/signGet(privateKeyPem:keyId:path:host:date:)``
+///   to sign the `GET` of a remote actor document, which servers in authorized fetch mode
+///   require.
+///
 /// Signing uses RSA-SHA256 with PKCS#1 v1.5 padding via `swift-crypto`'s `_CryptoExtras`
 /// module (`_RSA.Signing`). The Digest header is `sha-256={base64(SHA-256(body))}` per the
 /// ActivityPub convention.
@@ -117,11 +121,7 @@ public enum HTTPSignature: Sendable {
         host: String,
         body: Data
     ) throws -> [String: String] {
-        let dateFormatter = DateFormatter()
-        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-        dateFormatter.timeZone = TimeZone(identifier: "GMT")
-        dateFormatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
-        let dateString = dateFormatter.string(from: Date())
+        let dateString = httpDate(Date())
 
         let digest = computeDigest(body: body)
 
@@ -156,7 +156,59 @@ public enum HTTPSignature: Sendable {
         ]
     }
 
+    /// Sign an outbound `GET` request using the Cavage draft format.
+    ///
+    /// Servers that require signed fetches (Mastodon's authorized fetch mode) reject an
+    /// unsigned `GET` of an actor document with 401. A `GET` has no body, so the signature
+    /// covers `(request-target) host date` only.
+    ///
+    /// - Parameters:
+    ///   - privateKeyPem: PEM-encoded RSA private key.
+    ///   - keyId: The key ID URI (e.g., "https://server/users/alice#main-key").
+    ///   - path: Request path including any query string (e.g., "/users/bob").
+    ///   - host: The target host, with the port if it is not the default (e.g., "remote.server").
+    ///   - date: The request time, sent in the `Date` header.
+    /// - Returns: Dictionary of headers to add to the outbound request.
+    public static func signGet(
+        privateKeyPem: String,
+        keyId: String,
+        path: String,
+        host: String,
+        date: Date = Date()
+    ) throws -> [String: String] {
+        let dateString = httpDate(date)
+
+        let headersToSign = ["(request-target)", "host", "date"]
+        let signingString = buildSigningString(
+            signedHeaders: headersToSign,
+            method: "GET",
+            path: path,
+            headers: ["host": host, "date": dateString]
+        )
+
+        let privateKey = try _RSA.Signing.PrivateKey(pemRepresentation: privateKeyPem)
+        let signature = try privateKey.signature(for: Data(signingString.utf8), padding: .insecurePKCS1v1_5)
+        let signatureBase64 = signature.rawRepresentation.base64EncodedString()
+
+        let signatureHeader = #"keyId="\#(keyId)",algorithm="rsa-sha256",headers="\#(headersToSign.joined(separator: " "))",signature="\#(signatureBase64)""#
+
+        return [
+            "Signature": signatureHeader,
+            "Date": dateString,
+            "Host": host,
+        ]
+    }
+
     // MARK: - Internal Helpers
+
+    /// Format a date as an HTTP `Date` header value (RFC 7231 IMF-fixdate).
+    static func httpDate(_ date: Date) -> String {
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.timeZone = TimeZone(identifier: "GMT")
+        dateFormatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+        return dateFormatter.string(from: date)
+    }
 
     /// Parse a Signature header into key-value pairs using regex.
     /// Uses `(\w+)="([^"]*)"` to handle values that may contain commas.

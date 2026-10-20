@@ -15,6 +15,7 @@
 /// - `list-tokens`: list stored token hashes for auditing
 /// - `revoke-token`: delete one or all tokens for a username
 /// - `rotate-token`: mint a new token and revoke all older ones atomically
+import ActivityPubCore
 import ArgumentParser
 import AWSDynamoDB
 import AWSSSM
@@ -44,6 +45,11 @@ struct ActivityProvisioner: AsyncParsableCommand {
 /// profile item so the Lambda handlers can verify HTTP Signatures without an SSM lookup on
 /// every request. The private key is stored as a `SecureString` in SSM Parameter Store at
 /// `/activity/{stage}/keys/{username}` and referenced by path in the DynamoDB item.
+///
+/// Provisioning only creates actors. If the SSM key or the DynamoDB profile already exists,
+/// the command fails and changes nothing: replacing the key would break signature
+/// verification on every server that cached the old public key, and replacing the profile
+/// would reset its counts. Change an existing actor's profile with `PATCH /api/v1/accounts/update_credentials`.
 ///
 /// Run this locally with AWS credentials that have write access to both DynamoDB and SSM.
 struct ProvisionActor: AsyncParsableCommand {
@@ -94,44 +100,56 @@ struct ProvisionActor: AsyncParsableCommand {
         let privateKeyPem = privateKey.pemRepresentation
 
         let ssmParameterPath = "/activity/\(stage)/keys/\(username)"
-
-        // Store private key in SSM Parameter Store
-        print("Storing private key in SSM at \(ssmParameterPath)...")
-        let ssmClient = try await SSMClient()
-        let putParameterInput = PutParameterInput(
-            name: ssmParameterPath,
-            overwrite: true,
-            type: .secureString,
-            value: privateKeyPem
-        )
-        _ = try await ssmClient.putParameter(input: putParameterInput)
-
-        // Write actor profile to DynamoDB
         let resolvedTableName = tableName ?? "activity-\(stage)"
-        print("Writing actor profile to DynamoDB table \(resolvedTableName)...")
-
         let now = ISO8601DateFormatter().string(from: Date())
 
+        let ssmClient = try await SSMClient()
         let dynamoClient = try await DynamoDBClient()
-        let putItemInput = PutItemInput(
-            item: [
-                "PK": .s("ACTOR#\(username)"),
-                "SK": .s("PROFILE"),
-                "username": .s(username),
-                "displayName": .s(displayName),
-                "summary": .s(summary),
-                "publicKeyPem": .s(publicKeyPem),
-                "privateKeyArn": .s(ssmParameterPath),
-                "createdAt": .s(now),
-                "discoverable": .bool(true),
-                "manuallyApprovesFollowers": .bool(false),
-                "followerCount": .n("0"),
-                "followingCount": .n("0"),
-                "statusCount": .n("0"),
-            ],
-            tableName: resolvedTableName
-        )
-        _ = try await dynamoClient.putItem(input: putItemInput)
+
+        // Both writes are create-only: an existing actor is never replaced. If the profile
+        // write is refused, the key written just before it is deleted again.
+        do {
+            try await provisionActorRecords(
+                keyPath: ssmParameterPath,
+                username: username,
+                writeKey: {
+                    print("Storing private key in SSM at \(ssmParameterPath)...")
+                    do {
+                        _ = try await ssmClient.putParameter(input: actorKeyParameterInput(
+                            path: ssmParameterPath,
+                            privateKeyPem: privateKeyPem
+                        ))
+                        return true
+                    } catch is ParameterAlreadyExists {
+                        return false
+                    }
+                },
+                writeProfile: {
+                    print("Writing actor profile to DynamoDB table \(resolvedTableName)...")
+                    do {
+                        _ = try await dynamoClient.putItem(input: actorProfileInput(
+                            tableName: resolvedTableName,
+                            username: username,
+                            displayName: displayName,
+                            summary: summary,
+                            publicKeyPem: publicKeyPem,
+                            privateKeyPath: ssmParameterPath,
+                            createdAt: now
+                        ))
+                        return true
+                    } catch is ConditionalCheckFailedException {
+                        return false
+                    }
+                },
+                deleteKey: {
+                    print("Profile exists; deleting the key just written to \(ssmParameterPath)...")
+                    _ = try await ssmClient.deleteParameter(input: DeleteParameterInput(name: ssmParameterPath))
+                }
+            )
+        } catch let error as ActorProvisioningError {
+            print("Error: \(error)")
+            throw ExitCode.failure
+        }
 
         print("Actor provisioned successfully!")
         print("  Actor URI: https://\(serverDomain)/users/\(username)")
