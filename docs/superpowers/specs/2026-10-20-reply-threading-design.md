@@ -1034,10 +1034,11 @@ Tests:
 - **Key fetch:** the test calls the internal `fetchActorDocument(actorUri:schemePolicy:)` through
   `@testable import ActivityPubCore`, so no `DynamoDBStore` is needed (`KeyManager.swift:68`).
   The policy is a method parameter with the `https`-only default. With the test policy, it
-  fetches a valid key document from the test server. A `keyId` that redirects 4 times fails
-  with the redirect error, and one over 1 MB fails with the size error. Negative control: the same calls against the pre-move
-  `fetchActorDocument(actorUri:)`, with no policy argument, succeed, because that code has no
-  scheme check, redirect cap or size cap.
+  fetches a valid key document from the test server. An actor URI whose 4-redirect chain ends at
+  a valid key document fails with the redirect error. An actor URI serving a valid key document
+  padded with whitespace past 1 MB fails with the size error. Negative control: the same calls
+  against the pre-move `fetchActorDocument(actorUri:)`, with no policy argument, succeed,
+  because that code has no scheme check, redirect cap or size cap, and both fixtures parse.
 - **Address check (0b):** redirects to `127.0.0.1`, `169.254.169.254` and `10.0.0.1` fail.
 - **Request target (0b):** a URI with a query string and percent-encoded characters reaches the
   test server byte for byte. Negative control: the same URI through a plain `/{path}` template
