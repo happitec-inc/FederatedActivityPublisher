@@ -2,8 +2,8 @@
 
 ## Goal
 
-Let a local actor publish a reply to any status: its own, another local actor's, or a remote
-one. Each reply federates with a correct `inReplyTo`, reaches the parent's author, and is
+Let a local actor publish a reply to any status it can see: its own, another local actor's, or a
+remote one. Each reply federates with a correct `inReplyTo`, reaches the parent's author, and is
 reported through the Mastodon-compatible client API.
 
 The motivating case is a bot that posts a long daily summary. When the summary exceeds the
@@ -19,8 +19,8 @@ The work ships in three phases. Each phase can be shipped and released on its ow
 | Phase | Parent | Unblocks | New components |
 |---|---|---|---|
 | 1 | The posting actor's own status | The motivating bot thread | None |
-| 2 | Another local actor's status | Conversations between actors on one server | None |
-| 3 | A remote status | Replying into the wider fediverse | A signed-GET variant of the existing fetch function |
+| 2 | Another local actor's public or unlisted status | Conversations between actors on one server | None |
+| 3 | A remote status | Replying into the wider fediverse | Signing and hardening in the existing shared fetch function |
 
 Phase 1 doesn't depend on phases 2 or 3. Phase 2 builds on phase 1's resolver and stored fields.
 Phase 3 builds on phase 2's Mention and addressing logic.
@@ -33,7 +33,11 @@ Phase 3 builds on phase 2's Mention and addressing logic.
 - Mention parsing from status text (Open Question 2).
 - `direct` visibility. It is still rejected (`Sources/PostHandler/main.swift:194`).
 - Server-side length enforcement, which is tracked separately in FederatedActivityPublisher#272.
-- Rewriting `inReplyTo` values stored before this change (Phase 1 §3).
+- Rewriting `inReplyTo` values stored before this change (§1.3).
+
+**Follow-ups outside every phase:**
+- Linked Data Signatures, which would make a remote server forward FAP's replies (Open Question 4).
+- Delete and Update reaching the parent's author (Open Question 6).
 
 ## Standards
 
@@ -77,13 +81,15 @@ Source: https://www.w3.org/TR/activitypub/
   (`Sources/ActivityPubCore/Models/Note.swift:28-29,123-124`).
 - **§7.2 Create Activity (S2S):** "Receiving a Create activity in an inbox has surprisingly few
   side effects".
-- **§7.1.2 Forwarding from Inbox:** a server MUST forward an inbound activity only when it hasn't
-  seen it before, its `to`/`cc`/`audience` contain a collection the server owns, *and* its
-  "`inReplyTo`, `object`, `target` and/or `tag` are objects owned by the server". `context` is not
-  a forwarding condition.
-  - In phase 3, this is how a remote parent author's server can carry FAP's reply on to that
-    author's followers.
-  - It does not apply to a self-thread, which FAP delivers directly to its own followers.
+- **§7.1.2 Forwarding from Inbox:** a server MUST forward an inbound activity only when all three
+  conditions hold:
+  - it hasn't seen the activity before
+  - its `to`/`cc`/`audience` contain "a Collection owned by the server"
+  - its "`inReplyTo`, `object`, `target` and/or `tag` are objects owned by the server"
+
+  `context` is not a forwarding condition. A FAP reply addresses the parent author's *actor*, not
+  a collection that the author's server owns, so this rule never makes that server forward a FAP
+  reply. Mastodon's own forwarding has a stricter condition again (see Mastodon below).
 - **Addressing.** §5.6 defines `https://www.w3.org/ns/activitystreams#Public` and says it MUST
   NOT be delivered to as an inbox. §6.1 names the Followers and Public collections as "good
   choices for the default addressing of new Activities".
@@ -119,6 +125,20 @@ No FEP covers self-threads specifically. FEP-76ea is the closest.
   date." For a POST, "The `Digest:` header must also be included".
 - Receivers "check that the signed request was made within the past 12 hours".
 
+**What Mastodon's signature verifier needs** (`app/lib/signed_request.rb`,
+`app/controllers/concerns/signature_verification.rb`, `app/controllers/statuses_controller.rb`):
+- `verify_signature_strength!` (`signed_request.rb:54-57`) requires three things on a GET:
+  - `date` or `(created)`
+  - `(request-target)` or `digest`
+  - `host`
+- `(request-target)` is checked first against `original_fullpath`, which includes the query string
+  (`signed_request.rb:113`). A path without the query string is only a temporary compatibility
+  fallback.
+- In secure mode, status JSON requires a signature: `require_account_signature!`
+  (`statuses_controller.rb:11`).
+- `signed_request_account` (`signature_verification.rb:45` onward) accepts any account whose key
+  verifies. No instance actor is required.
+
 **What Mastodon emits** (`app/serializers/activitypub/note_serializer.rb`,
 `app/lib/activitypub/tag_manager.rb`):
 - `inReplyTo` is the parent's URI, and only when the status is a reply with a resolved thread
@@ -126,29 +146,47 @@ No FEP covers self-threads specifically. FEP-76ea is the closest.
 - `replies` is emitted only for local statuses (`note_serializer.rb:22`). Its first page holds up
   to 5 self-replies (`:61-74`; `app/controllers/activitypub/replies_controller.rb:33-34,76`).
 - It emits both `conversation` (`note_serializer.rb:157-166`) and `context` (`:168-173`).
-- Mention tags are `{type: "Mention", href: <account URI>, name: "@acct"}`
-  (`note_serializer.rb`, `MentionSerializer`).
+- Mention tags are `{type: "Mention", href: <account URI>, name: "@acct"}` (`note_serializer.rb:333`
+  onward, `MentionSerializer`).
 - **`to`** (`tag_manager.rb:171-196`):
   - public is `[as:Public]`
   - unlisted and private are `[author followers]` (`:175`)
-- **`cc`** (`tag_manager.rb:203` onward):
+- **`cc`** (`tag_manager.rb:203-235`):
   - public adds `author followers`
   - unlisted adds `as:Public`
   - for every visibility except direct and limited, every mentioned account's URI is appended
     (`:215,228`)
 - Mentions come only from scanning the status text (`app/services/process_mentions_service.rb:25-26`).
-  The parent's author is never added to `cc` automatically.
+  The parent's author is never mentioned or put in `cc` automatically.
+- **Public spellings.** All three public spellings are recognised: the full IRI, `as:Public` and
+  `Public` (`tag_manager.rb:14-15`).
 
 **Who Mastodon delivers a reply to** (`app/lib/status_reach_finder.rb`):
 - Inboxes are reached accounts, plus followers, plus relays (`:12-13`).
-- The reached accounts include the replied-to account (`:31`, `replied_to_account_id`) and the
-  mentioned accounts (`:34`).
-- **A distributable reply reaches the parent's author even when it doesn't mention them:**
-  `@status.in_reply_to_account_id if distributable?` (`:47-48`).
-- **When the parent's author is local**, a distributable reply also goes to that author's
+- The reached accounts include `replied_to_account_id` (`:31`) and the mentioned accounts (`:34`).
+- **A distributable reply reaches `in_reply_to_account_id` even without a mention:**
+  `@status.in_reply_to_account_id if distributable?` (`:47-48`). That value is the carried-over
+  account.
+- **When the direct parent's author is local**, a distributable reply also goes to that author's
   followers:
   `if @status.in_reply_to_local_account? && distributable?` →
   `@status.account.followers.or(@status.thread.account.followers…)` (`:105-106`).
+  - `in_reply_to_local_account?` is `reply? && thread&.account&.local?` (`status.rb:210-212`).
+  - `thread` is the *direct* parent. Carry-over doesn't drive the followers union.
+
+**How Mastodon forwards an inbound reply** (`app/lib/activitypub/activity/create.rb:491-495`):
+- `forward_for_reply` runs only when
+  `@status.distributable? && @json['signature'].present? && reply_to_local?`.
+- `signature` is a Linked Data Signature embedded in the activity body. FAP emits none: there is no
+  `RsaSignature2017` in `Sources/`.
+- **So a Mastodon server never forwards a FAP reply to its local author's followers.**
+
+**Who may reply** (`app/controllers/api/v1/statuses_controller.rb:106-111`,
+`app/policies/status_policy.rb`):
+- `set_thread` finds the parent, then calls `authorize(@thread, :show?)`. Not found or not
+  permitted gives a **404** with `statuses.errors.in_reply_not_found`.
+- For a private status, `show?` is `owned? || following_author? || mention_exists?`
+  (`status_policy.rb:9-10`).
 
 **What Mastodon does on create** (`app/services/post_status_service.rb`, `app/models/status.rb`):
 - **Visibility is never changed because of the thread.** It is overridden in two cases only
@@ -167,7 +205,7 @@ No FEP covers self-threads specifically. FEP-76ea is the closest.
     `in_reply_to_account_id` is carried over
   - otherwise the parent's author is used
 
-  The Status entity docs say the same: it "sometimes skips over self-replies".
+  The Status entity docs say it "sometimes skips over self-replies".
 - **Conversation.** When no `conversation` is supplied, a reply joins its parent's conversation
   (`status.rb:449`).
 
@@ -176,23 +214,40 @@ No FEP covers self-threads specifically. FEP-76ea is the closest.
 - **`inReplyTo`.** It reads `inReplyTo`, falling back to `inReplyToAtomUri` (`create.rb:440-447`).
   When the parent is unknown, `resolve_thread` (`:382-386`) enqueues `ThreadResolveWorker`, which
   fetches the parent (`app/workers/thread_resolve_worker.rb:9-21`).
-- **Mentions** are resolved by `href`, not by `name`: `account_from_uri(tag['href'])`, then
-  fetching that account if it is unknown (`create.rb:255-263`).
+- **Mentions** are resolved by `href`, not by `name` (`create.rb:255-263`).
 - **Visibility** is derived from the audience (`status_parser.rb:101-111`):
-  - `as:Public` in `to` → public
-  - `as:Public` in `cc` → unlisted
+  - public in `to` → public
+  - public in `cc` → unlisted
   - the author's followers collection in `to` → private
   - anything else → direct
 - **`conversation`.** It reads `conversation` (`create.rb:118`). No read of `context` was found.
 
-**How Mastodon fetches remote objects** (`app/helpers/json_ld_helper.rb`):
-- `fetch_resource` re-fetches by the returned `id` and accepts the document only if
-  `json['id'] == uri` (`:242-252`).
-- `non_matching_uri_hosts?` compares hosts case-insensitively (`:99-106`). It is used to reject an
-  embedded object whose `attributedTo` or `id` doesn't match its origin (`:115`).
-- Fetches are signed on behalf of an account, by default `Account.representative`, the instance
-  actor (`:272-275,381-384`). They send `Accept: application/activity+json, application/ld+json`
-  (`:384`).
+**How Mastodon fetches remote objects** (`app/helpers/json_ld_helper.rb`, `app/lib/request.rb`,
+`app/services/activitypub/fetch_remote_status_service.rb`,
+`app/services/activitypub/fetch_remote_actor_service.rb`, `app/lib/activitypub/activity.rb`):
+- **`fetch_resource`** (`json_ld_helper.rb:242-252`):
+  - With an unknown id, it fetches, takes `json['id']`, re-fetches that id, and accepts the result
+    only if `json['id'] == uri`.
+  - With a known id, it does just the second step.
+- **Response checks.** A response is used only when the status is 200 *and*
+  `valid_activitypub_content_type?` holds (`json_ld_helper.rb:281,351` onward). That means
+  `application/activity+json`, or `application/ld+json` with the ActivityStreams profile.
+- **Body cap.** The body is capped at 1 MB (`request.rb:293-294`, `body_with_limit(limit = 1.megabyte)`).
+- **Redirects.** At most 3 hops (`request.rb:101-102`, `max_hops: 3`). The HTTP-signature feature
+  signs each request it sends (`request.rb:72-75`).
+- **Private addresses.** Every resolved address is checked before the socket connects
+  (`request.rb:325-334`, `check_private_address` at `:389-394`).
+- **Status attribution.** `trustworthy_attribution?` requires the object's host to equal the host
+  of `attributedTo` (`fetch_remote_status_service.rb:61-66`). `attributedTo` is read with
+  `value_or_id(first_of_value(...))`, so an array, a string or an object all work (`:29`;
+  `json_ld_helper.rb:16,83`).
+- **Object types.** Accepted types are `SUPPORTED_TYPES = Note Question` and
+  `CONVERTED_TYPES = Image Audio Video Article Page Event` (`activity.rb:9-10`;
+  `fetch_remote_status_service.rb:82-84`).
+- **Actors.** An actor is fetched with a known id (`fetch_remote_actor_service.rb:16`,
+  `fetch_resource(uri, true, …)`), so its `id` must equal the URI that was requested.
+- **Signing account.** Fetches are signed on behalf of `Account.representative` by default
+  (`json_ld_helper.rb:272-275`).
 
 **Home-feed filtering** (`app/lib/feed_manager.rb`):
 - A reply whose parent is unresolved is filtered from home feeds (`:505`).
@@ -204,17 +259,26 @@ No FEP covers self-threads specifically. FEP-76ea is the closest.
 **Client API:**
 - `POST /api/v1/statuses` takes `in_reply_to_id`: "ID of the status being replied to"
   (https://docs.joinmastodon.org/methods/statuses/).
-- When that id is unknown or not viewable, Mastodon returns **404** with
-  `statuses.errors.in_reply_not_found` (`app/controllers/api/v1/statuses_controller.rb`,
-  `set_thread`, `:106-111`).
-- **Mastodon ids for remote statuses are local cache ids.** A client obtains one by resolving the
-  status's URL. `GET /api/v2/search` with `resolve=true` and an HTTPS URL as `q` attempts
-  "resolving the URL and returning the matching status" (https://docs.joinmastodon.org/methods/search/).
+- **Mastodon ids for remote statuses are local cache ids.** A client gets one through
+  `GET /api/v2/search` with `resolve=true` and an HTTPS URL, which attempts "resolving the URL and
+  returning the matching status" (https://docs.joinmastodon.org/methods/search/).
 - The Status entity has `in_reply_to_id` and `in_reply_to_account_id`, both nullable strings,
   "cast from an integer but not guaranteed to be a number"
   (https://docs.joinmastodon.org/entities/Status/).
 - `GET /api/v1/statuses/:id/context` returns `ancestors` and `descendants`
   (https://docs.joinmastodon.org/entities/Context/).
+- A web URL `/@:account_username/:id` serves the same status as its canonical URI
+  (`config/routes.rb:174`).
+
+### Platform limits
+
+- **API Gateway REST integration timeout:** "50 milliseconds - 29 seconds for all integration
+  types, including Lambda" (Integration timeout for Regional APIs,
+  https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-execution-service-limits-table.html).
+- **`URLRequest.timeoutInterval` is an idle timeout:** "If during a connection attempt the request
+  remains idle for longer than the timeout interval, the request is considered to have timed out"
+  (https://developer.apple.com/documentation/foundation/nsurlrequest/timeoutinterval).
+  A server that keeps sending bytes slowly is never cut off by it.
 
 ### What this means
 
@@ -222,11 +286,13 @@ No FEP covers self-threads specifically. FEP-76ea is the closest.
 both the only threading property Mastodon requires on intake and the property FEP-f228 names as
 the primary backfill path.
 
-A reply to someone else must also do two more things:
-- put the parent author in `cc` with a `Mention` tag, so they receive and are notified
+A reply to someone else must also do three more things:
+- put the parent author in `cc` with a `Mention` tag
 - be delivered to the parent author's inbox
+- respect who may see the parent
 
-Mastodon delivers there even without a mention when the reply is distributable.
+Delivery to the parent author's *followers* happens on Mastodon only when the parent is local to
+the replying server. Nothing on the remote side does it for FAP.
 
 ## Current FAP behaviour
 
@@ -238,19 +304,19 @@ Verified by reading the code at `8a78008`.
 - `PostHandler` copies it verbatim into `Status.inReplyTo` (`Sources/PostHandler/main.swift:310`).
   An unknown or garbage value returns 200.
 - The parent's `repliesCount` is not touched.
-- **Quote precedent.** `quoted_status_id` already accepts either a local id or a remote URI
-  (`main.swift:249-260`):
-  - it tries a local lookup first
-  - otherwise it treats the value as a remote URI, fetches it unsigned with `fetchRemoteObject`
-    (`:264`), and resolves `attributedTo` to an inbox through the remote-actor cache or a fetch
-    (`:265-277`)
+- **The quote path** (`main.swift:249-288`):
+  - It looks up `quoted_status_id` in the *caller's own* partition only (`:252`).
+  - Any other value, including another local actor's URI, is treated as remote. It is fetched
+    unsigned with `fetchRemoteObject` (`:264`), and its author's inbox is resolved through the
+    remote-actor cache or a fetch (`:265-277`).
+  - If no inbox is found, the quote is marked `failed` and the post still goes out (`:282-287`).
 
 **Model.**
 - `Status.inReplyTo` is documented as a URI (`Sources/ActivityPubCore/Models/Status.swift:47-48`,
   init doc `:79`), but holds whatever the client sent.
 - `repliesCount` is documented as "replies received from remote actors" (`Status.swift:53-54`).
-- `Status.tags` (`[Tag]?`, `Status.swift:44`) exists. `Tag` has `type`, `name` and `href`, and its
-  doc lists `Mention` (`Status.swift:267-273`). `PostHandler` always writes `tags: nil`
+- `Status.tags` is `[Tag]?` (`Status.swift:44`). `Tag` has `type`, `name` and `href`, and its doc
+  lists `Mention` (`Status.swift:267-273`). `PostHandler` always writes `tags: nil`
   (`main.swift:308`).
 
 **Storage.**
@@ -258,9 +324,11 @@ Verified by reading the code at `8a78008`.
   `GSI1SK=PUBLISHED#…` (`Status.swift:216-221`).
 - No index on `inReplyTo` or on status id alone exists.
 - `getStatus` supports `consistentRead` (`Sources/ActivityPubCore/DynamoDBStore.swift:728`).
-- Remote actors are cached at `REMOTE_ACTOR#{actorUri}` with a 24 h TTL (`DynamoDBStore.swift:593-630`).
-  The cache holds `actorUri`, `publicKeyPem`, `preferredUsername`, `inbox`, `sharedInbox` and
-  `fetchedAt`, but no `followers` (`Sources/ActivityPubCore/Models/RemoteActor.swift:10-20`).
+- Remote actors are cached at `REMOTE_ACTOR#{actorUri}` with a 24 h TTL (`DynamoDBStore.swift:593-630`,
+  TTL at `:598-600`). The cache holds `actorUri`, `publicKeyPem`, `preferredUsername`, `inbox`,
+  `sharedInbox` and `fetchedAt`, but no `followers` (`Sources/ActivityPubCore/Models/RemoteActor.swift:8-20`).
+- **That cache is the trust anchor for inbound signatures.** `KeyManager.getPublicKey` returns
+  `cached.publicKeyPem` when present (`Sources/ActivityPubCore/Crypto/KeyManager.swift:41-42`).
 
 **Outbound Note.**
 - `buildNoteJSON` (`Note.swift:23-109`) is the only Note builder. It emits no `inReplyTo`,
@@ -270,7 +338,7 @@ Verified by reading the code at `8a78008`.
   - delivery (`PostHandler/main.swift:325`)
   - the object endpoint (`Sources/ObjectHandler/main.swift:74`)
   - the outbox (`Sources/OutboxHandler/main.swift:80`)
-  - the quote-accept `Update` (`Sources/InboxHandler/main.swift:1285`)
+  - the quote-accept `Update` (`Sources/InboxHandler/main.swift:1285`), which goes to followers only
 - `Documentation.docc/FederationOverview.md:15` claims "reply metadata". That is false at
   `8a78008`.
 
@@ -294,12 +362,24 @@ These rows match Mastodon's `to`/`cc` for a post with no mentions.
 
 **Signing and fetching.**
 - `HTTPSignature.sign` always signs `(request-target) host date digest content-type`
-  (`Sources/ActivityPubCore/Crypto/HTTPSignature.swift:112-133`). It is built for POST.
-- `fetchRemoteObject` sends an unsigned GET with `Accept: application/activity+json` and a 10 s
-  timeout (`Sources/ActivityPubCore/FetchRemoteObject.swift:36-58`).
-- `KeyManager.fetchActorDocument` is also unsigned (`Sources/ActivityPubCore/Crypto/KeyManager.swift:68-74`).
-- `PostFunction` can already read `activity/${Stage}/*` from SSM and has a 60 s timeout
+  (`Sources/ActivityPubCore/Crypto/HTTPSignature.swift:112-133`). It is built for POST. The
+  signing string comes from `buildSigningString` (`:181-190`).
+- **`fetchRemoteObject`** (`Sources/ActivityPubCore/FetchRemoteObject.swift:36-58`):
+  - It sends an unsigned GET with `Accept: application/activity+json` and a 10 s idle timeout.
+  - It uses `URLSession.shared` with no delegate (`:45`), so it follows redirects of any scheme
+    and to any address.
+  - It has no body cap and doesn't check the response content type.
+- `KeyManager.fetchActorDocument` is also unsigned (`KeyManager.swift:68-74`). It parses the actor
+  document into a `RemoteActor` (`:89-105`).
+- PostHandler caches one value per warm container, the session signing key (`PostHandler/main.swift:40-60`,
+  `cachedSigningKey` at `:42`).
+
+**Infrastructure.**
+- `PostFunction` can read `activity/${Stage}/*` from SSM and has a 60 s Lambda timeout
   (`activity-app/functions/template.yaml:127,134-135`).
+- `ClientApi` is an `AWS::Serverless::Api` (a REST API) with no integration timeout override
+  (`functions/template.yaml:111-120`). The 29 s limit therefore applies.
+- No function has a `VpcConfig`, so Lambdas reach the network directly.
 
 **Following.** FAP actors follow no one. The following collection is always an empty stub
 (`Sources/FollowingHandler/main.swift:8`).
@@ -327,16 +407,17 @@ These rows match Mastodon's `to`/`cc` for a post with no mentions.
 - The profile page lists the 20 newest public/unlisted posts (`:80-81,300`).
 
 **Inbound replies (InboxHandler).**
-- `handleCreate` (`InboxHandler/main.swift:727-818`) accepts a remote `Create(Note)` only when
-  `inReplyTo` parses as a local status URI (`parseStatusUri`, `:1114-1129`). Replies to remote
-  statuses are dropped (`:712-715`).
+- `handleCreate` (`InboxHandler/main.swift:727-818`) drops anything that isn't a `Note` (`:747`).
+  It also drops anything whose `inReplyTo` doesn't parse as a local status URI (`:756-772`,
+  `parseStatusUri` at `:1114-1129`).
 - It stores `REPLY#{objectUri}` under the parent owner, with `GSI1PK=REPLIES#{inReplyTo}`
   (`DynamoDBStore.swift:382-417`), and increments the parent's `repliesCount` (`:808-810`).
 - Delete removes a stored reply and decrements the count (`:1053-1088`). A Delete for an object
-  FAP never stored is a no-op, because `removeReply` returns nil.
-- Inbound Update of a reply looks under the *inbox owner's* partition
-  (`username: username`, `:884-885`), while Create stores it under the *parent owner's* partition.
-  That mismatch is pre-existing and is noted under Phase 2 §4.
+  FAP never stored is a no-op, because `removeReply` returns nil (`:1053-1059`).
+- Inbound Update of a reply looks under the *inbox owner's* partition (`:884-885`), while Create
+  stores it under the *parent owner's* partition. That mismatch is pre-existing.
+- The quote-accept origin check compares the scheme and host of the actor and the quoted post
+  (`:1257-1265`).
 - `REPLIES#` is never queried.
 
 ## Phase 1 — Self-replies
@@ -344,8 +425,10 @@ These rows match Mastodon's `to`/`cc` for a post with no mentions.
 ### 1.1 Shared URI parsing moves to ActivityPubCore
 
 Move `parseStatusUri` (`InboxHandler/main.swift:1114`) into ActivityPubCore as
-`parseLocalStatusUri(_:serverDomain:handleDomain:)`. Behaviour is unchanged. InboxHandler,
-PostHandler, `buildNoteJSON`, `buildStatusResponse` and the post page all call it.
+`parseLocalStatusUri(_:serverDomain:handleDomain:)`. Behaviour is unchanged.
+
+InboxHandler, PostHandler, `buildNoteJSON`, `buildStatusResponse` and the post page all call it.
+Add `isLocalHost(_:)` beside it: true when the URI's host is `serverDomain` or `handleDomain`.
 
 ### 1.2 Resolve and validate `in_reply_to_id`
 
@@ -356,8 +439,7 @@ Insert a step between visibility validation and addressing, before anything is w
    - Use `consistentRead: true` because the bot posts back-to-back.
    - InboxHandler already reads this way after a write (`InboxHandler/main.swift:1284`).
 3. If nothing is found, return **404** `{"error":"Status to reply to not found"}` and write
-   nothing, as Mastodon does. In phase 1 this covers a missing parent, another actor's status, and
-   a URI. Phases 2 and 3 widen what resolves.
+   nothing, as Mastodon does. Phases 2 and 3 widen what resolves.
 4. If found:
    - set `inReplyTo = parent.uri` (`PostHandler/main.swift:293`). This is byte-identical to the
      parent's Note `id` (`Note.swift:25`).
@@ -369,10 +451,9 @@ Insert a step between visibility validation and addressing, before anything is w
      The response's `visibility` shows the effective value.
    - The reason: a wider child would publish a narrower parent's URI, and the object endpoint's
      `activity+json` branch serves that parent regardless of visibility (`ObjectHandler/main.swift:74-84`).
-     `ThreadResolveWorker` fetches it automatically.
    - **Once #270 is fixed, remove the cap to match Mastodon**, which never changes visibility
      because of the thread (`post_status_service.rb:85-87`). That was decided 2026-10-20.
-   - The cap applies only to local parents (phases 1 and 2).
+   - The cap applies to local parents (phases 1 and 2).
 
 Testable shape:
 
@@ -381,8 +462,8 @@ public enum ReplyParentResolution { case none, resolved(ReplyParent), notFound, 
 public func cappedReplyVisibility(requested: String, parent: String) -> String
 ```
 
-`ReplyParent` carries `uri`, `authorAccountId`, `authorActorUri`, `visibility`, `isLocal`, and,
-for local parents, the parent `Status`.
+`ReplyParent` carries `uri`, `directAuthorAccountId`, `directAuthorActorUri`, `visibility`,
+`isLocal`, and, for local parents, the parent `Status`.
 
 ### 1.3 Storage
 
@@ -396,7 +477,7 @@ There is no index change.
 
 **Values stored before this change are ignored.**
 - A reader treats `inReplyTo` as a reply link only when it is an `https://` URI that
-  `parseLocalStatusUri` accepts. Phase 3 widens this rule.
+  `parseLocalStatusUri` accepts. §3.6 widens this rule.
 - Any other value is ignored as if absent. Nothing is normalized or migrated.
 - Normalizing would change object-endpoint bodies already served under a one-year cache, and
   would turn unvalidated client input (`PostHandler/main.swift:310`) into URIs.
@@ -471,7 +552,7 @@ child in the parent's conversation (`status.rb:449`).
 
 None.
 - Two functions move into ActivityPubCore.
-- One resolver and one cap function are added.
+- A resolver and a cap function are added.
 - One optional attribute is added.
 - No handler, route, table, index, queue or workflow is added.
 - The work stays in one repository.
@@ -480,56 +561,90 @@ None.
 
 ### 2.1 What `in_reply_to_id` means
 
-- A client cannot learn another local actor's status id from FAP's API. FAP serves no status
-  reads; only the create response returns an id, and only for the caller's own posts. Clients
-  meet those statuses by URI or URL, through federation or the web.
-- So phase 2 widens the resolver to accept an **https status URI**:
-  1. Try the bare-id lookup in the author's partition (phase 1).
-  2. If that misses and `in_reply_to_id` is a URI that `parseLocalStatusUri` accepts, call
-     `getStatus(owner, id, consistentRead: true)`.
-  3. Anything else misses, and the request gets a 404.
-- The quote path already accepts "local id or URI" in one field (`PostHandler/main.swift:249-260`).
-- No id→owner index is added, because a bare id from another partition is not something a FAP
-  client can hold.
+**"Local" is defined by host.** A URI is local when `isLocalHost` holds, meaning its host is
+`serverDomain` or `handleDomain`.
+
+**The resolver gains one branch after the phase 1 bare-id lookup:**
+1. If `in_reply_to_id` is a local-host `https://` URI and `parseLocalStatusUri` accepts it, call
+   `getStatus(owner, id, consistentRead: true)`.
+2. If it is a local-host URI that isn't a status URI, return 404. It never takes phase 3's remote
+   branch.
+3. A bare id still resolves only within the caller's own partition, as in phase 1.
+
+**Why a URI.**
+- A client can't learn another local actor's status id from FAP's API. FAP serves no status
+  reads, and the create response returns only the caller's own ids.
+- Clients meet such statuses by URI or URL, through federation or the web.
+- No id→owner index is added.
+
+The quote path is *not* a precedent for this branch. It looks only in the caller's partition and
+sends every other value, including another local actor's URI, down the remote fetch
+(`PostHandler/main.swift:252-264`).
+
+**Who may reply. This rule is Mastodon's `show?`, and it stays after #270 is fixed.**
+- A parent that is `private` and not owned by the posting actor resolves to `notFound`, and the
+  request gets a **404**.
+- The Mastodon receipt: `set_thread` authorizes `show?`, then 404 (`statuses_controller.rb:106-111`).
+  For a private status `show?` is `owned? || following_author? || mention_exists?`
+  (`status_policy.rb:9-10`).
+- Neither of the other two conditions can hold in FAP:
+  - FAP actors follow no one (`FollowingHandler/main.swift:8`).
+  - FAP never records a Mention *of* a peer into the parent.
+- So only public and unlisted parents of other local actors resolve.
+
+**Response.**
+- `in_reply_to_id` for a parent the caller doesn't own is the parent's **URI**, not its bare id.
+  The URI is the only form the caller can post back.
+- `in_reply_to_account_id` is the parent owner's username (§2.2).
+- Open Question 1 covers URI-valued ids.
 
 ### 2.2 `in_reply_to_account_id` and carry-over
 
 Implement Mastodon's `carried_over_reply_to_account_id` (`status.rb:461-466`):
 - If `parent.username == author` *and* the parent has `inReplyToAccountId`, carry the parent's
   value over.
-- Otherwise use `parent.username`.
+- Otherwise use the parent's author.
 
-This applies from phase 2 onward to every reply, self-replies included. A self-reply continuing a
-conversation with someone else then keeps addressing that person. In phase 1 the result is always
-the author, so the rule changes nothing there.
+The carried-over account, *R*, drives the Mention, `cc` and direct delivery. It never drives the
+followers union (§2.3).
+
+In phase 1 the result is always the author, so the rule changes nothing there.
 
 ### 2.3 Addressing, Mention, delivery
 
-Let *R* be the account in `inReplyToAccountId`, when *R* is not the author.
+Two accounts matter here:
+- *P* is the direct parent's author.
+- *R* is the carried-over account. It is used only when it isn't the posting actor.
 
 - **Mention.**
   - Add `Tag(type: "Mention", name: "@{R}@{handleDomain}", href: "https://{serverDomain}/users/{R}")`
     to `status.tags`. `buildNoteJSON` already serializes tags (`Note.swift:62-72`).
-  - Mastodon resolves mentions by `href` (`create.rb:255-263`), so `name` is display-only.
-- **Addressing.** Append *R*'s actor URI to `cc` for public, unlisted and private. This is
-  Mastodon's `cc` rule for mentioned accounts (`tag_manager.rb:215,228`).
-- **Delivery.**
-  - *R* is local, so no HTTP delivery to *R* is made. A local inbox has nothing to deliver to
-    beyond the record updates below. FAP has no notifications or home timeline.
-  - For a distributable reply (public or unlisted) to a local author, fan out to the union of the
-    author's followers and *R*'s followers, deduplicated by shared inbox. This matches Mastodon's
-    reach for replies to local accounts (`status_reach_finder.rb:105-106`).
-  - It costs one more `listAllFollowers(username:)` call.
-- **`repliesCount`.** Increment it on the parent's owner partition, with the same
-  `distributable?` gate, ordering and swallow rule as §1.6.
-- **Visibility cap.** It applies as in §1.2 step 5, because the parent is local.
+  - Mastodon resolves mentions by `href` (`create.rb:255-263`).
+  - **This is FAP's choice, not Mastodon's behaviour.** Mastodon never mentions automatically
+    (`process_mentions_service.rb:25-26`). Its clients usually put `@user` in the text. Open
+    Question 5 covers the case where *R* is carried over.
+- **`cc`.** Append *R*'s actor URI for public, unlisted and private. This is Mastodon's `cc` rule
+  for mentioned accounts (`tag_manager.rb:215,228`).
+- **Direct delivery to *R*.** *R* is local, so no HTTP delivery is made. FAP has no notifications
+  or home timeline to deliver into.
+- **Followers union.** This applies only to a distributable (public or unlisted) reply whose
+  *direct* parent is local and by another actor.
+  - Fan out to the posting actor's followers ∪ *P*'s followers, deduplicated by shared inbox.
+  - This is Mastodon's `@status.thread.account.followers` (`status_reach_finder.rb:105-106`;
+    `status.rb:210-212`).
+  - A self-reply that carries *R* over unions nothing, because *P* is the poster.
+  - It costs one extra `listAllFollowers(username:)` call.
+- **`repliesCount`.** Increment it on *P*'s partition, with the same `distributable?` gate,
+  ordering and swallow rule as §1.6.
+- **Visibility cap.** It applies as in §1.2 step 5. Because private parents of others don't
+  resolve, the cap only ever lowers a public request to unlisted.
 
 ### 2.4 Interaction with InboxHandler
 
 - The local reply never passes through InboxHandler, so no `REPLY#` item is written and the
   parent count is incremented once, directly.
-- FAP actors follow no one (`FollowingHandler/main.swift:8`), so no follower inbox in the fan-out
-  is a FAP inbox. A local reply can't loop back as an inbound `Create`.
+- FAP actors follow no one, so no follower inbox in the fan-out is a FAP inbox. A local reply
+  can't loop back as an inbound `Create`.
 - Remote replies *to* the local reply are inbound replies to a local status, so the existing
   `handleCreate` handles them unchanged.
 - The pre-existing Update partition mismatch (`InboxHandler/main.swift:884-885`) isn't made worse:
@@ -537,16 +652,15 @@ Let *R* be the account in `inReplyToAccountId`, when *R* is not the author.
 
 ### 2.5 Client API and web
 
-- `in_reply_to_id` is the parent's id. `in_reply_to_account_id` is the carried-over username.
 - The `openapi.yaml` description of `in_reply_to_id` says it accepts "a status id, or the https
-  URI of a local status".
-- The post page's "In reply to" links to the parent owner's post page.
+  URI of a status".
+- The post page's "In reply to" links to *P*'s post page.
 
 ### Phase 2 components
 
 None.
-- The resolver gains the URI branch and the carry-over rule.
-- The fan-out gains a followers union.
+- The resolver gains the local-URI branch, the `show?` rule and carry-over.
+- The fan-out gains a union with the direct parent's followers.
 - Mention tags use the existing `tags` field.
 
 ## Phase 3 — Replies to remote statuses
@@ -554,133 +668,190 @@ None.
 ### 3.1 What `in_reply_to_id` means for a remote parent
 
 - On Mastodon, a client gets a remote status's id by resolving its URL through
-  `GET /api/v2/search?resolve=true` (search docs). That id is a key into Mastodon's own cache of
-  remote statuses.
+  `GET /api/v2/search?resolve=true`. That id is a key into Mastodon's own cache of remote
+  statuses.
 - FAP has neither search nor a remote-status cache. Phase 3 therefore accepts the remote status's
-  **https URI** in `in_reply_to_id`, the same input form as phase 2 and the quote path.
+  `https://` URI, or its web URL, in `in_reply_to_id`, when its host is not local.
 - In responses, a reply to a remote parent reports:
-  - `in_reply_to_id`: the parent URI
+  - `in_reply_to_id`: the **canonical fetched `id`** (§3.3 step 2)
   - `in_reply_to_account_id`: the remote author's actor URI, which is the key FAP's remote-actor
-    cache already uses (`REMOTE_ACTOR#{actorUri}`)
-- Both are strings, which the Status entity permits ("not guaranteed to be a number").
-- Whether URI-valued ids are acceptable to clients is Open Question 1.
+    cache uses
+- Both are strings, as the Status entity allows (Open Question 1).
 
-### 3.2 Signed fetch
+### 3.2 Hardening and signing the shared fetch
 
-- Add `HTTPSignature.signGet(privateKeyPem:keyId:path:host:)`.
-  - It signs `(request-target) host date`, per Mastodon's security docs for GET.
-  - It reuses `HTTPSignature.buildSigningString` (`HTTPSignature.swift:181-190`).
-- Add an optional signer parameter to `fetchRemoteObject`. When one is supplied, it sends
-  `Signature` and `Date` headers. Behaviour without a signer is unchanged, so existing callers
-  aren't affected.
+All controls go into `fetchRemoteObject` itself, as one mechanism. The quote path's fetches
+(`PostHandler/main.swift:264,272`) are hardened by the same change.
+
+| Control | Requirement | Mastodon reference |
+|---|---|---|
+| Scheme | `https` on the initial URI and on every redirect hop | Stricter than Mastodon, whose `unsupported_uri_scheme?` also allows `http` (`json_ld_helper.rb:95-97`) |
+| Redirects | At most 3 hops, each re-signed for its own path and host | `request.rb:101-102,72-75` |
+| Address | Resolve the host and reject loopback, private (RFC 1918 / ULA), link-local and unspecified addresses, on every connection including each hop. The check must apply to the address actually connected to. | `request.rb:325-334,389-394` |
+| Body | 1 MB cap. Abort the read past it. | `request.rb:293-294` |
+| Content type | Accept only `application/activity+json`, or `application/ld+json` with the ActivityStreams profile | `json_ld_helper.rb:281,351` onward |
+| Status | Only 200 is a success | `json_ld_helper.rb:281` |
+| Deadline | The caller passes an absolute deadline. The fetch fails when the deadline passes, whether or not bytes are still arriving. | (§3.3) |
+
+**Signing.**
+- Add `HTTPSignature.signGet(privateKeyPem:keyId:pathAndQuery:host:)`, which signs
+  `(request-target) host date`.
+  - `(request-target)` is `get {path}{?query}`, query string included, matching Mastodon's
+    `original_fullpath` check (`signed_request.rb:113`).
+  - It reuses `buildSigningString` (`HTTPSignature.swift:181-190`), and satisfies
+    `verify_signature_strength!` (`signed_request.rb:54-57`).
+- `fetchRemoteObject` takes an optional signer and signs every hop. Without a signer, the
+  hardening still applies and nothing is signed.
 - PostHandler signs as the **posting actor**, with keyId `https://{serverDomain}/users/{u}#main-key`.
-  - It reads the key from `{SSM_KEY_PREFIX}/{u}`, as `DeliverHandler` does (`main.swift:52-58`),
-    and caches it per warm container, as it already does for the session key (`PostHandler/main.swift:40-60`).
-  - `PostFunction` already has the SSM read permission (`functions/template.yaml:134-135`).
-  - FAP has no instance actor. Mastodon signs with one (`json_ld_helper.rb:273`), and that
-    difference doesn't change verification.
-- The same signed fetch resolves the parent's author document, so authorized-fetch servers
-  succeed for both requests. `KeyManager` stays unchanged.
+  - It reads the key from `{SSM_KEY_PREFIX}/{u}` (as `DeliverHandler` does, `main.swift:52-58`).
+  - It caches keys in a per-container dictionary keyed by username. The existing cache at
+    `PostHandler/main.swift:42` holds a single value.
+  - `PostFunction` already has the SSM permission (`functions/template.yaml:134-135`).
+  - Mastodon accepts any verifying account key (`signature_verification.rb:45` onward), so FAP's
+    lack of an instance actor doesn't block verification.
+
+**The HTTP client is not decided.** `URLSession` doesn't expose the connected address. Which
+client can enforce the address control is listed under Unverified, and it is an implementation-plan
+decision. If it means a new package dependency, the plan must name it.
 
 ### 3.3 Resolving the remote parent
 
-If `in_reply_to_id` is an `https://` URI that is not local:
+Resolution runs under one **overall deadline of 10 s**, measured from the start of resolution.
+That leaves headroom under API Gateway's 29 s integration timeout for the write, the fan-out
+enqueue and the response. If the deadline passes, the request gets a **404** and *nothing has been
+written*, because resolution finishes before `storeStatus`.
 
-1. **Fetch the object signed.** On non-2xx, timeout, invalid JSON, or `Tombstone`, return **404**
-   and write nothing.
-2. **Validate the object.**
-   - Its `id` must equal the requested URI. If it doesn't, re-fetch once by the returned `id` and
-     require equality, as `fetch_resource` does (`json_ld_helper.rb:242-252`).
-   - `type` must be `Note`, `Article` or `Question`.
-   - `attributedTo` must have the same host as `id` (`non_matching_uri_hosts?`, `:99-106`; FAP's
-     own quote-accept path checks origin the same way, `InboxHandler/main.swift:1209`).
-   - If any check fails, return 404.
-3. **Fetch the author's actor document signed.**
-   - Take `inbox`, `endpoints.sharedInbox`, `preferredUsername` and `followers`.
-   - Write the existing `RemoteActor` cache entry (`storeRemoteActor`) so later deliveries can use
-     it.
-   - If the fetch fails, return 404.
-4. **Derive the parent's visibility** with Mastodon's rule (`status_parser.rb:101-111`), using the
-   author's `followers` collection.
-   - A **direct** parent returns **422** `{"error":"Replying to a direct message is not supported"}`.
-     FAP cannot address a direct reply (`PostHandler/main.swift:194`).
-   - Public, unlisted and private parents are accepted.
-   - There is **no** visibility cap for remote parents. #270 concerns FAP's own object endpoint,
-     and the remote server enforces access to its own post, as Mastodon assumes.
-5. Set `inReplyTo` to the parent URI and `inReplyToAccountId` to the author's actor URI. Carry-over
-   (§2.2) can't apply here, because a remote parent is never by the posting actor.
+If `in_reply_to_id` is an `https://` URI with a non-local host:
 
-There is no remote-status cache. Everything the reply needs afterwards is stored on the reply
-itself: the URI, the author id, and the Mention tag.
+1. **Fetch the object** signed, through §3.2. Any failure gives a 404: a fetch error, a non-200,
+   the wrong content type, an oversize body, invalid JSON, or a `Tombstone`.
+2. **Canonicalize the id.**
+   - Take `json['id']`. If it differs from the requested URI, for example a pasted
+     `/@user/id` web URL (`config/routes.rb:174`), re-fetch that `id` and require
+     `json['id'] == id`. This is `fetch_resource` (`json_ld_helper.rb:242-252`).
+   - Use the canonical `id` from here on.
+3. **Validate the object.**
+   - `type` must be one of Mastodon's supported or converted types: `Note`, `Question`, `Image`,
+     `Audio`, `Video`, `Article`, `Page`, `Event` (`activity.rb:9-10`).
+   - `attributedTo` is read as Mastodon reads it: the first element if it is an array, and the
+     `id` if it is an object (`first_of_value`/`value_or_id`, `json_ld_helper.rb:16,83`).
+   - The host of `attributedTo` must equal the host of `id`, compared case-insensitively
+     (`trustworthy_attribution?`, `fetch_remote_status_service.rb:61-66`).
+   - Any failure gives a 404.
+4. **Fetch the author's actor document** signed, through §3.2.
+   - Require `json['id'] == attributedTo`, the URI that was requested, as Mastodon's known-id
+     actor fetch does (`fetch_remote_actor_service.rb:16`; `json_ld_helper.rb:251-252`).
+   - Parse it with the same function `KeyManager.fetchActorDocument` uses (`KeyManager.swift:89-105`).
+     Extract that function and add `followers` to what it returns.
+   - Any failure gives a 404.
+5. **Write the cache from this validated fetch.** Write `REMOTE_ACTOR#{attributedTo}` keyed by
+   the fetched URI only *after* the `id` check passes.
+   - It replaces any cached entry with a document the actor's own origin just served. That is the
+     same trust basis `KeyManager` uses today.
+   - Nothing else in this phase writes that cache.
+6. **Derive the parent's visibility** with Mastodon's rule (`status_parser.rb:101-111`).
+   - Read `to` and `cc` as arrays *or* single strings.
+   - Recognise all three public spellings (`tag_manager.rb:14-15`).
+   - Compare against the actor's `followers`.
+   - A **direct** parent gets a **422** `{"error":"Replying to a direct message is not supported"}`,
+     because FAP can't address a direct reply (`PostHandler/main.swift:194`).
+   - Public, unlisted and private parents are accepted. A private parent was fetchable, so the
+     remote server's own access rules allowed it.
+   - There is no visibility cap for remote parents: #270 concerns FAP's object endpoint.
+7. **Set the parent fields.** Set `inReplyTo` to the canonical `id`, and `inReplyToAccountId` to
+   the author's actor URI. Carry-over (§2.2) can't apply here, because a remote parent is never by
+   the posting actor.
 
-**Requirements on the request.**
-- `https://` only.
-- The fetch timeout stays at 10 s, and two fetches fit inside `PostFunction`'s 60 s timeout.
-- The URI is client-supplied, as on the quote path, and only an authenticated actor can supply it.
+There is no remote-status cache. The reply stores the canonical URI, the author id and the Mention
+tag.
 
 ### 3.4 Addressing, Mention, delivery
 
-Let *R* be the remote author.
+*R* is the account in `inReplyToAccountId`, when it is a remote actor URI. That is either the
+direct remote author, or one carried over by a later self-reply.
 
 - **Mention.**
   - Add `Tag(type: "Mention", name: "@{preferredUsername}@{actor host}", href: <actor URI>)`.
   - Mastodon resolves the mention by `href` (`create.rb:255-263`). The `name` is a display form,
     not a WebFinger-verified acct.
-- **Addressing.** Append *R*'s actor URI to `cc` for public, unlisted and private
-  (`tag_manager.rb:215,228`).
-- **Delivery.**
+  - Auto-mentioning is FAP's choice (§2.3, Open Question 5).
+- **`cc`.** Append *R*'s actor URI for public, unlisted and private (`tag_manager.rb:215,228`).
+- **Direct delivery.**
   - Add one `DeliveryJob` to *R*'s `sharedInbox ?? inbox`, deduplicated against the followers'
-    shared inboxes, as `PostHandler/main.swift:338` coalesces.
-  - It reuses the existing queue and `DeliverHandler` with its retries.
-  - Mastodon does the same for a distributable reply (`status_reach_finder.rb:47-48`), and through
-    the mention for a private one (`:34`).
-  - *R*'s server may forward the reply to *R*'s followers under §7.1.2.
+    shared inboxes as `PostHandler/main.swift:338` coalesces.
+  - It goes through the existing queue and `DeliverHandler`.
+  - For a distributable reply this matches Mastodon's `replied_to_account_id` (`status_reach_finder.rb:47-48`).
+- **Where *R*'s inbox comes from.**
+  - On the direct reply, it comes from the actor document fetched in §3.3 step 4.
+  - On a later self-reply that carries *R* over, FAP has only *R*'s actor URI. FAP re-fetches it
+    signed through the same validated path: §3.2, plus the `id == URI` check from §3.3 step 4.
+    That fetch runs under the same 10 s resolution deadline, and a failure gives a 404.
+  - That re-fetch writes the `REMOTE_ACTOR#` cache entry, as in §3.3 step 5. The cache is never
+    read for *R*'s inbox. An expired or absent entry therefore changes nothing.
+- **Followers union.** None for a remote parent, as in Mastodon (`status_reach_finder.rb:105-106`
+  applies only to local authors).
+- **Known limitation: reach to *R*'s followers.**
+  - *R*'s server doesn't forward FAP's reply. Mastodon's `forward_for_reply` needs a Linked Data
+    Signature (`create.rb:491-495`), and FAP emits none.
+  - AP §7.1.2 isn't triggered either, because the reply addresses *R*'s actor and no collection
+    *R*'s server owns.
+  - So *R*'s followers who don't follow the FAP actor won't get the reply in their home feeds. They
+    see it only in the parent's thread view on *R*'s server, once *R*'s server has stored it.
+  - This reach is narrower than a Mastodon-to-Mastodon reply's (Open Question 4).
 - **`repliesCount`.** There is no local parent to update.
-- **Self-reply after a remote reply.** If the author then replies to their own reply, carry-over
-  (§2.2) sets `inReplyToAccountId` to *R*. The self-reply is then also mentioned to, addressed to
-  and delivered to *R*, matching Mastodon's reach for `in_reply_to_account_id`.
 
-### 3.5 Reading the stored reply
+### 3.5 When the remote parent is deleted or unreachable
+
+- **At create time:** fail closed with a 404 (§3.3). No reply is stored or delivered. The
+  alternative is Open Question 3.
+- **After create:** nothing changes on FAP's side.
+  - The reply's Note stays immutable and keeps pointing at the parent URI.
+  - A receiving server that can't resolve the parent filters the reply from home feeds
+    (`feed_manager.rb:505`).
+  - A Delete for the remote parent that reaches FAP's inbox is a no-op, because FAP stored no copy
+    (`InboxHandler/main.swift:1053-1059`).
+
+### 3.6 Reading the stored reply
 
 - The §1.3 rule widens: emit `inReplyTo` when it is a local status URI, **or** when it is an
   `https://` URI and the item carries `inReplyToAccountId`.
 - Only the resolver writes `inReplyToAccountId`, so an unvalidated pre-change URI never qualifies.
 - The post page's "In reply to" links to the remote URI.
 
-### 3.6 When the remote parent is deleted or unreachable
-
-- **At create time:** fail closed with 404, as in §3.3. No reply is stored or delivered. Whether
-  FAP should post anyway with a dangling `inReplyTo` is Open Question 3.
-- **After create:** nothing changes on FAP's side.
-  - The reply's Note stays immutable and keeps pointing at the parent URI.
-  - A receiving server that can't resolve the parent filters the reply from home feeds
-    (`feed_manager.rb:505`).
-  - A Delete for the remote parent that reaches FAP's inbox is a no-op, because FAP stored no copy
-    (`removeReply` returns nil, `InboxHandler/main.swift:1053-1088`).
-
 ### 3.7 Interaction with InboxHandler
 
-- `handleCreate` keeps dropping inbound replies to remote statuses (`:712-715`). That includes
-  other people's replies to the same remote parent that reach FAP by forwarding. This phase stores
-  only FAP's own outgoing reply.
+- `handleCreate` keeps dropping inbound Notes whose `inReplyTo` isn't local (`:756-772`). That
+  includes other people's replies to the same remote parent. This phase stores only FAP's own
+  outgoing reply.
 - When *R* replies to FAP's reply, the existing `handleCreate` stores it, because FAP's reply is a
-  local status. The reply count on FAP's reply is incremented there.
+  local status. The count on FAP's reply is incremented there.
+- **Delete and Update don't reach *R*.** FAP has no status-delete or status-edit endpoint today.
+  The only outbound Update is the quote-accept re-federation, and it goes to followers only
+  (`InboxHandler/main.swift:1284` onward). Once FAP can delete or edit a reply, the activity must
+  also go to *R*'s inbox. That is a follow-up (Open Question 6).
 
 ### Phase 3 components
 
-**One new mechanism: signed GET.**
-- It is a function on `HTTPSignature` plus an optional parameter on `fetchRemoteObject`.
-- It extends the existing fetch path instead of adding a component.
+**One extended mechanism.** It is the shared `fetchRemoteObject`, which gains the hardening in
+§3.2, an optional signer and a deadline. `HTTPSignature` gains `signGet`.
 
-**Re-checked against the design invariants (smallest mechanism, one job per component, blast radius):**
-- **Smallest mechanism.** Two candidates were rejected as larger, and the synchronous fetch inside
-  the create request was kept.
-  - A remote-status cache with local ids and a search endpoint would be a new table use, a new
-    route and a new handler.
-  - An asynchronous resolver worker would be a new queue consumer.
+Supporting pieces:
+- the actor-document parse is extracted from `KeyManager` and shared
+- a per-actor key dictionary is added in PostHandler
+- the `REMOTE_ACTOR#` cache gains one more writer, only after validation
+
+**Re-checked against the design invariants (smallest mechanism, one job per component, blast
+radius):**
+- **Smallest mechanism.** Two candidates were rejected as larger:
+  - a remote-status cache with local ids and a search endpoint (a new route, handler and table
+    use)
+  - an asynchronous resolver worker (a new queue consumer)
+- **The hardening is placed so that both callers get it.** It lives in the shared function, not in
+  a reply-only copy, so the quote path is fixed too.
 - **One job.** Resolving the parent is part of validating the create request. That is
-  PostHandler's single job, and it does the same for quotes. Delivery stays in `DeliverHandler`.
-- **No new handler, route, table, index, queue or workflow.** The work stays in one repository.
+  PostHandler's job, and it does the same for quotes. Delivery stays in `DeliverHandler`.
+- **Blast radius.** No new handler, route, table, index, queue or workflow. The work stays in one
+  repository.
 
 ## Testing
 
@@ -694,8 +865,8 @@ removed before it counts.
   - A local URI produces the key.
   - Negative controls: `nil`, a bare id, and a remote URI without `inReplyToAccountId` produce no
     key.
-- **`parseLocalStatusUri`** accepts both domains.
-  - Negative control: it rejects a remote host, a wrong path, and too few segments.
+- **`parseLocalStatusUri` and `isLocalHost`** accept both domains.
+  - Negative control: they reject a remote host, a wrong path, and too few segments.
 - **The resolver.**
   - It returns `none`, `resolved` or `notFound`.
   - Negative control: a lookup returning nil gives `notFound`.
@@ -706,30 +877,51 @@ removed before it counts.
   - Negative control: a non-reply, or a bare-id `inReplyTo`, gives `null`.
 
 **Phase 2**
-- **The URI branch** resolves another local actor's status.
-  - Negative control: a remote URI misses in phase 2.
+- **The local-URI branch** resolves another actor's public or unlisted status.
+  - Negative controls:
+    - Another actor's **private** status gives `notFound`.
+    - A local-host non-status URI gives `notFound` and makes no fetch.
+    - A remote URI misses in phase 2.
 - **Carry-over.**
   - A self-reply to a reply to *R* yields *R*.
   - A self-reply to a non-reply yields the author.
   - Negative control: a reply to someone else's reply yields that someone, not the grandparent.
+- **Followers union.**
+  - A distributable reply to *P*'s post unions *P*'s followers.
+  - Negative controls:
+    - A self-reply that carries *R* over unions **nothing**, not *R*'s followers.
+    - A private reply unions nothing.
 - **Mention tag and `cc`.**
   - They contain *R*.
-  - Negative control: a self-thread has no Mention and an unchanged `cc`.
-- **Followers union.**
-  - It is deduplicated by shared inbox.
-  - Negative control: a private reply doesn't union.
+  - Negative control: a plain self-thread has no Mention and an unchanged `cc`.
 
 **Phase 3**
 - **`signGet`.**
-  - The signing string is exactly `(request-target): get {path}\nhost: …\ndate: …`, and it verifies
-    with `HTTPSignature.verify`.
-  - Negative control: a tampered path fails verification.
+  - The signing string is exactly `(request-target): get {path}?{query}\nhost: …\ndate: …`, and
+    it verifies with `HTTPSignature.verify`.
+  - Negative controls:
+    - Dropping the query string from the signed path fails verification against the full path.
+    - A tampered path fails verification.
+- **Fetch hardening**, each control against a local test server:
+  - Redirect hops: 3 succeed, and a 4th fails.
+  - An `https`→`http` redirect fails.
+  - A redirect to `127.0.0.1`, `169.254.169.254` or `10.0.0.1` fails.
+  - A body over 1 MB fails.
+  - A `text/html` response fails.
+  - A slow-drip response fails at the deadline even though bytes keep arriving.
+  - Negative control: a compliant response succeeds.
 - **Remote validation**, run on fixtures:
-  - An `id` mismatch, an `attributedTo` host mismatch, a `Tombstone`, and an unsupported type each
-    produce `notFound`.
-  - Negative control: a valid Note resolves.
-- **Visibility derivation** gives the four outcomes.
+  - An `id` mismatch after re-fetch, an `attributedTo` host mismatch, a `Tombstone`, an
+    unsupported type, and an actor document whose `id` ≠ `attributedTo` each give `notFound`.
+  - Array and object `attributedTo` are parsed.
+  - A web-URL input yields the canonical `id`.
+  - Negative control: a valid `Page` resolves.
+- **Visibility derivation** gives the four outcomes, accepts all three public spellings, and
+  accepts string-valued `to`/`cc`.
   - Negative control: a parent addressed only to a person is `direct`, and the request gets a 422.
+- **Cache write.**
+  - It happens only after the actor `id` check.
+  - Negative control: a mismatched actor document leaves the cache unchanged.
 
 ### Schema conformance (`integration-tests/Tests/IntegrationTests/SchemaConformanceTests.swift`)
 
@@ -758,14 +950,19 @@ are `unlisted`.
 - **Chain of three.** Each child points at the previous post.
 
 **Phase 2** (needs a second stage actor and token)
-- A reply by A to B's status, given by URI, has `in_reply_to_account_id == B`, a Mention tag for
-  B, B in `cc`, and B's `repliesCount` + 1 after an `unlisted` reply.
-  - Negative control: a `private` reply leaves the count unchanged.
+- A reply by A to B's `unlisted` status, given by URI, returns:
+  - `in_reply_to_id` equal to B's status URI
+  - `in_reply_to_account_id == B`
+  - a Mention tag for B, and B in `cc`
+  - B's `repliesCount` + 1
+- Negative controls:
+  - A's reply to B's **private** status gets `.notFound`.
+  - A `private` reply leaves the count unchanged.
 
 **Phase 3**
 - A reply to a remote public status on a test instance, given by URI, returns
-  `in_reply_to_id == <URI>` and a Note whose `cc` and Mention contain the remote actor.
-  - Negative control: a URI on the same instance that returns 404 gives `.notFound`.
+  `in_reply_to_id == <canonical id>` and a Note whose `cc` and Mention contain the remote actor.
+- Negative control: a URI on the same instance that returns 404 gives `.notFound`.
 
 ### Federation (manual, against stage)
 
@@ -781,9 +978,11 @@ are `unlisted`.
   instance. Acceptance has three parts:
   - The test account receives a mention notification.
   - On that instance, `/context` of the parent lists FAP's reply among the `descendants`.
-  - Run it against an instance with secure mode on as well, which exercises signed fetch.
+  - Run it against an instance with secure mode on as well.
   - Negative control: with signing disabled, the secure-mode instance refuses the fetch and FAP
     returns 404.
+  - Also record that a follower of the test account who doesn't follow the stage actor gets no
+    home-feed entry. That observes the §3.4 limitation directly.
 - **Mastodon caching.** Mastodon caches discovery failures for hours, so retry on another
   instance before debugging FAP.
 - **Before/after control.** Run each procedure against the pre-change build and record that
@@ -791,12 +990,18 @@ are `unlisted`.
 
 ### Build gate
 
-- Build every target on the Linux runner VM with
-  `swift package archive --allow-network-connections docker`, per CLAUDE.md.
+- Build every target for Linux with `swift package archive --allow-network-connections docker`.
+  The deployed binary is the Linux build, and a macOS `swift build` doesn't catch Linux-only
+  compile errors.
 - Build the generated consumers against the branch's `openapi.yaml`.
 
 ## Unverified
 
+- **The HTTP client for the address control.** No client has been chosen that can check the
+  connected address on every connection, including each redirect hop. `URLSession` and
+  FoundationNetworking expose no hook for this. Whether a client already in the resolved
+  dependency graph can do it is unverified, because `Package.resolved` is not committed. The
+  phase 3 plan must pick the client and name any new dependency.
 - **Mastodon's `items_context_url` path shape.** Only the helper name is verified
   (`tag_manager.rb:101-108`).
 - **Mastodon reading `context` on intake.** No read was found in `create.rb`. That doesn't prove
@@ -806,15 +1011,10 @@ are `unlisted`.
 - **The `replies_count` "added" version.** The docs page showed 4.5.0, which conflicts with the
   field's history. This spec relies on `status.rb:484`, not on the version.
 - **Forcing out-of-order delivery** for the manual check. No mechanism has been identified.
-- **Secure-mode servers and an unsigned actor fetch.**
-  - Whether secure-mode servers answer an *unsigned* fetch of an actor document is unverified.
-  - Phase 3 signs both fetches, so it doesn't depend on the answer.
-  - `KeyManager`'s unsigned actor fetch for inbound verification is unchanged, and is not
-    re-measured here.
-- **Accepting a signature from a non-instance actor key.** That a secure-mode Mastodon accepts a
-  fetch signed by a regular actor's key, rather than an instance actor's, is untested
-  [inferred: the docs place no requirement on which actor signs]. The phase 3 secure-mode
-  federation check measures it.
+- **A secure-mode instance accepting a regular actor's key, in practice.** The source reading is
+  done: `signature_verification.rb:45` onward accepts any verifying account, and nothing requires
+  an instance actor. A live measurement is still pending, and the phase 3 secure-mode federation
+  check is that measurement.
 
 ## Decisions (2026-10-20)
 
@@ -836,28 +1036,47 @@ Erin decided the following on 2026-10-20.
 These are new questions raised by phases 2 and 3.
 
 1. **URI-valued ids in the client API.**
-   - Phase 2 and phase 3 accept an https URI in `in_reply_to_id`.
-   - Phase 3 returns the parent URI as `in_reply_to_id`, and the actor URI as
-     `in_reply_to_account_id`.
-   - The Mastodon entity allows non-numeric strings, but a Mastodon-API client that expects to
-     look those ids up through `GET /api/v1/statuses/:id` or `/accounts/:id` can't. FAP serves
-     neither endpoint today.
-   - Is that acceptable? The alternative is a remote-status cache with FAP-local ids plus
-     `GET /api/v2/search?resolve=true`, which is a new route and handler.
+   - Phases 2 and 3 accept an https URI in `in_reply_to_id`.
+   - For a parent the caller doesn't own, the response returns a URI as `in_reply_to_id`: the
+     local status URI in phase 2, the canonical remote id in phase 3. Phase 3 also returns the
+     actor URI as `in_reply_to_account_id`.
+   - The Mastodon entity allows non-numeric strings, but a client can't look these up through
+     `GET /api/v1/statuses/:id` or `/accounts/:id`. FAP serves neither endpoint today.
+   - The alternative is FAP-local ids for other actors' and remote statuses, plus
+     `GET /api/v2/search?resolve=true`. That is a new route and handler, and a cache.
    - Proposed: URI-valued ids.
 2. **Visible mention text.**
-   - FAP adds the parent author's Mention tag and `cc` server-side, and leaves the text alone. FAP
-     has no `@mention` parser (`TextToHTML.swift`).
-   - Mastodon instead takes mentions from the text, where clients prefill `@user`.
-   - Should FAP also prepend a linked `@user@domain` to the content of replies to others, so
-     readers on servers that don't render tags see who is being addressed? Or should it keep the
-     text exactly as sent?
-   - Proposed: keep the text as sent, and treat general mention parsing as its own feature.
+   - FAP adds the Mention tag and `cc` server-side, and leaves the text alone. FAP has no
+     `@mention` parser (`TextToHTML.swift`).
+   - Should replies to others also get a linked `@user@domain` prepended to the content?
+   - Proposed: keep the text as sent, and treat mention parsing as its own feature.
 3. **Unreachable remote parent.**
-   - Phase 3 fails closed: a fetch failure means a 404 and nothing is posted.
-   - The quote path does the opposite: it posts and marks the quote `failed`
-     (`PostHandler/main.swift:282-287`).
-   - Should a reply whose remote parent can't be fetched still be posted, with `inReplyTo` set
-     but no Mention and no delivery to the author, so a transient remote outage doesn't block the
-     post?
+   - Phase 3 fails closed: on a fetch failure or a deadline overrun, the request gets a 404 and
+     nothing is posted.
+   - The quote path posts anyway and marks the quote `failed` (`PostHandler/main.swift:282-287`).
+   - Should a reply whose parent can't be fetched still post, with `inReplyTo` but no Mention and
+     no delivery to the author?
    - Proposed: fail closed, which matches Mastodon's 404 for a parent it can't resolve.
+4. **Reach to the remote author's followers.**
+   - Without Linked Data Signatures, Mastodon never forwards FAP's reply to *R*'s followers
+     (`create.rb:491-495`), so FAP's reach is narrower than a Mastodon reply's (§3.4).
+   - Is that acceptable for phase 3, with LD signing (`RsaSignature2017` on outbound activities) as
+     a separate follow-up?
+   - Proposed: accept it for phase 3, and file LD signing as a follow-up.
+5. **Mention on a carried-over self-reply.**
+   - When an actor continues a conversation with *R* through a self-reply, FAP Mentions and `cc`s
+     *R* and delivers to *R*, even when the reply is private.
+   - Mastodon would reach *R* only for a distributable reply (`status_reach_finder.rb:47-48`), and
+     would Mention *R* only if the text did.
+   - Should FAP keep auto-mentioning *R* on carried-over self-replies, or Mention only the direct
+     parent's author and leave carried-over delivery to the distributable rule?
+   - Proposed: Mention only on direct replies to *R*. A carried-over self-reply then gets *R* in
+     `cc` and direct delivery when distributable, and no Mention, which matches Mastodon's reach
+     without the notification.
+6. **Delete and Update reaching *R*.**
+   - FAP can't delete or edit statuses today, but when it can, a Delete or Update of a reply must
+     also be delivered to *R*'s inbox. The quote-accept `Update` already goes only to followers
+     (`InboxHandler/main.swift:1284` onward).
+   - Should that requirement be recorded now as a follow-up issue against the future delete/edit
+     work?
+   - Proposed: yes, file it as a follow-up when this spec merges.
