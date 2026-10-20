@@ -50,7 +50,9 @@ guard let serverDomain = ProcessInfo.processInfo.environment["SERVER_DOMAIN"] el
 guard let handleDomain = ProcessInfo.processInfo.environment["HANDLE_DOMAIN"] else {
     fatalError("HANDLE_DOMAIN environment variable is required")
 }
-let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] ?? "/activity/stage/keys/"
+guard let ssmKeyPrefixRaw = ProcessInfo.processInfo.environment["SSM_KEY_PREFIX"] else {
+    fatalError("SSM_KEY_PREFIX environment variable is required")
+}
 /// SSM path prefix for actor private keys, with any trailing slash stripped.
 let ssmKeyPrefix = ssmKeyPrefixRaw.hasSuffix("/") ? String(ssmKeyPrefixRaw.dropLast()) : ssmKeyPrefixRaw
 

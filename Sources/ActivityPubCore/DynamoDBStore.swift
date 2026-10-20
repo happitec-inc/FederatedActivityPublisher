@@ -331,7 +331,7 @@ public struct DynamoDBStore: Sendable {
 
     /// How long a `pending` claim on an inbound activity blocks redeliveries.
     ///
-    /// Longer than the inbox Lambda's 60-second timeout, so a claim can only expire once the
+    /// Longer than the inbox Lambda's 30-second timeout (the `Globals` default), so a claim can only expire once the
     /// invocation holding it has ended. An expired claim means that invocation died without
     /// releasing it (a timeout or crash), and the next delivery takes the activity over.
     public static let activityClaimLease: TimeInterval = 300
