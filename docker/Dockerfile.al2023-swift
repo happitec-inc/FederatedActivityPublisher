@@ -15,6 +15,11 @@ RUN dnf install -y --allowerasing \
     libcurl-devel \
     tar \
     gzip \
+    zip \
+    unzip \
+    binutils \
+    findutils \
+    diffutils \
     sqlite-devel \
     ncurses-devel \
     && dnf clean all
