@@ -1,6 +1,5 @@
 .build/
 .swiftpm/
-Package.resolved
 .DS_Store
 
 # Agent / local-only files
