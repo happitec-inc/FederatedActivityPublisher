@@ -1,0 +1,116 @@
+name: Lambda Build
+
+# Builds every deployed Lambda the same way the deploy workflows do
+# (scripts/build-all-lambdas.sh in the AL2023 image) and checks the zips.
+# No AWS credentials: this job never deploys anything.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'scripts/**'
+      - 'docker/**'
+      - '.github/workflows/**'
+      - 'activity-app/functions/template.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lambda-build:
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-24.04-arm' }}
+    steps:
+      - name: Remove root-owned build output (self-hosted)
+        if: ${{ vars.RUNNER_LABELS_LINUX }}
+        run: sudo rm -rf .build/
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - name: Clean workspace (self-hosted)
+        if: ${{ vars.RUNNER_LABELS_LINUX }}
+        run: sudo git clean -fdx
+
+      - name: Install Docker
+        run: |
+          if command -v docker &>/dev/null; then
+            echo "Docker already installed"
+          else
+            curl -fsSL https://get.docker.com | sudo sh
+          fi
+          sudo chmod 666 /var/run/docker.sock
+          docker --version
+
+      - name: Runner resources
+        run: |
+          echo "nproc: $(nproc)"
+          free -g
+          docker info --format 'docker NCPU={{.NCPU}} MemTotal={{.MemTotal}} bytes'
+          df -h .
+
+      - name: Cache Docker image
+        uses: actions/cache@v5
+        with:
+          path: /tmp/docker-image.tar
+          key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
+
+      - name: Load or build AL2023 Swift Docker image
+        run: |
+          if [ -f /tmp/docker-image.tar ]; then
+            echo "Loading cached Docker image"
+            docker load < /tmp/docker-image.tar
+          else
+            echo "Building Docker image"
+            docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
+            docker save swift-al2023:6.3 > /tmp/docker-image.tar
+          fi
+
+      # Restore only: a PR reads the deploy cache for the same Package.resolved
+      # and Dockerfile, but never saves, so PR runs can't evict it.
+      - name: Compute Swift build cache key
+        id: swift-cache
+        run: |
+          HASH=$(cat Package.resolved docker/Dockerfile.al2023-swift | sha256sum | cut -c1-16)
+          echo "prefix=swift-al2023-$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Swift build cache
+        id: restore
+        uses: happitec-inc/public-actions/swift-build-cache-restore@main
+        with:
+          key-prefix: ${{ steps.swift-cache.outputs.prefix }}
+
+      - name: Build all Lambda zips
+        run: |
+          echo "cache key prefix: ${{ steps.swift-cache.outputs.prefix }} (exact hit: ${{ steps.restore.outputs.cache-hit || 'false' }})"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/home \
+            -v "$(pwd):/workspace" \
+            -w /workspace \
+            swift-al2023:6.3 \
+            bash scripts/build-all-lambdas.sh
+
+      - name: Verify Lambda zips
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/home \
+            -v "$(pwd):/workspace" \
+            -w /workspace \
+            swift-al2023:6.3 \
+            bash scripts/verify-lambda-zips.sh
+
+      - name: Check .build ownership
+        if: always()
+        run: |
+          ROOT_OWNED=$(find .build -maxdepth 3 -user root 2>/dev/null | head -5)
+          if [ -n "$ROOT_OWNED" ]; then
+            echo "Root-owned files in .build:"
+            echo "$ROOT_OWNED"
+            exit 1
+          fi
+          echo ".build is owned by $(id -un)"
