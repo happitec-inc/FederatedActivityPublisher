@@ -502,7 +502,10 @@ the maintainer's, and everything here is this spec's.
     `throws` function, and a `static let` initializer can't throw, so `RemoteFetchClient.shared`
     calls it with `try!`. The URL is a constant in the bundled document, so a bad one is a build
     defect, not a runtime condition; the step 0 "Client construction" test builds the client in
-    CI, so a broken document fails the PR rather than a cold start.
+    CI, so a broken document fails the PR rather than the first access to `.shared`. In
+    `InboxHandler` that first access is its top-level `let keyManager = KeyManager()`
+    (`InboxHandler/main.swift:50`), whose `init()` reads `.shared`; in `PostHandler` it is the
+    first quote fetch.
 
   The shared `HTTPClient` lives for the life of the Lambda container and is never shut down or
   deinitialized; it is built on the shared singleton event-loop group
@@ -565,7 +568,8 @@ the maintainer's, and everything here is this spec's.
   `Value: ~Copyable`, and offers `withLock(_:)`, whose closure is synchronous
   (swiftlang/swift at tag `swift-6.0-RELEASE`, `stdlib/public/Synchronization/Mutex/Mutex.swift`,
   read 2026-10-21). It is `@available(SwiftStdlib 6.0, *)`, which is macOS 15.0
-  (`utils/availability-macros.def` in the same repository at the same tag), and FAP's platform floor is `.macOS(.v15)` (`Package.swift:7`).
+  (`utils/availability-macros.def` in the same repository at the same tag), and FAP's platform
+  floor is `.macOS(.v15)` (`Package.swift:7`).
   - **Owner.** Each handler that signs builds one, as a top-level `let`, once per container:
     `PostHandler` and `InboxHandler` in step 0 (in `InboxHandler` it replaces #279's
     `nonisolated(unsafe) var cachedActorKeys`), and `SearchHandler` and `DeliverHandler` in
@@ -1379,7 +1383,8 @@ Signing itself ships in step 0: `fetchRemoteObject` and `fetchRemoteActor` take 
 `resolve=true` with a non-local `https://` `q` runs under a **10 s overall deadline**, which
 search passes to each of its fetches (§0.2). Its worst case is 20 s, the deadline plus one
 `timeout.read` on a stalled body (§0.2), under the 29 s API Gateway limit. On overrun or
-any failure, it returns empty `statuses` and writes nothing.
+any failure, it returns empty `statuses` and writes nothing, except that a `META` delete for a
+private derivation (step 6) may already have succeeded.
 
 1. **Fetch** the object signed as the caller, with `fetchRemoteObject`.
 2. **Canonicalize.** If the document's `.id` ≠ `q`, re-fetch `.id` and require equality
@@ -1405,9 +1410,10 @@ any failure, it returns empty `statuses` and writes nothing.
    - A `direct` parent is left out of the results (`PostHandler/main.swift:194`).
 6. **Write** the entry (§3.1), shared or per-viewer, with an unconditional `PutItem` that
    overwrites any earlier entry, expired or not (§2.3), and return the `Status`. When the
-   derived visibility is `private`, search also deletes `META` (§3.1), with an unconditional
-   `DeleteItem`; since neither write can be refused, a re-derived `private` always leaves no
-   `META` entry behind.
+   derived visibility is `private`, search first deletes `META` (§3.1) with an unconditional
+   `DeleteItem`, and only then puts `VIEWER#{caller}`. If either write fails, search returns empty
+   `statuses`. Neither write can be refused by a condition, and with this order a failure never
+   leaves `META` in place beside a `VIEWER#` entry written for a private derivation.
 
 ### 3.4 Resolving a remote `in_reply_to_id`
 
@@ -1644,8 +1650,8 @@ Tests (control in brackets):
   with `invalidURI`. [The same server with a valid `Location` is followed and returns the
   document.]
 - **Client construction:** the production construction function, the one `RemoteFetchClient.shared`
-  uses, builds a client inside `withTestClient`, and its `serverURL` is
-  `https://remote-fetch.invalid`. This runs the `try!` on `Servers.Server1.url()` in CI. [Before
+  uses, builds a client inside `withTestClient`, and construction completes. This runs the `try!`
+  on `Servers.Server1.url()` in CI. [Before
   the test counts, it is seen red once on a branch whose document's `servers:` URL the generated
   `url()` throws on.]
 - **Scheme:** an `http://` initial URI fails under the default policy. With a policy admitting
@@ -1817,6 +1823,11 @@ resolver unit test with a seeded pointer (Phase 2, below).
   - Negative control: B replying with the same id gets `notFound`, and B gets no `VIEWER#` entry.
 - **Cache.**
   - An expired-but-present entry is treated as absent.
+  - A re-search over an expired-but-present `META` rewrites it, and a reply then resolves.
+    [Control: the same put with `attribute_not_exists` is refused, and the reply gets
+    `notFound`.]
+  - A re-search that derives `private` while `META` exists deletes `META`. [Control: with the
+    delete switched off, caller B still resolves the id through `META`.]
   - Delete removes `META` and every `VIEWER#` entry. Update refreshes `content`, and never
     `visibility`.
   - Negative controls: a Delete from a different host leaves the entries, and an Update whose
@@ -1973,11 +1984,11 @@ code" means the defect was seen in FAP's source, not in production.
 | `repliesCount` failure logged and swallowed | §1.6 | None |
 | Safe-link scheme check and fallback | §2.7 | None. Security control |
 | Remote validation (`id`, `attributedTo` host, actor `id`) | §3.3 | None. Matches Mastodon |
-| Search returns empty and writes nothing on any failure | §3.3 | None |
+| Search returns empty and writes nothing on any failure, apart from a `META` delete that may already have succeeded (§3.3 step 6) | §3.3 | None |
 | `DeliverHandler` requires the fetched actor's `id == targetActorUri` | §3.5 | None. Matches Mastodon's actor check (`JsonLdHelper#fetch_resource`, called from `fetch_remote_actor_service.rb:18`) |
 | Read-time `ttl` comparison on `REF#` entries | §3.1 | None |
 | Legacy `inReplyTo` without `inReplyToId` ignored | §1.3 | None. No legacy item has been observed |
-| `META` deleted when a re-search derives `private` | §3.1 | None. Security control |
+| `META` deleted when a re-search derives `private`, before `VIEWER#` is put; neither write can be refused by a condition | §3.1, §3.3 step 6 | None. Security control |
 | Never change `visibility` from an Update | §3.1 | None. Security control |
 | Delete/Update invalidation only from the object's origin | §3.1 | None. Security control |
 | Unsigned delivery when LD signing fails | §3.8 | None |
