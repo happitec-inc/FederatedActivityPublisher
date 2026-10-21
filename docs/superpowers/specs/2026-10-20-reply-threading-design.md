@@ -1327,7 +1327,11 @@ Tests (control in brackets):
   middleware's content-type error. [The production client with only the content-type check switched
   off, every other middleware check still on, accepts all six and decodes the body, the runtime
   behaviour §0.1 names.]
-- **Status:** a 404 and a 204 fail with the middleware's status error. [The production client with
+- **Invalid JSON:** a 200 with `Content-Type: application/activity+json` and the body `{"a":`
+  fails with `invalidJSON`. [The same response with a valid JSON object body returns it.]
+- **Status:** a 404 with a valid JSON object body and a 204, each sent with
+  `Content-Type: application/activity+json` so that the content-type check passes, fail with the
+  middleware's status error. [The production client with
   the status check switched off: both come back from the generated client as `.undocumented`, and
   `fetchRemoteObject` throws `undocumentedStatus` instead.]
 - **Deadline, slow drip:** with a 2 s deadline, a body that sends one byte every 100 ms for 5 s
@@ -1387,8 +1391,10 @@ parent-commit run and still don't have one: the `buildNoteJSON` test sets `inRep
 phase 1 adds, so it doesn't compile on the parent; and the `signGet` test exercises #279's
 function, which exists before phase 3a, so on the parent it is expected to pass and acts as a
 regression guard. Phase 1's capability-removed control is the integration tests' run against the
-pre-change stage build (Integration, below). Phase 2 has one for its reply half only, run on the
-phase 1 build (Integration); its search half has none.
+pre-change stage build (Integration, below). Phase 2 has no integration-level capability-removed
+control: a reply by ULID to another actor's status gets `.notFound` on both builds until a search
+writes the `REF#` pointer (§2.3). Its capability-removed control is the resolver unit test with a
+seeded pointer (Phase 2, below).
 
 **Phase 1**
 - **`buildNoteJSON`** emits `inReplyTo` when `inReplyToId` is set.
@@ -1407,6 +1413,8 @@ phase 1 build (Integration); its search half has none.
 - **The `REF#` local pointer** resolves another actor's unlisted status.
   - Negative controls: another actor's private status gives `notFound` in both search and the
     resolver, and a ULID with no pointer gives `notFound`.
+  - Capability-removed control: the phase 1 resolver, given the same seeded pointer, returns
+    `notFound`, because it resolves only the caller's own statuses (§1.2).
 - **Carry-over** yields *R*.
   - Negative control: a reply to someone else's reply yields that someone.
 - **Followers union** is *P*'s followers.
@@ -1489,9 +1497,9 @@ These count only once FederatedActivityPublisher#278 is fixed (Sequence).
 - Negative controls:
   - B's private status: search returns nothing, and replying with its ULID gets `.notFound`.
   - Search without a token gets 401.
-- Capability-removed control, for the reply half only: on the phase 1 stage build, A replies with
-  the ULID of B's unlisted status, taken from B's own create response, and gets `.notFound`,
-  because phase 1 resolves only the caller's own statuses (§1.2; the phase 1 resolver test).
+- No integration-level capability-removed control for the reply half: without a search, the
+  `REF#` pointer doesn't exist and the reply gets `.notFound` on the phase 1 and phase 2 builds
+  alike (§2.3). The resolver unit test with a seeded pointer covers it.
 - The search half has no capability-removed control. Before phase 2, `/api/v2/search` doesn't
   exist, and a 404 for a missing route is not the capability going red, any more than a compile
   failure is. Search rests on its other-side inputs above.
