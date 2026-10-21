@@ -485,10 +485,13 @@ the maintainer's, and everything here is this spec's.
   holding the generated `Client`), built once:
   - an `HTTPClient` (`swift-server/async-http-client`) configured as in §0.2;
   - `AsyncHTTPClientTransport` (`swift-server/swift-openapi-async-http-client`) over that
-    `HTTPClient`, with its `timeout` set to the per-fetch deadline every caller uses (10 s, §0.2). Its
-    `Configuration` is `init(client: HTTPClient = .shared, timeout: TimeAmount = .minutes(1))`,
-    and `send` calls `client.execute(request, timeout: configuration.timeout)`, so this is a
-    backstop, not the per-fetch deadline;
+    `HTTPClient`, with its `timeout` set to the per-fetch deadline every caller uses (10 s, §0.2).
+    Its `Configuration` is `init(client: HTTPClient = .shared, timeout: TimeAmount = .minutes(1))`
+    (`Sources/OpenAPIAsyncHTTPClient/AsyncHTTPClientTransport.swift:71`, at tag 1.5.0, the
+    version step 0 declares). The transport hands `configuration.client` and
+    `configuration.timeout` to its request sender (`:214`), and `AsyncHTTPRequestSender.send`
+    calls `client.execute(request, timeout: timeout)` (`:241-244`). So this is a backstop, not
+    the per-fetch deadline;
   - the generated `Client`, with `serverURL` read from the document's own `servers:` entry
     through the generated `Servers` namespace, `try Servers.Server1.url()` (the generator emits
     one `Servers.Server<n>` enum per server with a static `url()` function,
@@ -731,16 +734,30 @@ the maintainer's, and everything here is this spec's.
     puts the `RuntimeError` itself there (`UniversalClient.swift:120-122`). `RuntimeError` is
     `internal` (`:23`), so FAP can't match its case.
 
-  Both functions map the unwrapped error in this order: one of FAP's own errors (the
-  middleware's and the body wrapper's) is rethrown as it is; a `DecodingError` becomes
-  `invalidDocument`, carrying it; an `HTTPClientError` from AHC, such as `readTimeout`
-  (`HTTPClient.swift:1596`), is rethrown as it is; anything else becomes
-  `generatedLayerRefused(underlying:)`. That one case is everything the generated layer refuses
-  behind the middleware: an undocumented status (above) and a content type the runtime's match
-  refuses. With every middleware check on, production never reaches it, because the middleware
-  refuses those responses first; it exists so that a test with one middleware check switched off
-  can see the generated layer refuse, and it replaces the two separate cases,
-  `undocumentedStatus` and `decodeFailed`, an earlier revision had for that purpose (Testing).
+  **Telling the generated layer from the transport.** The runtime sets `ClientError.response`
+  only for an error thrown after the response head, in the deserializer
+  (`Interface/UniversalClient.swift:179-188`, runtime 1.11.0). An error from the transport is
+  wrapped with no response (`:146-155`, as `RuntimeError.transportFailed`), and one from a
+  middleware likewise (`:160-175`). Both functions map the unwrapped error in this order:
+  1. One of FAP's own errors (the middleware's, the hook's and the body wrapper's) is rethrown as
+     it is.
+  2. A `DecodingError` becomes `invalidDocument`, carrying it.
+  3. An `HTTPClientError` from AHC, such as `readTimeout` (`HTTPClient.swift:1596`), becomes
+     `transportFailed(underlying:)`, whether or not `response` is set: a body that stalls after
+     the head fails in AHC, not in the generated layer.
+  4. Any other error with `response` set becomes `generatedLayerRefused(underlying:)`, as does
+     the `.undocumented` case (above). That is everything the generated layer refuses behind the
+     middleware: an undocumented status, and a content type the runtime's match refuses.
+  5. Everything else becomes `transportFailed(underlying:)`: a refused or reset connect, which
+     AHC passes on as the raw connection error when retries are off
+     (`ConnectionPool/State Machine/HTTPConnectionPool+HTTP1StateMachine.swift:260-271`), or a TLS
+     verification failure.
+
+  With every middleware check on, production reaches `generatedLayerRefused` only if the
+  middleware and the runtime disagree, because the middleware refuses those responses first. The
+  case exists so that a test with one middleware check switched off can see the generated layer
+  refuse, and it replaces the two separate cases, `undocumentedStatus` and `decodeFailed`, an
+  earlier revision had for that purpose (Testing).
 - **The generated client is `internal`** (`accessModifier: internal` in
   `openapi-generator-config.yaml`). Only `fetchRemoteObject`, `fetchRemoteActor` and the two
   document structs are public.
@@ -845,11 +862,73 @@ for the other handlers, was dropped (decision 17) and is FederatedActivityPublis
 | `DeliverHandler`, phase 3a (§3.5) | *R*'s actor, once per job | 10 s from that fetch's call | 20 s | Not behind API Gateway. Function timeout 60 s (`activity-app/functions/template.yaml:446`). The POST that follows has its own 30 s idle timeout (`DeliverHandler/main.swift:92`) and is outside this spec (FederatedActivityPublisher#277) |
 
 The quote path and the inbox are within the limit when every fetch answers promptly, and a single
-fetch is within it in the worst case. Only a run of slow fetches in one request can pass 29 s.
-API Gateway then answers 504 for the request (PostHandler) or the delivery (InboxHandler), and
-the remote server's own retry, or the client's, is what follows. This spec does not close that
-gap; #284 tracks it. The transport's 10 s `timeout` backstop (§0.1) applies per hop, inside each
+fetch is within it in the worst case. Only a run of slow fetches in one request can pass 29 s,
+and what follows differs:
+- **Quote path: a duplicate post on retry.** API Gateway answers the client 504 at 29 s, but the
+  function's own timeout is 60 s (`activity-app/functions/template.yaml:127`), so it keeps
+  running. Both quote fetches run before the status is stored (`PostHandler/main.swift:264-273`,
+  then `storeStatus` at `:318`), and the handler then stores the status, counts it and enqueues
+  its delivery. FAP has no client idempotency key (the only idempotency in `Sources/` is the
+  inbox's activity dedup, `DynamoDBStore.swift:256` onward). So a client that retries after the
+  504 creates a second, duplicate post.
+- **Inbox: the delivery fails.** The function's 30 s timeout (Globals, `:76-77`) stops it too.
+  The remote server's retry redelivers the activity, and inbound dedup makes that safe.
+
+This spec does not close that gap; #284 tracks it. The transport's 10 s `timeout` backstop (§0.1) applies per hop, inside each
 fetch's deadline, and doesn't raise the worst case.
+
+**Dependencies.**
+- **`swift-server/swift-openapi-async-http-client`** (product `OpenAPIAsyncHTTPClient`), a new
+  package entry declared `from: "1.5.0"`, its latest release tag
+  (github.com/swift-server/swift-openapi-async-http-client/releases/tag/1.5.0, read 2026-10-20).
+  It is a new third-party dependency, and the maintainer approved it on 2026-10-20 (decision
+  15). It follows from the transport choice in decision 14's implementation, which is this
+  spec's design, not the maintainer's words.
+- **`swift-server/async-http-client`** becomes a direct dependency of `ActivityPubCore`,
+  declared `from: "1.33.1"`. The maintainer approved this on 2026-10-21 (decision 16). It is
+  already resolved through `smithy-swift`, and the spike's `Package.swift` change left the
+  resolved pins unchanged (#283).
+- **`apple/swift-nio`** (`from: "2.97.1"`), **`apple/swift-nio-ssl`** (`from: "2.36.1"`) and
+  **`apple/swift-nio-http2`** (`from: "1.42.0"`) get package entries so that the test target can
+  depend on `NIOCore`, `NIOPosix`, `NIOSSL` and `NIOHTTP2` directly (Testing). No production
+  target names them. The maintainer approved these as direct test-target dependencies on
+  2026-10-21 (decision 16). All three are already resolved through `async-http-client`.
+- **Floors.** The step 0 PR raises `swift-openapi-generator` from `from: "1.6.0"` to
+  `from: "1.11.1"`, and `swift-openapi-runtime` from `from: "1.7.0"` to `from: "1.11.0"`
+  (`Package.swift:36-37`), the versions behind this spec's line references. Each new entry above
+  is declared at the version cited for it. A lower floor would let a fresh resolution build
+  against code the cited lines were never read in.
+- **First use in the deployed build.** Nothing imports `APIClient` today (only
+  `Package.swift:240` names it), so `OpenAPIRuntime`, `AsyncHTTPClient` and the generator plugin
+  reach the deployed Lambdas, and the plugin runs in the Lambda archive build, for the first
+  time. Seventeen of the 19 deployed handlers link `ActivityPubCore`, and so AHC (§0.1, "Where
+  it lives, and what that costs").
+
+**Deployed build (C4, not yet measured).** The deploy build is
+`swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3`
+(`deploy-stage.yml:326`): a glibc Amazon Linux 2023 image with the UBI9 Swift toolchain
+(`docker/Dockerfile.al2023-swift`), with `libcrypto.so.3` and `libssl.so.3` copied into each
+zip's `lib/` (`deploy-stage.yml:334-350`). It is not the static Linux SDK. No deployed handler
+links AHC today (#283: 0 `AsyncHTTPClient` symbols in each of the 19 handler binaries), so the
+existing deploy build says nothing about it.
+
+C4 is measured on stage, after merge, and fixed forward. That follows the maintainer's
+2026-06-12 call on build validation, as the repository's `CLAUDE.md` records it: PR CI validates
+with `swift test`, the full archive build runs only in `deploy-stage` after merge, no runner VM is
+used by hand, and a broken archive build is fixed forward. The step 0 PR's CI is therefore
+`swift test` on Linux (`.github/workflows/test.yml:13`), and step 0 adds no archive job to PR CI.
+- **Pass.** The `deploy-stage` run for the step 0 merge commit builds the archive
+  (`deploy-stage.yml:326`) and deploys, and on stage an inbound delivery signed by an actor whose
+  key is not cached in `REMOTE_ACTOR#`, for example a first Follow from a remote account, verifies.
+  That verification needs a key fetch, and after step 0 the only GET path in `ActivityPubCore` is
+  the AHC client, so the fetch ran on AHC in the deployed binary.
+- **Fail.** The archive step fails, a handler fails to start, or that key fetch fails with a
+  transport error. A follow-up PR fixes it forward.
+- **Release.** No prod release containing step 0 is cut until C4 has passed on stage. Prod
+  deploys only from a release tag (`CLAUDE.md`, Architecture).
+- **Control.** The before state is #283's count, 0 `AsyncHTTPClient` symbols in each handler
+  binary. The fetch's own capability controls are the Step 0 unit tests, which run on Linux on
+  every PR; C4 adds only the AL2023 build and runtime.
 
 ### 0.3 Behaviour changes
 
@@ -1237,7 +1316,8 @@ Signing itself ships in step 0: `fetchRemoteObject` and `fetchRemoteActor` take 
 ### 3.3 Remote resolution in search
 
 `resolve=true` with a non-local `https://` `q` runs under a **10 s overall deadline**, which
-search passes to each of its fetches (§0.2), well under the 29 s API Gateway limit. On overrun or
+search passes to each of its fetches (§0.2). Its worst case is 20 s, the deadline plus one
+`timeout.read` on a stalled body (§0.2), under the 29 s API Gateway limit. On overrun or
 any failure, it returns empty `statuses` and writes nothing.
 
 1. **Fetch** the object signed as the caller, with `fetchRemoteObject`.
@@ -1506,7 +1586,9 @@ Tests (control in brackets):
   `application/ld+json; profile="https://www.w3.org/ns/activitystreams"` (the exact profile string,
   since values compare case-sensitively) pass. [The production client with the content-type check
   switched off: the four refused values now fail in the runtime's match instead, with
-  `generatedLayerRefused`, whose underlying error is not a `DecodingError` (§0.1).]
+  `generatedLayerRefused`, whose underlying error is not a `DecodingError` and whose
+  `ClientError.response` is set, which shows the response head arrived and the refusal came after
+  it, not from the connection (§0.1).]
 - **Non-concrete or unparsable content type:** a 200 with a valid document and no
   `Content-Type`, an empty one, `*/*`, `text/*`, `html` or `*/html` each fails with the
   middleware's content-type error. [The production client with only the content-type check switched
@@ -1537,8 +1619,11 @@ Tests (control in brackets):
 - **Deadline, stall:** with a 2 s deadline and a test client built with `timeout.read =
   .seconds(3)`, a server that sends the response head at once and then nothing fails with AHC's
   `HTTPClientError.readTimeout` between 3 s and 3.5 s after the request: `timeout.read` restarts
-  when the head arrives, and the deadline, already past, has no chunk to check. [A client with no
-  `timeout.read` and the deadline check off is still waiting at 10 s, when the test cancels it.]
+  when the head arrives, and the deadline, already past, has no chunk to check. It is
+  `transportFailed` whose underlying error is that `HTTPClientError` (§0.1). [The same production
+  construction with only `timeout.read` removed, the deadline check still on, is still waiting at
+  10 s. The test then ends it by calling `shutdown()` on the client inside `withTestClient`, since
+  nothing in the design cancels a pending body read (§0.2), and asserts it had not completed.]
 - **Key fetch:** `KeyManager(client:)` with the test client, then
   `fetchActorDocument(actorUri:signingKey:deadline:)`, both through
   `@testable import ActivityPubCore`, fetches a valid key document from the test server; a
@@ -1577,7 +1662,7 @@ Tests (control in brackets):
   address policy refuses, is refused. [With `httpVersion = .automatic`, the connection
   negotiates `h2`, the HTTP/1.1 hook never runs, and the request reaches the server.]
 - **Trust:** the test client reaches the TLS server. [A client with the system trust store
-  refuses it.]
+  refuses it, with `transportFailed`, whose `ClientError.response` is `nil`.]
 - **Request target:** a URI with a query string and percent-encoded characters reaches the test
   server byte for byte. [The same URI through a plain `/{path}` template does not.]
 - **Signing:** a signed fetch of a URI with a query string carries a `Signature` over
@@ -1802,7 +1887,7 @@ code" means the defect was seen in FAP's source, not in production.
 | Connection-level address check, with Mastodon's `CIDR_LIST` | Step 0, §0.2 | None. Security control |
 | Hook closes the rejected channel itself | §0.2 | Yes, in the spike: without the close the connection stayed open, `closes=0` (FederatedActivityPublisher#283, T1 vs T1c) |
 | `retryConnectionEstablishment = false` | §0.2 | Yes, in the spike: with retries on, a refused host got 7 connections in 2 s on macOS and 9 on Linux (FederatedActivityPublisher#283, T1b) |
-| `httpVersion = .http1Only` | §0.2 | Not observed. FederatedActivityPublisher#283 notes the hook is HTTP/1.1-only as a source reading (its finding 3), and every spike client was `.http1Only`; the step 0 "HTTP/1.1 only" test is the first observation |
+| `httpVersion = .http1Only` | §0.2 | Not observed. Covered by decision 15's address check: decision 14's Settings make `.http1Only` a precondition of the hook, which runs only for HTTP/1.1 connections. FederatedActivityPublisher#283 notes that as a source reading (its finding 3), every spike client was `.http1Only`, and the step 0 "HTTP/1.1 only" test is the first observation |
 | `timeout.connect` / `timeout.read`, and the transport's 10 s `timeout` backstop | §0.1, §0.2 | None. Bounds on stalls the deadline race can't interrupt |
 | Middleware throws with no target bound | §0.1 | None |
 | Missing, empty, unparsable or non-concrete `Content-Type` refused | §0.1 | None. Closes a gap read in the runtime |
