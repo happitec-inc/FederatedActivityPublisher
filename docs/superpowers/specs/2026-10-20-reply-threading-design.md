@@ -18,7 +18,7 @@ The work ships as five changes, in order. Each can be released on its own.
 
 | Step | Change | Depends on | New components (full list in each section) |
 |---|---|---|---|
-| 0 | **Fetch hardening**, a security change to the existing shared fetch, built on the generated client (decisions 14 and 16) | FederatedActivityPublisher#279 merged | A FAP-authored OpenAPI document (`Sources/ActivityPubCore/openapi.yaml`) with typed actor and object schemas, and a client generated from it inside `ActivityPubCore`; one FAP `ClientMiddleware`; one long-lived `HTTPClient` per container behind `AsyncHTTPClientTransport`, with the connection-level address check and no connection reuse; `ActorKeyCache` (§0.1) |
+| 0 | **Fetch hardening**, a security change to the existing shared fetch, built on the generated client (decisions 14 and 16) | FederatedActivityPublisher#279 merged | A FAP-authored OpenAPI document (`Sources/ActivityPubCore/openapi.yaml`) with typed actor and object schemas, and a client generated from it inside `ActivityPubCore`; one FAP `ClientMiddleware`; one long-lived `HTTPClient` per container behind `AsyncHTTPClientTransport`, with the connection-level address check; `ActorKeyCache` (§0.1) |
 | 1 | Self-replies | — | None |
 | 2 | Replies to other local actors | 1 | `SearchHandler` Lambda; `GET /api/v2/search` route and CloudFront behaviour; `REF#` item type |
 | 3a | Replies to remote statuses, delivered unsigned | 0, 2 | Remote resolve in `SearchHandler`; remote `REF#` entries; actor-URI delivery in `DeliverHandler` |
@@ -399,7 +399,7 @@ unlisted `[followers]`/`[Public]`, and private `[followers]`/`[]`.
 - `DeliverHandler` reads `{SSM_KEY_PREFIX}/{username}` (`DeliverHandler/main.swift:52-58`), signs
   and POSTs (`:79-94`).
 - `DeliverFunction` has DynamoDB *read* and SSM read of `activity/${Stage}/keys/*`
-  (`functions/template.yaml:446-453`).
+  (`activity-app/functions/template.yaml:446-453`).
 - The queue allows 3 receives (`activity-environment/template.yaml:87`).
 
 **Fetching and signing.**
@@ -417,7 +417,7 @@ unlisted `[followers]`/`[Public]`, and private `[followers]`/`[]`.
   (`PostHandler/main.swift:51-52`).
 
 **Infrastructure.**
-- `PostFunction` reads SSM `activity/${Stage}/*` (`functions/template.yaml:122-140`).
+- `PostFunction` reads SSM `activity/${Stage}/*` (`activity-app/functions/template.yaml:122-140`).
 - `InboxFunction` has DynamoDB CRUD and SQS only (`:429-433`). FederatedActivityPublisher#279
   (open) adds SSM read of `activity/${Stage}/keys/*` with an explicit `Deny` on
   `session-signing-key`, `jwt-signing-key` and `client-token` and on `ssm:GetParametersByPath`,
@@ -473,7 +473,7 @@ where FAP is stricter:
 | Body | 1 MB cap. Abort the read past it. | Middleware | `request.rb:293-294` |
 | Content type | The received `Content-Type` parses with the runtime's own `OpenAPIMIMEType` to a concrete type that matches a declared type: `application/activity+json`, or `application/ld+json` with the AS profile. Anything else is refused: missing, empty, unparsable or wildcard | Middleware (§0.1), with the generated client's match behind it | `JsonLdHelper#fetch_resource_without_id_validation`, `#valid_activitypub_content_type?`. Stricter than Mastodon on a multi-profile `ld+json` value (§0.1) |
 | Status | Only 200 counts as success | Middleware, with the generated client's `.undocumented` case behind it | `JsonLdHelper#fetch_resource_without_id_validation` (`response.code == 200`) |
-| Deadline | One absolute deadline per invocation, shared by all its fetches (§0.2), enforced before every hop and even while bytes keep arriving | Middleware | Platform limits |
+| Deadline | An absolute deadline per fetch, from the caller. It bounds the response head, which the middleware races against it, and it is checked on every body chunk, which stops a slow drip. A body that stalls completely sends no chunk to check and is bounded by `timeout.read` (§0.2) | Middleware; `timeout.read` on the `HTTPClient` | Platform limits |
 | Address | Refuse every address Mastodon's private-address check refuses (§0.2), applied to the address actually connected to, on every connection | `HTTPClient` connection hook | Mastodon's `PrivateAddressCheck.private_address?`, called per connection (`request.rb:325-334,389-394`). Its `CIDR_LIST` (`app/lib/private_address_check.rb`) is adopted verbatim. The ranges behind its Ruby `IPAddr` predicates are named by FAP, not read from Ruby, so parity is claimed for `CIDR_LIST` only (§0.2) |
 
 ### 0.1 Shape
@@ -485,10 +485,10 @@ the maintainer's, and everything here is this spec's.
   holding the generated `Client`), built once:
   - an `HTTPClient` (`swift-server/async-http-client`) configured as in §0.2;
   - `AsyncHTTPClientTransport` (`swift-server/swift-openapi-async-http-client`) over that
-    `HTTPClient`, with its `timeout` set to the fetch deadline every caller uses (10 s, §0.2). Its
+    `HTTPClient`, with its `timeout` set to the per-fetch deadline every caller uses (10 s, §0.2). Its
     `Configuration` is `init(client: HTTPClient = .shared, timeout: TimeAmount = .minutes(1))`,
     and `send` calls `client.execute(request, timeout: configuration.timeout)`, so this is a
-    backstop, not the invocation's fetch deadline;
+    backstop, not the per-fetch deadline;
   - the generated `Client`, with `serverURL` read from the document's own `servers:` entry
     through the generated `Servers` namespace, `try Servers.Server1.url()` (the generator emits
     one `Servers.Server<n>` enum per server with a static `url()` function,
@@ -515,8 +515,8 @@ the maintainer's, and everything here is this spec's.
 - **Per-call context.** `fetchRemoteObject` and `fetchRemoteActor` each bind one `@TaskLocal`
   value, `RemoteFetchContext {target: URL, signer: FetchSigningKey?, deadline:
   ContinuousClock.Instant, schemePolicy: SchemePolicy}`, for the duration of the call. The
-  middleware reads all four. `deadline` is not per call: it is the invocation's one fetch
-  deadline, which every fetch in the invocation shares (§0.2, "Fetch deadline per invocation").
+  middleware reads all four. `deadline` is the instant the caller passes for that fetch
+  (§0.2, "Fetch deadlines by call site").
   The runtime gives middleware no other per-call channel: `intercept(_:body:baseURL:operationID:next:)` and `next:
   @Sendable (HTTPRequest, HTTPBody?, URL)` carry only the request, body, base URL and operation id
   (`apple/swift-openapi-runtime`, `Sources/OpenAPIRuntime/Interface/ClientTransport.swift`).
@@ -698,8 +698,9 @@ the maintainer's, and everything here is this spec's.
     `RuntimeError.unexpectedContentTypeHeader` when every option is `.incompatible` (`:43-76`).
   - **Status.** The middleware refuses any final status other than 200 with its status error. A
     status not in the document also comes back from the generated client as the `.undocumented`
-    case, which `fetchRemoteObject` turns into a separate `undocumentedStatus` error, so a test can
-    tell which layer refused.
+    case. Both functions turn that case into `generatedLayerRefused(underlying:)`, whose underlying
+    error is FAP's internal `UndocumentedStatusError(statusCode:)`, so a test can tell which layer
+    refused.
 - **Stricter than Mastodon on multi-profile `ld+json`.** Mastodon's
   `valid_activitypub_content_type?` splits the quoted `profile` value on whitespace and accepts it
   when any entry is the AS profile (`str[9...-1].split.include?(…)` in
@@ -730,11 +731,16 @@ the maintainer's, and everything here is this spec's.
     puts the `RuntimeError` itself there (`UniversalClient.swift:120-122`). `RuntimeError` is
     `internal` (`:23`), so FAP can't match its case.
 
-  Both functions test `underlyingError is DecodingError`: if it is, they throw the
-  `invalidDocument` error, carrying the `DecodingError`; any other non-FAP decode-step error
-  becomes the `decodeFailed` error. With
-  the middleware's content-type check in place, a refused content type never reaches the runtime's
-  match; with that check switched off, it surfaces as `decodeFailed` (Testing).
+  Both functions map the unwrapped error in this order: one of FAP's own errors (the
+  middleware's and the body wrapper's) is rethrown as it is; a `DecodingError` becomes
+  `invalidDocument`, carrying it; an `HTTPClientError` from AHC, such as `readTimeout`
+  (`HTTPClient.swift:1596`), is rethrown as it is; anything else becomes
+  `generatedLayerRefused(underlying:)`. That one case is everything the generated layer refuses
+  behind the middleware: an undocumented status (above) and a content type the runtime's match
+  refuses. With every middleware check on, production never reaches it, because the middleware
+  refuses those responses first; it exists so that a test with one middleware check switched off
+  can see the generated layer refuse, and it replaces the two separate cases,
+  `undocumentedStatus` and `decodeFailed`, an earlier revision had for that purpose (Testing).
 - **The generated client is `internal`** (`accessModifier: internal` in
   `openapi-generator-config.yaml`). Only `fetchRemoteObject`, `fetchRemoteActor` and the two
   document structs are public.
@@ -773,21 +779,7 @@ them.
 | `httpVersion = .http1Only` (`HTTPClient.swift:1428`) | The hook only runs for HTTP/1.1 connections; HTTP/2 has its own `http2ConnectionDebugInitializer` (`HTTPConnectionPool+Factory.swift:114`) | [inferred from source]; the step 0 h2 test measures it (Testing) |
 | `proxy = nil` | Through a proxy, `remoteAddress` is the proxy's | Set explicitly; the spike's clients set it (`config.proxy = nil`) |
 | `redirectConfiguration = .disallow` (`HTTPClient.swift:1351`) | Redirects come back to the middleware, which validates and re-signs each hop | C3 [measured+negative-control]: T2, `.disallow`, the caller gets the 302 and the target gets 0 connections; T2-control, `.follow(max: 3, allowCycles: false)`, the target is contacted |
-| `maximumUsesPerConnection = 1` (`HTTPClient.swift:895`; default `nil`, no limit) | No connection outlives the request it was opened for, so no idle connection sits in the pool across a Lambda freeze, and every fetch opens a new connection that the address hook checks afresh ("No connection reuse", below) | Source, AHC 1.33.1: leasing a connection decrements its remaining uses (`ConnectionPool/State Machine/HTTPConnectionPool+HTTP1Connections.swift:142-143`); a connection returned idle with none left reports `idleAndNoRemainingUses` (`:72-83`), which becomes the idle context's `shouldBeClosed` (`:773-774`); the pool then closes it instead of parking it (`ConnectionPool/State Machine/HTTPConnectionPool+HTTP1StateMachine.swift:446-447,564-593`), and opens a replacement only for queued requests or pre-warming, which defaults to 0 (`HTTPClient.swift:1407`). [inferred from source]; the step 0 "No connection reuse" test measures it |
-| `timeout.connect = .seconds(5)` and `timeout.read = .seconds(10)` (`HTTPClient.swift:1249,1251`) | `connect` bounds connection setup; AHC's default is 10 s (`connectionCreationTimeout`, `HTTPClient.swift:1256-1258`). `read` is an idle timeout: AHC passes it as the request's `idleReadTimeout` (`ConnectionPool/RequestOptions.swift:44`) and restarts it on every response part read (`ConnectionPool/HTTP1/HTTP1ClientChannelHandler.swift:148`); it has no default, so without it a fully stalled body is never ended. Both values are Mastodon's `connect_timeout: 5` and `read_timeout: 10` (`app/lib/request.rb:86`). Per invocation, the worst case is the shared 10 s fetch deadline plus one `timeout.read`, 20 s, under the 29 s API Gateway limit ("Fetch deadline per invocation", below) | The values are a choice. That `read` ends a stalled body is [unverified] until the stall test runs |
-
-**No connection reuse.** With `maximumUsesPerConnection = 1`, the long-lived client never keeps
-an idle connection, so the risk that a pooled keep-alive connection survives a Lambda freeze and
-fails the first fetch after the thaw does not arise: there is no pooled connection to reuse.
-AHC also honours a request's own `Connection: close`: it reads the header into the request's
-framing metadata (`RequestValidation.swift:39`), the HTTP/1.1 connection state machine keeps it
-as `close` for the request (`ConnectionPool/HTTP1/HTTP1ConnectionStateMachine.swift:201`), and at
-the response end moves to `.closing` with a `.close` action instead of going idle (`:471-474`).
-This spec uses the client setting rather than the header, because it is set once when the client
-is built (§0.1, "Set at construction") and does not depend on the middleware adding a header on
-every hop. Fetch targets are mostly distinct hosts, so reuse would buy little. A side benefit:
-every fetch, and every redirect hop, gets a fresh connection, and so a fresh address check.
-Concurrent fetches in one container each get their own connection, as before.
+| `timeout.connect = .seconds(5)` and `timeout.read = .seconds(10)` (`HTTPClient.swift:1249,1251`) | `connect` bounds connection setup; AHC's default is 10 s (`connectionCreationTimeout`, `HTTPClient.swift:1256-1258`). `read` is an idle timeout: AHC passes it as the request's `idleReadTimeout` (`ConnectionPool/RequestOptions.swift:44`) and restarts it on every response part read (`ConnectionPool/HTTP1/HTTP1ClientChannelHandler.swift:148`); it has no default, so without it a fully stalled body is never ended. Both values are Mastodon's `connect_timeout: 5` and `read_timeout: 10` (`app/lib/request.rb:86`). Per fetch, the worst case is the 10 s deadline on the head plus one `timeout.read` on a stalled body, 20 s. Two such fetches in sequence exceed the 29 s API Gateway limit ("Fetch deadlines by call site", below; FederatedActivityPublisher#284) | The values are a choice. That `read` ends a stalled body is [unverified] until the stall test runs |
 
 **Address policy: Mastodon's, adopted verbatim.** The policy refuses every address Mastodon's
 `PrivateAddressCheck.private_address?` refuses. Source: `app/lib/private_address_check.rb` in
@@ -827,85 +819,37 @@ reach it. The spike measured the plain-`http` case; the `https` ordering is from
 **Deadline.** The middleware runs each hop's `next` raced against the remaining time and cancels
 it on expiry; AHC's `execute` honours task cancellation (`AsyncAwait/HTTPClient+execute.swift:170-173`).
 That covers the response head only: `execute` returns once the head arrives ("the `body` of the
-response may not yet have been fully received", `:38`). The body wrapper checks the deadline on
-every chunk, which stops a slow drip. A body that stalls completely sends no chunk to check, so
-it is bounded by `timeout.read`; whether cancelling the task also ends a pending body read is
-[unverified], and the stall test measures it.
+response may not yet have been fully received", `:38`). After that, the body is read in the
+caller's task during the generated decode, and nothing in this design cancels that read. The body
+wrapper checks the deadline on every chunk, which stops a slow drip. A body that stalls
+completely sends no chunk to check, so it is bounded by `timeout.read` alone. AHC starts that
+timer once the request end is sent (`ConnectionPool/HTTP1/HTTP1ClientChannelHandler.swift:234,294`)
+and restarts it on every response part (`:148`). When it fires while the head or body
+is awaited, it fails the request with `HTTPClientError.readTimeout` and closes the connection
+(`ConnectionPool/HTTPRequestStateMachine.swift:738-741`).
 
-**Fetch deadline per invocation.** Each invocation that fetches computes one deadline,
-`ContinuousClock.now` plus 10 s, when its handler body starts, and passes that same instant to
-every fetch it makes; each fetch carries it in its `RemoteFetchContext` (§0.1). The middleware
-checks it before every hop, the first included, and throws its deadline error without
-connecting once it has passed. So all the fetches in one invocation share 10 s, however many
-there are, as search's already do (§3.3). Only a fetch whose body stalls as the deadline passes
-can run past it, and only until `timeout.read` fires, at most 10 s after its last byte
-(Deadline, above). Every later fetch then fails at its first hop check. The worst case for an
-invocation's fetches is therefore 10 s + 10 s = 20 s from the start of the handler body,
-whatever the number of fetches.
+**Fetch deadlines by call site.** Each fetch gets its own deadline, `ContinuousClock.now` plus
+10 s when the call is made; the middleware checks it before every hop of that fetch, the first
+included, and throws its deadline error without connecting once it has passed. One fetch can
+take up to 10 s + 10 s = 20 s: the deadline bounds the head, and a body that stalls after the
+last byte runs on until `timeout.read` fires (Deadline, above). Search is the one caller that
+passes a single overall deadline to all its fetches: that is §3.3's 10 s search deadline,
+unchanged and kept by decision 15. A time budget shared across all the fetches in one request,
+for the other handlers, was dropped (decision 17) and is FederatedActivityPublisher#284.
 
-| Call site | Fetches that share the deadline | Deadline | Worst case for the fetches | Limit |
+| Call site | Fetches, in sequence | Deadline of each fetch | Worst case for the fetches | Limit |
 |---|---|---|---|---|
-| `PostHandler`, quote path (`PostHandler/main.swift:264,272`) | The quoted status, then its actor on a `REMOTE_ACTOR#` miss | 10 s from the start of the request (`:62`) | 20 s | `ClientApi`, a REST API with no timeout override (`functions/template.yaml:111-120`; the route at `:142-144`), so 29 s; function timeout 60 s (`:127`) |
-| `InboxHandler` (`InboxHandler/main.swift:125,153,390,1598`) | The key fetch on a cache miss, the refresh after a failed verification, the Follow path's refresh on a cache miss, and the QuoteRequest actor lookup | 10 s from the start of the delivery (`:52`) | 20 s | The implicit `ServerlessRestApi`: `PostInbox` is `Type: Api` with no `RestApiId` (`functions/template.yaml:434-439`), and the stack outputs it as `ServerlessRestApiId` (`:538-540`), so it is a REST API and 29 s applies; function timeout 30 s (Globals, `:76-77`) |
-| `SearchHandler`, phase 3a (§3.3) | The object, the re-fetch of a non-canonical `id`, and the actor | 10 s from the start of the request | 20 s | `ClientApi`, 29 s |
-| `DeliverHandler`, phase 3a (§3.5) | *R*'s actor, once per job | 10 s from the start of the job (`DeliverHandler/main.swift:41`); `BatchSize: 1` (`functions/template.yaml:464`) makes the job the invocation | 20 s | Not behind API Gateway. Function timeout 60 s (`:446`). The POST that follows has its own 30 s idle timeout (`DeliverHandler/main.swift:89`) and is outside this spec (FederatedActivityPublisher#277) |
+| `PostHandler`, quote path (`PostHandler/main.swift:264,272`) | The quoted status, then its actor on a `REMOTE_ACTOR#` miss | 10 s from that fetch's call | 20 s per fetch, 40 s for both. **Known gap: over the 29 s limit** (#284) | `ClientApi`, a REST API with no timeout override (`activity-app/functions/template.yaml:111-120`; the route at `:142-144`), so 29 s; function timeout 60 s (`:127`) |
+| `InboxHandler` (`InboxHandler/main.swift:125,153,390,1598`) | The key fetch on a cache miss, the refresh after a failed verification, then either the Follow path's refresh on a cache miss or the QuoteRequest actor lookup | 10 s from that fetch's call | 20 s per fetch, up to 60 s for three. **Known gap: two fetches already exceed the 29 s limit and the 30 s function timeout** (#284) | The implicit `ServerlessRestApi`: `PostInbox` is `Type: Api` with no `RestApiId` (`activity-app/functions/template.yaml:434-439`), and the stack outputs it as `ServerlessRestApiId` (`:538-540`), so it is a REST API and 29 s applies; function timeout 30 s (Globals, `:76-77`) |
+| `SearchHandler`, phase 3a (§3.3) | The object, the re-fetch of a non-canonical `id`, and the actor | §3.3's one 10 s overall deadline, from the start of the request | 20 s in all: once the deadline has passed, every later fetch fails at its first hop check | `ClientApi`, 29 s |
+| `DeliverHandler`, phase 3a (§3.5) | *R*'s actor, once per job | 10 s from that fetch's call | 20 s | Not behind API Gateway. Function timeout 60 s (`activity-app/functions/template.yaml:446`). The POST that follows has its own 30 s idle timeout (`DeliverHandler/main.swift:92`) and is outside this spec (FederatedActivityPublisher#277) |
 
-Behind API Gateway, each handler has at least 9 s of its 29 s for its own work after the
-fetches. The transport's 10 s `timeout` backstop (§0.1) applies per hop, inside the shared
-deadline, and doesn't raise the worst case.
-
-**Dependencies.**
-- **`swift-server/swift-openapi-async-http-client`** (product `OpenAPIAsyncHTTPClient`), a new
-  package entry declared `from: "1.5.0"`, its latest release tag
-  (github.com/swift-server/swift-openapi-async-http-client/releases/tag/1.5.0, read 2026-10-20).
-  It is a new third-party dependency, and the maintainer approved it on 2026-10-20 (decision
-  15). It follows from the transport choice in decision 14's implementation, which is this
-  spec's design, not the maintainer's words.
-- **`swift-server/async-http-client`** becomes a direct dependency of `ActivityPubCore`,
-  declared `from: "1.33.1"`. The maintainer approved this on 2026-10-21 (decision 16). It is
-  already resolved through `smithy-swift`, and the spike's `Package.swift` change left the
-  resolved pins unchanged (#283).
-- **`apple/swift-nio`** (`from: "2.97.1"`), **`apple/swift-nio-ssl`** (`from: "2.36.1"`) and
-  **`apple/swift-nio-http2`** (`from: "1.42.0"`) get package entries so that the test target can
-  depend on `NIOCore`, `NIOPosix`, `NIOSSL` and `NIOHTTP2` directly (Testing). No production
-  target names them. The maintainer approved these as direct test-target dependencies on
-  2026-10-21 (decision 16). All three are already resolved through `async-http-client`.
-- **Floors.** The step 0 PR raises `swift-openapi-generator` from `from: "1.6.0"` to
-  `from: "1.11.1"`, and `swift-openapi-runtime` from `from: "1.7.0"` to `from: "1.11.0"`
-  (`Package.swift:36-37`), the versions behind this spec's line references. Each new entry above
-  is declared at the version cited for it. A lower floor would let a fresh resolution build
-  against code the cited lines were never read in.
-- **First use in the deployed build.** Nothing imports `APIClient` today (only
-  `Package.swift:240` names it), so `OpenAPIRuntime`, `AsyncHTTPClient` and the generator plugin
-  reach the deployed Lambdas, and the plugin runs in the Lambda archive build, for the first
-  time. Seventeen of the 19 deployed handlers link `ActivityPubCore`, and so AHC (§0.1, "Where
-  it lives, and what that costs").
-
-**Deployed build (C4, not yet measured).** The deploy build is
-`swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3`
-(`deploy-stage.yml:326`): a glibc Amazon Linux 2023 image with the UBI9 Swift toolchain
-(`docker/Dockerfile.al2023-swift`), with `libcrypto.so.3` and `libssl.so.3` copied into each
-zip's `lib/` (`deploy-stage.yml:334-350`). It is not the static Linux SDK. No deployed handler
-links AHC today (#283: 0 `AsyncHTTPClient` symbols in each of the 19 handler binaries), so the
-existing deploy build says nothing about it.
-
-C4 is measured on stage, after merge, and fixed forward. That follows the maintainer's
-2026-06-12 call on build validation, as the repository's `CLAUDE.md` records it: PR CI validates
-with `swift test`, the full archive build runs only in `deploy-stage` after merge, no runner VM is
-used by hand, and a broken archive build is fixed forward. The step 0 PR's CI is therefore
-`swift test` on Linux (`.github/workflows/test.yml:13`), and step 0 adds no archive job to PR CI.
-- **Pass.** The `deploy-stage` run for the step 0 merge commit builds the archive
-  (`deploy-stage.yml:326`) and deploys, and on stage an inbound delivery signed by an actor whose
-  key is not cached in `REMOTE_ACTOR#`, for example a first Follow from a remote account, verifies.
-  That verification needs a key fetch, and after step 0 the only GET path in `ActivityPubCore` is
-  the AHC client, so the fetch ran on AHC in the deployed binary.
-- **Fail.** The archive step fails, a handler fails to start, or that key fetch fails with a
-  transport error. A follow-up PR fixes it forward.
-- **Release.** No prod release containing step 0 is cut until C4 has passed on stage. Prod
-  deploys only from a release tag (`CLAUDE.md`, Architecture).
-- **Control.** The before state is #283's count, 0 `AsyncHTTPClient` symbols in each handler
-  binary. The fetch's own capability controls are the Step 0 unit tests, which run on Linux on
-  every PR; C4 adds only the AL2023 build and runtime.
+The quote path and the inbox are within the limit when every fetch answers promptly, and a single
+fetch is within it in the worst case. Only a run of slow fetches in one request can pass 29 s.
+API Gateway then answers 504 for the request (PostHandler) or the delivery (InboxHandler), and
+the remote server's own retry, or the client's, is what follows. This spec does not close that
+gap; #284 tracks it. The transport's 10 s `timeout` backstop (§0.1) applies per hop, inside each
+fetch's deadline, and doesn't raise the worst case.
 
 ### 0.3 Behaviour changes
 
@@ -917,18 +861,24 @@ used by hand, and a broken archive build is fixed forward. The step 0 PR's CI is
   inbox owner, with the key #279 already loads.
 - **Inbound key fetch.** Verifying an inbound signature now fetches the key through
   `fetchRemoteActor`: only status 200 and the two ActivityStreams content types are accepted,
-  with at most 3 redirects, a 1 MB cap and the address check. Its deadline is the delivery's
-  shared 10 s fetch deadline (§0.2), an absolute bound that every fetch in the delivery counts
-  against. Today's 10 seconds (`KeyManager.swift:75`) is an idle timeout per fetch, so a slow
-  response that keeps sending bytes now fails where it used to succeed. A remote server whose
+  with at most 3 redirects, a 1 MB cap and the address check. Its deadline is an absolute 10 s
+  on the head, checked on every body chunk, with `timeout.read` bounding a stalled body (§0.2).
+  Today's 10 seconds (`KeyManager.swift:75`) is an idle timeout, so a slow response that keeps
+  sending bytes now fails where it used to succeed. A remote server whose
   actor document fails these checks can no longer deliver to FAP.
 - **Typed documents** (decision 16). A fetched actor without a string `id` or `inbox`, an object
   without a string `id` or a `type`, or either one with a declared field of the wrong JSON type
   (for example a numeric `inbox`, or `sensitive` as a string) is refused with `invalidDocument`.
   Today any JSON object is accepted and fields of the wrong type are silently skipped. Unknown
-  fields are still ignored.
-- **One connection per fetch.** `maximumUsesPerConnection = 1` (§0.2): every fetch, and every
-  redirect hop, opens a new connection and closes it after the response.
+  fields are still ignored. Two consequences fall on paths that don't use the field that refuses:
+  - **Inbound key fetch.** A `preferredUsername` that is present but not a string (today skipped
+    by `as? String`, `KeyManager.swift:101`) now refuses the actor, so the key fetch fails and
+    the inbound delivery fails with it.
+  - **Quote path.** The quote only needs `attributedTo`, but a `summary`, `sensitive`,
+    `published`, `content`, `url` or `contentMap` of an unexpected JSON type now refuses the
+    quoted status, and the quote is marked `failed`.
+
+  The typed fields stay (decision 16); the step 0 release notes name both consequences.
 - **No connection retries.** `retryConnectionEstablishment = false` (§0.2) applies to every
   fetch, not only refused addresses. A key fetch whose first connection attempt fails for an
   ordinary reason, such as a refused or reset connect, now fails at once where AHC's default would
@@ -1286,9 +1236,9 @@ Signing itself ships in step 0: `fetchRemoteObject` and `fetchRemoteActor` take 
 
 ### 3.3 Remote resolution in search
 
-`resolve=true` with a non-local `https://` `q` runs under a **10 s overall deadline**, the
-invocation's shared fetch deadline (§0.2), well under the 29 s API Gateway limit. On overrun or any failure, it returns empty `statuses` and writes
-nothing.
+`resolve=true` with a non-local `https://` `q` runs under a **10 s overall deadline**, which
+search passes to each of its fetches (§0.2), well under the 29 s API Gateway limit. On overrun or
+any failure, it returns empty `statuses` and writes nothing.
 
 1. **Fetch** the object signed as the caller, with `fetchRemoteObject`.
 2. **Canonicalize.** If `json['id']` ≠ `q`, re-fetch `id` and require equality
@@ -1556,7 +1506,7 @@ Tests (control in brackets):
   `application/ld+json; profile="https://www.w3.org/ns/activitystreams"` (the exact profile string,
   since values compare case-sensitively) pass. [The production client with the content-type check
   switched off: the four refused values now fail in the runtime's match instead, with
-  `decodeFailed`, whose underlying error is not a `DecodingError` (§0.1).]
+  `generatedLayerRefused`, whose underlying error is not a `DecodingError` (§0.1).]
 - **Non-concrete or unparsable content type:** a 200 with a valid document and no
   `Content-Type`, an empty one, `*/*`, `text/*`, `html` or `*/html` each fails with the
   middleware's content-type error. [The production client with only the content-type check switched
@@ -1579,21 +1529,16 @@ Tests (control in brackets):
   `Content-Type: application/activity+json` so that the content-type check passes, fail with the
   middleware's status error. [The production client with
   the status check switched off: both come back from the generated client as `.undocumented`, and
-  `fetchRemoteObject` throws `undocumentedStatus` instead.]
+  `fetchRemoteObject` throws `generatedLayerRefused` instead, whose underlying error is
+  `UndocumentedStatusError` with the status code.]
 - **Deadline, slow drip:** with a 2 s deadline, a body that sends one byte every 100 ms for 5 s
   fails with the deadline error between 2 s and 2.5 s. [With the deadline check off, it
   completes after about 5 s; `timeout.read` never fires, because bytes keep arriving.]
-- **Shared deadline:** with one 2 s deadline passed to two sequential fetches, where the first
-  server answers after 1.5 s, the second fetch, to a server that would answer after 1 s, fails
-  with the deadline error by 2.5 s, and a third fetch with the same deadline then fails before
-  any connection (its server records 0 connections). [With a fresh 2 s deadline per fetch, the
-  second fetch succeeds and the third connects.]
 - **Deadline, stall:** with a 2 s deadline and a test client built with `timeout.read =
-  .seconds(3)`, a server that sends the response head and then nothing fails by 2 s + 3 s = 5 s,
-  plus 0.5 s of scheduling margin. The test records whether it ended at the deadline (cancellation
-  ended the body read) or at `timeout.read`, which settles the §0.2 [unverified] item. [A client
-  with no `timeout.read` and the deadline check off is still waiting at 10 s, when the test cancels
-  it.]
+  .seconds(3)`, a server that sends the response head at once and then nothing fails with AHC's
+  `HTTPClientError.readTimeout` between 3 s and 3.5 s after the request: `timeout.read` restarts
+  when the head arrives, and the deadline, already past, has no chunk to check. [A client with no
+  `timeout.read` and the deadline check off is still waiting at 10 s, when the test cancels it.]
 - **Key fetch:** `KeyManager(client:)` with the test client, then
   `fetchActorDocument(actorUri:signingKey:deadline:)`, both through
   `@testable import ActivityPubCore`, fetches a valid key document from the test server; a
@@ -1626,10 +1571,6 @@ Tests (control in brackets):
   without the hook delivers the HTTP request to C.]
 - **Rejected channel is closed:** server C above records the close. [A hook that fails without
   calling `close()` leaves `closes == 0`, as the spike's T1 did.]
-- **No connection reuse:** two fetches in sequence to the same test server, through one
-  client, open 2 connections, and the server records a close after each response. [The
-  production construction with `maximumUsesPerConnection` left at its default, `nil`, opens 1
-  connection for both.]
 - **No connection retries:** a refused address gets exactly 1 connection. [With
   `retryConnectionEstablishment = true`, more than 1, as in the spike's T1b.]
 - **HTTP/1.1 only:** a TLS test server offering `h2` and `http/1.1` by ALPN, on a port the
@@ -1821,11 +1762,26 @@ Phase 3 needs a third-party server, so it is in the manual federation checks bel
   "Address check over TLS" test measures it.
 - **TaskLocal isolation on one client.** [inferred] from `UniversalClient.send` awaiting the chain
   inline. The concurrent "One client" test measures it.
-- **Cancelling a pending body read.** Whether task cancellation ends an AHC body read that is
-  waiting for bytes. The stall test measures it; `timeout.read` bounds it either way.
-- **One use per connection.** Read in source (§0.2): with `maximumUsesPerConnection = 1`, AHC
-  closes each connection when its response ends instead of pooling it, so no connection outlives
-  its request or a Lambda freeze. The Step 0 "No connection reuse" test measures it.
+- **Pooled connections across a Lambda freeze** [unmeasured]. The long-lived client keeps
+  AHC's default pooling, so an idle keep-alive connection can sit in the pool while the container
+  is frozen, and the remote server may close it before the thaw. Whether AHC notices before
+  reusing it, or the first fetch after the thaw fails, is not known; with connection retries off
+  (§0.2), such a failure on a key fetch fails the inbound delivery, and the remote server's retry
+  is the only retry. `connectionPool.idleTimeout` defaults to 60 s (`HTTPClient.swift:1383`).
+  Turning pool reuse off was dropped from this spec (decision 17) and is
+  FederatedActivityPublisher#285. The mechanisms found in AHC 1.33.1's source, for that
+  follow-up:
+  - `maximumUsesPerConnection` (`HTTPClient.swift:895`, default `nil`): leasing a connection
+    decrements its remaining uses (`ConnectionPool/State Machine/HTTPConnectionPool+HTTP1Connections.swift:142-143`);
+    a connection returned idle with none left reports `idleAndNoRemainingUses` (`:72-83`), which
+    becomes the idle context's `shouldBeClosed` (`:773-774`); the pool then closes it instead of
+    parking it (`ConnectionPool/State Machine/HTTPConnectionPool+HTTP1StateMachine.swift:446-447,564-593`),
+    and opens a replacement only for queued requests or pre-warming, which defaults to 0
+    (`HTTPClient.swift:1407`).
+  - A request's own `Connection: close`: AHC reads it into the request's framing metadata
+    (`RequestValidation.swift:39`), the HTTP/1.1 connection state machine keeps it as `close`
+    (`ConnectionPool/HTTP1/HTTP1ConnectionStateMachine.swift:201`), and at the response end moves
+    to `.closing` with a `.close` action instead of going idle (`:471-474`).
 - **Live secure-mode acceptance of a regular actor key.** The source has been read
   (`signature_verification.rb:45` onward). The phase 3a secure-mode check is the measurement.
 - **Mastodon internals.** The `items_context_url` path shape, a read of `context` on intake, the
@@ -1851,8 +1807,8 @@ code" means the defect was seen in FAP's source, not in production.
 | Middleware throws with no target bound | §0.1 | None |
 | Missing, empty, unparsable or non-concrete `Content-Type` refused | §0.1 | None. Closes a gap read in the runtime |
 | 10 s search deadline | §3.3 | None. Rests on the documented 29 s API Gateway limit |
-| One 10 s fetch deadline per invocation, shared by every fetch in it | §0.2 | None. Rests on the documented 29 s API Gateway limit. It changes the step 0 deadline control and extends the 10 s search deadline's rule to every fetching handler; added after decision 15, and not itself in decision 15's list |
-| `maximumUsesPerConnection = 1` | §0.2 | None. Removes a lifetime risk read in source (an idle pooled connection across a Lambda freeze). Added after decision 15, and not in its list |
+| ~~One 10 s fetch deadline per invocation, shared by every fetch in it~~ | Dropped | Dropped by decision 17; follow-up FederatedActivityPublisher#284. Each fetch has its own deadline (§0.2) |
+| ~~`maximumUsesPerConnection = 1`~~ | Dropped | Dropped by decision 17; follow-up FederatedActivityPublisher#285. AHC's default pooling stays (Unverified) |
 | Typed schemas refuse a document missing a required field or with a declared field of the wrong JSON type | §0.1 | None. Decision 16 |
 | `repliesCount` failure logged and swallowed | §1.6 | None |
 | Safe-link scheme check and fallback | §2.7 | None. Security control |
@@ -1868,7 +1824,7 @@ code" means the defect was seen in FAP's source, not in production.
 
 ## Decisions (2026-10-20 and 2026-10-21)
 
-The maintainer decided items 1–15 on 2026-10-20 and item 16 on 2026-10-21. Each item states
+The maintainer decided items 1–15 on 2026-10-20 and items 16 and 17 on 2026-10-21. Each item states
 his decision; where his own words are known they are quoted. Section references, function and type names, and anything
 labelled as this spec's are the spec's implementation of the decision, not his words.
 
@@ -2011,7 +1967,23 @@ labelled as this spec's are the spec's implementation of the decision, not his w
       results to callers, who no longer read `[String: Any]` (§0.1 names each call site).
     - Package entries and floors: §0.2, Dependencies.
 
+17. **Two guards outside decision 15.** Decided 2026-10-21, through a structured question that
+    followed the second advisory review of FederatedActivityPublisher#271:
+    - **The shared per-invocation fetch deadline:** dropped. Filed as the follow-up
+      FederatedActivityPublisher#284.
+    - **`maximumUsesPerConnection = 1`:** dropped. In the maintainer's words: "Drop this, but file
+      it as an issue to consider following up on in the future". Filed as
+      FederatedActivityPublisher#285.
+
+    **Implementation (this spec's design, not the maintainer's words):**
+    - Each fetch has its own 10 s deadline; search keeps §3.3's overall deadline. Where sequential
+      fetches can pass the 29 s API Gateway limit, §0.2 ("Fetch deadlines by call site") says so as
+      a known gap and cites #284.
+    - AHC's default connection pooling stays. The stale-connection risk is recorded as unmeasured
+      in Unverified, with the AHC source found for #285.
+    - Both rows in "Guards and fallbacks" are marked dropped.
+
 ## Open questions
 
-None. The three questions the previous revision raised were decided on 2026-10-20 (decision 15),
-and the typed-schema and dependency questions on 2026-10-21 (decision 16).
+None. The questions earlier revisions raised were decided on 2026-10-20 (decision 15) and
+2026-10-21 (decisions 16 and 17).
