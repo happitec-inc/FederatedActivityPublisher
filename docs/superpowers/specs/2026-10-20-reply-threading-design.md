@@ -641,7 +641,21 @@ them.
 | `httpVersion = .http1Only` (`HTTPClient.swift:1428`) | The hook only runs for HTTP/1.1 connections; HTTP/2 has its own `http2ConnectionDebugInitializer` (`HTTPConnectionPool+Factory.swift:114`) | [inferred from source]; the step 0 h2 test measures it (Testing) |
 | `proxy = nil` | Through a proxy, `remoteAddress` is the proxy's | Set explicitly; the spike's clients set it (`config.proxy = nil`) |
 | `redirectConfiguration = .disallow` (`HTTPClient.swift:1351`) | Redirects come back to the middleware, which validates and re-signs each hop | C3 [measured+negative-control]: T2, `.disallow`, the caller gets the 302 and the target gets 0 connections; T2-control, `.follow(max: 3, allowCycles: false)`, the target is contacted |
+| `maximumUsesPerConnection = 1` (`HTTPClient.swift:895`; default `nil`, no limit) | No connection outlives the request it was opened for, so no idle connection sits in the pool across a Lambda freeze, and every fetch opens a new connection that the address hook checks afresh ("No connection reuse", below) | Source, AHC 1.33.1: leasing a connection decrements its remaining uses (`ConnectionPool/State Machine/HTTPConnectionPool+HTTP1Connections.swift:142-143`); a connection returned idle with none left reports `idleAndNoRemainingUses` (`:72-83`), which becomes the idle context's `shouldBeClosed` (`:773-774`); the pool then closes it instead of parking it (`ConnectionPool/State Machine/HTTPConnectionPool+HTTP1StateMachine.swift:446-447,564-593`), and opens a replacement only for queued requests or pre-warming, which defaults to 0 (`HTTPClient.swift:1407`). [inferred from source]; the step 0 "No connection reuse" test measures it |
 | `timeout.connect = .seconds(5)` and `timeout.read = .seconds(10)` (`HTTPClient.swift:1249,1251`) | `connect` bounds connection setup; AHC's default is 10 s (`connectionCreationTimeout`, `HTTPClient.swift:1256-1258`). `read` is an idle timeout: AHC passes it as the request's `idleReadTimeout` (`ConnectionPool/RequestOptions.swift:44`) and restarts it on every response part read (`ConnectionPool/HTTP1/HTTP1ClientChannelHandler.swift:148`); it has no default, so without it a fully stalled body is never ended. Both values are Mastodon's `connect_timeout: 5` and `read_timeout: 10` (`app/lib/request.rb:86`). With the longest caller deadline of 10 s, the worst case for a stalled body is 10 s + 10 s = 20 s, under the 29 s API Gateway limit | The values are a choice. That `read` ends a stalled body is [unverified] until the stall test runs |
+
+**No connection reuse.** With `maximumUsesPerConnection = 1`, the long-lived client never keeps
+an idle connection, so the risk that a pooled keep-alive connection survives a Lambda freeze and
+fails the first fetch after the thaw does not arise: there is no pooled connection to reuse.
+AHC also honours a request's own `Connection: close`: it reads the header into the request's
+framing metadata (`RequestValidation.swift:39`), the HTTP/1.1 connection state machine keeps it
+as `close` for the request (`ConnectionPool/HTTP1/HTTP1ConnectionStateMachine.swift:201`), and at
+the response end moves to `.closing` with a `.close` action instead of going idle (`:471-474`).
+This spec uses the client setting rather than the header, because it is set once when the client
+is built (§0.1, "Set at construction") and does not depend on the middleware adding a header on
+every hop. Fetch targets are mostly distinct hosts, so reuse would buy little. A side benefit:
+every fetch, and every redirect hop, gets a fresh connection, and so a fresh address check.
+Concurrent fetches in one container each get their own connection, as before.
 
 **Address policy: Mastodon's, adopted verbatim.** The policy refuses every address Mastodon's
 `PrivateAddressCheck.private_address?` refuses. Source: `app/lib/private_address_check.rb` in
@@ -745,7 +759,15 @@ used by hand, and a broken archive build is fixed forward. The step 0 PR's CI is
   have retried it. `keyManager.getPublicKey` then throws and the inbound delivery fails
   (`InboxHandler/main.swift:125`). Only keys not already cached in `REMOTE_ACTOR#` (24 h TTL) are
   fetched, and the remote server's own delivery retry is then the only retry.
-- **Release notes:** all three behaviour changes.
+- **One connection per fetch.** `maximumUsesPerConnection = 1` (§0.2): every fetch, and every
+  redirect hop, opens a new connection and closes it after the response.
+- **No connection retries.** `retryConnectionEstablishment = false` (§0.2) applies to every
+  fetch, not only refused addresses. A key fetch whose first connection attempt fails for an
+  ordinary reason, such as a refused or reset connect, now fails at once where AHC's default would
+  have retried it. `keyManager.getPublicKey` then throws and the inbound delivery fails
+  (`InboxHandler/main.swift:125`). Only keys not already cached in `REMOTE_ACTOR#` (24 h TTL) are
+  fetched, and the remote server's own delivery retry is then the only retry.
+- **Release notes:** all of the behaviour changes above.
 - **Tests:** the Step 0 tests under Testing.
 
 ## Phase 1 — Self-replies
@@ -1414,6 +1436,10 @@ Tests (control in brackets):
   without the hook delivers the HTTP request to C.]
 - **Rejected channel is closed:** server C above records the close. [A hook that fails without
   calling `close()` leaves `closes == 0`, as the spike's T1 did.]
+- **No connection reuse:** two fetches in sequence to the same test server, through one
+  client, open 2 connections, and the server records a close after each response. [The
+  production construction with `maximumUsesPerConnection` left at its default, `nil`, opens 1
+  connection for both.]
 - **No connection retries:** a refused address gets exactly 1 connection. [With
   `retryConnectionEstablishment = true`, more than 1, as in the spike's T1b.]
 - **HTTP/1.1 only:** a TLS test server offering `h2` and `http/1.1` by ALPN, on a port the
@@ -1607,11 +1633,9 @@ Phase 3 needs a third-party server, so it is in the manual federation checks bel
   inline. The concurrent "One client" test measures it.
 - **Cancelling a pending body read.** Whether task cancellation ends an AHC body read that is
   waiting for bytes. The stall test measures it; `timeout.read` bounds it either way.
-- **Pooled connections across a Lambda freeze.** The long-lived client keeps idle keep-alive
-  connections in its pool, and a frozen container can thaw after the server has closed them.
-  Whether AHC's pool detects that before reuse, or the first fetch after a long freeze fails, is
-  not known. `connectionPool.idleTimeout` defaults to 60 s (`HTTPClient.swift:1383`). A stage
-  fetch after an idle period longer than the remote server's keep-alive measures it.
+- **One use per connection.** Read in source (§0.2): with `maximumUsesPerConnection = 1`, AHC
+  closes each connection when its response ends instead of pooling it, so no connection outlives
+  its request or a Lambda freeze. The Step 0 "No connection reuse" test measures it.
 - **Live secure-mode acceptance of a regular actor key.** The source has been read
   (`signature_verification.rb:45` onward). The phase 3a secure-mode check is the measurement.
 - **Mastodon internals.** The `items_context_url` path shape, a read of `context` on intake, the
@@ -1637,6 +1661,7 @@ code" means the defect was seen in FAP's source, not in production.
 | Middleware throws with no target bound | §0.1 | None |
 | Missing, empty, unparsable or non-concrete `Content-Type` refused | §0.1 | None. Closes a gap read in the runtime |
 | 10 s search deadline | §3.3 | None. Rests on the documented 29 s API Gateway limit |
+| `maximumUsesPerConnection = 1` | §0.2 | None. Removes a lifetime risk read in source (an idle pooled connection across a Lambda freeze). Added after decision 15, and not in its list |
 | `repliesCount` failure logged and swallowed | §1.6 | None |
 | Safe-link scheme check and fallback | §2.7 | None. Security control |
 | Remote validation (`id`, `attributedTo` host, actor `id`) | §3.3 | None. Matches Mastodon |
