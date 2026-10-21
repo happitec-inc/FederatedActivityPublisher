@@ -50,7 +50,7 @@ an arbitrary URL (`resolve=true` search, §3.3) and adds signed actor fetches in
 a signed-in user controls directly and whose result is returned to that user. Steps 1 and 2 don't
 fetch remote URLs and don't wait.
 
-**Why 3b goes last.** Delivery degrades to unsigned when signing fails (§3.6). Remote replies
+**Why 3b goes last.** Delivery degrades to unsigned when signing fails (§3.8). Remote replies
 therefore work without 3b. Only forwarding to the parent author's followers waits for it.
 
 **Out of scope (decided, see "Decisions"):**
@@ -326,7 +326,7 @@ The maintainer chose to vendor two packages as reference code (decision 13). Wha
 their authors, 2026-10-20: of `mattmassicotte/JSONLD`'s author, "a very known entity in the swift
 community that I'd trust"; of `1amageek/swift-knowledge-graph`'s author, "very reputable developer
 again". That is a statement about the authors, not a review of the code: the code passes the
-same §3.6 gate as code FAP writes. Both packages were read from their repository pages only, and
+same §3.8 gate as code FAP writes. Both packages were read from their repository pages only, and
 their scope below comes from their own READMEs, so it is unverified until that gate runs:
 
 - **`mattmassicotte/JSONLD`** (BSD-3-Clause, no tagged releases).
@@ -342,7 +342,7 @@ their scope below comes from their own READMEs, so it is unverified until that g
 
 Neither package provides RDFC-1.0, so FAP writes its own (decision 13).
 
-**Gaps that apply to any vendored file put to use** [inferred]. These are checked by the §3.6 gate:
+**Gaps that apply to any vendored file put to use** [inferred]. These are checked by the §3.8 gate:
 - **Container definitions.** The Note `@context` FAP emits, and Mastodon's `full_context`, contain
   container definitions (`focalPoint` with `@container: @list`). A parser that rejects
   term-driven container maps may reject exactly the documents FAP signs.
@@ -932,7 +932,7 @@ That follows from decision 11 putting *R* in `cc` at every visibility.
 ### 2.7 Safe links in generated HTML
 
 Every link FAP renders into post HTML from data it didn't author follows one rule. That covers the
-mention `href` (§2.5, §3.5) and the "In reply to" link (§1.8, §3.8).
+mention `href` (§2.5, §3.5) and the "In reply to" link (§1.8, §3.7).
 
 1. **Pick the candidate URL.**
    - For a local account or status, it is the FAP-built URL.
@@ -1132,13 +1132,13 @@ These are the §2.5 rules with a remote *R*.
 **Delete and Update.** `replyAudience` adds the *R* job by `targetActorUri`, so InboxHandler's
 quote-accept Update reaches *R* without SSM access.
 
-### 3.7 Interaction with InboxHandler
+### 3.6 Interaction with InboxHandler
 
 - `handleCreate` keeps dropping non-local `inReplyTo` (`:756-772`).
 - *R*'s reply to FAP's reply is handled by existing code.
 - `handleDelete` and `handleUpdate` gain the §3.1 invalidation.
 
-### 3.8 Client API and web
+### 3.7 Client API and web
 
 - Search returns remote statuses with FAP ids.
 - `in_reply_to_id` is the remote id, and `in_reply_to_account_id` is the remote account id.
@@ -1165,7 +1165,7 @@ quote-accept Update reaches *R* without SSM access.
 
 ## Phase 3b — Linked Data Signatures (decision 10)
 
-### 3.6 Signing remote replies
+### 3.8 Signing remote replies
 
 **Scope.** PostHandler LD-signs every Create it delivers for a **public or unlisted reply whose
 direct parent is remote**. Those are exactly the activities `forward_for_reply` can forward
@@ -1266,7 +1266,9 @@ capability removed before the test counts.
 
 ### Unit (`Tests/ActivityPubCoreTests`, Swift Testing)
 
-**Step 0**, against local test servers, run on Linux as well as macOS.
+**Step 0**, against local test servers. CI runs them on Linux only: PR CI is the `test` job of
+`.github/workflows/test.yml`, on the Linux runner (`:13`). A developer may also run them on
+macOS, but no CI job does.
 
 The harness uses real sockets, not a stub transport, because a stub skips the layer under test.
 
@@ -1371,10 +1373,12 @@ Tests (control in brackets):
   refuses it.]
 - **Request target:** a URI with a query string and percent-encoded characters reaches the test
   server byte for byte. [The same URI through a plain `/{path}` template does not.]
-- **Signing:** a signed fetch carries a `Signature` over `(request-target) host date` that
-  verifies against the actor's public key, and a redirected fetch is signed again with the
-  second hop's path. [An unsigned call carries no `Signature`; reusing the first hop's headers
-  fails verification on the second.]
+- **Signing:** a signed fetch of a URI with a query string carries a `Signature` over
+  `(request-target) host date`, with the query in the request target, that verifies against the
+  actor's public key, and a redirected fetch is signed again with the second hop's path. This
+  also covers #279's `signGet`, so phase 3a has no test of its own for it. [An unsigned call
+  carries no `Signature`; the same signature checked against the path without its query fails;
+  reusing the first hop's headers fails verification on the second.]
 - **One client, concurrent:** two fetches to servers A and B run concurrently through one
   `RemoteFetchClient`, and server A holds its response until B has received its request; each
   reaches its own server. A fetch with no context bound throws the no-target error before any
@@ -1385,11 +1389,9 @@ Tests (control in brackets):
 introduces, so on the step's parent commit they don't compile; that is not a capability-removed
 red, and no blanket parent-commit control is claimed. The control for each test is the case it
 lists as "negative control": an input on the other side of the rule that the same code must
-tell apart, so a test that passes on both sides fails. Two tests come closest to a
-parent-commit run and still don't have one: the `buildNoteJSON` test sets `inReplyToId`, which
-phase 1 adds, so it doesn't compile on the parent; and the `signGet` test exercises #279's
-function, which exists before phase 3a, so on the parent it is expected to pass and acts as a
-regression guard. Phase 1's capability-removed control is the integration tests' run against the
+tell apart, so a test that passes on both sides fails. The test that comes closest to a
+parent-commit run still doesn't have one: the `buildNoteJSON` test sets `inReplyToId`, which
+phase 1 adds, so it doesn't compile on the parent. Phase 1's capability-removed control is the integration tests' run against the
 pre-change stage build (Integration, below). Phase 2 has no integration-level capability-removed
 control: a reply by ULID to another actor's status gets `.notFound` on both builds until a search
 writes the `REF#` pointer (§2.3). Its capability-removed control is the resolver unit test with a
@@ -1438,8 +1440,6 @@ seeded pointer (Phase 2, below).
 **Phase 3a**
 - **Remote id derivation** is stable.
   - Negative control: a one-character difference gives a different id.
-- **`signGet`** covers the query string, and verifies.
-  - Negative controls: a missing query string fails, and a tampered path fails.
 - **Remote validation.** An `id` mismatch, an `attributedTo` host mismatch, a `Tombstone`, an
   unsupported type, and an actor `id` ≠ `attributedTo` each fail. A web URL yields the canonical
   id.
@@ -1592,7 +1592,7 @@ code" means the defect was seen in FAP's source, not in production.
 | `META` deleted when a re-search derives `private` | §3.1 | None. Security control |
 | Never change `visibility` from an Update | §3.1 | None. Security control |
 | Delete/Update invalidation only from the object's origin | §3.1 | None. Security control |
-| Unsigned delivery when LD signing fails | §3.6 | None |
+| Unsigned delivery when LD signing fails | §3.8 | None |
 
 ## Decisions (2026-10-20)
 
@@ -1612,7 +1612,7 @@ labelled as this spec's are the spec's implementation of the decision, not his w
 8. **Visible mention:** a linked `@user@domain` in Mastodon's h-card shape on direct replies to
    others, without duplicating a leading mention (§2.5, §2.7).
 9. **Unreachable remote parent:** refused with 404 (§3.4).
-10. **Linked Data Signatures** are part of phase 3, as step 3b (§3.6).
+10. **Linked Data Signatures** are part of phase 3, as step 3b (§3.8).
 11. **Carried-over self-reply:** `cc` only, no Mention (§2.5).
 12. **Delete and Update reach:** they go to the parent author and the followers union through
     `replyAudience`. That applies to the quote-accept Update now, and to any future delete or edit
@@ -1642,13 +1642,13 @@ labelled as this spec's are the spec's implementation of the decision, not his w
         source URL, the commit, the licence and every local change.
       - Source files only. Nothing from the packages is built, run or added to `Package.swift`
         while vendoring, and their manifests, plugins and scripts are not copied. Upstream tests
-        are source files and come along. Any W3C suite data committed for the §3.6 gate is listed
+        are source files and come along. Any W3C suite data committed for the §3.8 gate is listed
         in `VENDORED.md` with its own licence.
       - The vendoring PR shows the full copied source in its diff, and is reviewed like FAP code.
       - The fetch is limited to these two repositories at the pinned commit.
     - **Other references.** Mastodon's `linked_data_signature.rb` and ruby-rdf's
       `rdf-normalize` are linked from the code as references. Nothing is copied from them.
-    - The gate in §3.6 applies to all of it. Step 3b stays last, because delivery degrades to
+    - The gate in §3.8 applies to all of it. Step 3b stays last, because delivery degrades to
       unsigned.
 
 14. **HTTP client for remote fetches: generated, on an existing transport.** The maintainer's
