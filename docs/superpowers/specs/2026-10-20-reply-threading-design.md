@@ -42,7 +42,7 @@ work. Step 0 also carries the signer that FederatedActivityPublisher#280 asks fo
 shipped the other controls first on the `URLSession` fetch and moved them to a new transport later.
 With the generated client and the AsyncHTTPClient hook decided (decision 14), that would build the
 controls twice, once on a `URLSession` delegate that is then thrown away. Step 0 builds them once,
-in the middleware. Keeping step 0 folded or splitting it back is Open question 3, with both
+in the middleware. Keeping step 0 folded or splitting it back is Open question 2, with both
 options' costs.
 
 **Why 3a waits for 0.** Phase 3a adds a new way for an authenticated user to make the server fetch
@@ -669,7 +669,7 @@ it is bounded by `timeout.read`; whether cancelling the task also ends a pending
 (product `OpenAPIAsyncHTTPClient`), declared `from: "1.5.0"`, its latest release tag
 (github.com/swift-server/swift-openapi-async-http-client/releases/tag/1.5.0, read 2026-10-20).
 It is a new third-party dependency, and it needs the maintainer's explicit approval before
-step 0 builds on it (pending; Open question 4). It follows from the transport choice in decision
+step 0 builds on it (pending; Open question 3). It follows from the transport choice in decision
 14's implementation, which is this spec's design, not the maintainer's words. `swift-server/async-http-client`
 becomes a direct dependency; it is already resolved through `smithy-swift`, and the spike's
 `Package.swift` change left the resolved pins unchanged (#283). `swift-openapi-runtime` and the
@@ -1620,7 +1620,8 @@ labelled as this spec's are the spec's implementation of the decision, not his w
       commit each, whether FAP's code ends up using them or only learns from them.
     - **Credit, prominently.** Both authors are listed as contributors: in a new
       `CONTRIBUTORS.md`, and in an Acknowledgements section in `README.md` that links both
-      packages (this spec's reading of "list them as contributors"; Open question 2). This
+      packages. The maintainer confirmed this reading of "list them as contributors" on 2026-10-20:
+      "yes". This
       applies whether the vendored files are in use or were only inspiration. FAP source
       informed by them links to the vendored file it follows. The wording credits their work
       and doesn't suggest they endorse FAP (BSD-3-Clause clause 3).
@@ -1701,10 +1702,7 @@ labelled as this spec's are the spec's implementation of the decision, not his w
      result; the `timeout.connect`/`timeout.read` and transport backstops; the read-time `ttl`
      comparison; and ignoring legacy `inReplyTo`. Should any of these be dropped, or kept only
      once a failure is observed?
-2. **"List them as contributors."** This spec reads it as a new `CONTRIBUTORS.md` plus a README
-   Acknowledgements section (decision 13). Confirm, or name another place (for example GitHub's
-   co-author trailers on the vendoring commit).
-3. **Step 0: keep it folded, or split it back?**
+2. **Step 0: keep it folded, or split it back?**
    - **a. Keep it folded** (this revision). The controls are built once, in the AsyncHTTPClient
      middleware. The change is bigger: a new package entry, the generator plugin in the Lambda
      build for the first time, AsyncHTTPClient linked into all 19 handlers, and a dependency on
@@ -1715,5 +1713,5 @@ labelled as this spec's are the spec's implementation of the decision, not his w
      ship first on the existing `URLSession` fetch; AsyncHTTPClient and the address check follow.
      The controls that live in a `URLSession` delegate are then built twice, once there and once in
      the middleware.
-4. **New dependency.** `swift-server/swift-openapi-async-http-client` is a new third-party
+3. **New dependency.** `swift-server/swift-openapi-async-http-client` is a new third-party
    dependency (§0.2, Dependencies). Step 0 as written needs it. Approve it, or not.
