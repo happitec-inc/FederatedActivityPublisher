@@ -443,11 +443,15 @@ Resources:
               Action:
                 - ssm:GetParameter
                 - ssm:GetParameters
-                - ssm:GetParametersByPath
               Resource:
                 - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/activity/${Stage}/keys/session-signing-key"
                 - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/activity/${Stage}/keys/jwt-signing-key"
                 - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/activity/${Stage}/keys/client-token"
+            # A path read is authorized on the path, not on each leaf, so the leaf Deny can't cover it;
+            # the inbox reads one actor key by name and never needs path reads
+            - Effect: Deny
+              Action: ssm:GetParametersByPath
+              Resource: "*"
       Events:
         PostInbox:
           Type: Api
