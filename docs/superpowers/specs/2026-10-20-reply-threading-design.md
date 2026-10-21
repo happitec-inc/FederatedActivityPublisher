@@ -518,15 +518,14 @@ the maintainer's, and everything here is this spec's.
 - **Per-call context.** `fetchRemoteObject` and `fetchRemoteActor` each bind one `@TaskLocal`
   value, `RemoteFetchContext {target: URL, signer: FetchSigningKey?, deadline:
   ContinuousClock.Instant, schemePolicy: SchemePolicy}`, for the duration of the call. The
-  middleware reads all four. `deadline` is the instant the caller passes for that fetch
-  (§0.2, "Fetch deadlines by call site").
-  The runtime gives middleware no other per-call channel:
-  `intercept(_:body:baseURL:operationID:next:)` and `next:
-  @Sendable (HTTPRequest, HTTPBody?, URL)` carry only the request, body, base URL and operation id
-  (`apple/swift-openapi-runtime`, `Sources/OpenAPIRuntime/Interface/ClientTransport.swift`).
-  `UniversalClient.send` awaits the middleware chain inline with no new `Task`, so the binding is
-  visible in the middleware and isolated per task, which concurrent fetches on the one client
-  rely on [inferred from source; the concurrent "One client" test measures it].
+  middleware reads all four. `deadline` is the instant the caller passes for that fetch (§0.2,
+  "Fetch deadlines by call site"). The runtime gives middleware no other per-call channel:
+  `intercept(_:body:baseURL:operationID:next:)` and `next: @Sendable (HTTPRequest, HTTPBody?, URL)`
+  carry only the request, body, base URL and operation id (`apple/swift-openapi-runtime`,
+  `Sources/OpenAPIRuntime/Interface/ClientTransport.swift`). `UniversalClient.send` awaits the
+  middleware chain inline with no new `Task`, so the binding is visible in the middleware and
+  isolated per task, which concurrent fetches on the one client rely on [inferred from source; the
+  concurrent "One client" test measures it].
 - **Why a TaskLocal and not a header parameter.** A declared header (`X-Fap-Target`) would show
   the target in the generated call's signature, but it puts a non-wire header in the document and
   the middleware would still need the signer, deadline and policy from somewhere else; a single
@@ -582,15 +581,16 @@ the maintainer's, and everything here is this spec's.
 - **One middleware.** `RemoteFetchMiddleware` does the whole exchange, so there is no separate
   URL-rewrite middleware and no FAP transport:
   1. Throw if no context is bound, so the placeholder origin is never contacted.
-  2. For each hop (the initial request plus at most 3 redirects): throw the deadline error,
-     before connecting, if the context's deadline has passed; check the hop's scheme against
+  2. For each hop (the initial request plus at most 3 redirects): throw the deadline error, before
+     connecting, if the context's deadline has passed; check the hop's scheme against
      `schemePolicy`; set the base URL to the hop's origin and the request's path and query to the
      hop's, byte for byte (`HTTPRequest.path` is the `:path` pseudo-header, path plus query, in
-     `apple/swift-http-types`); with a signer, add the headers from `HTTPSignature.signGet` using that path-and-query and the
-     `host[:port]`, as #279's `KeyManager.actorDocumentRequest(url:signingKey:)` does; call
-     `next` under the remaining time.
+     `apple/swift-http-types`); with a signer, add the headers from `HTTPSignature.signGet` using
+     that path-and-query and the `host[:port]`, as #279's
+     `KeyManager.actorDocumentRequest(url:signingKey:)` does; call `next` under the remaining time.
   3. On a 3xx with a `Location`, discard the body, resolve `Location` against the hop's URL and
-     loop. A 4th redirect throws.
+     loop; a `Location` that doesn't resolve to an absolute URL throws `invalidURI`. A 4th
+     redirect throws.
   4. On any other response, require status 200, or throw the status error. Then read the
      `Content-Type` as the runtime does, `headerFields[.contentType]` parsed with
      `OpenAPIMIMEType(_:)` (`Converter+Common.swift:30-33`), and require that it parses to a
@@ -708,12 +708,10 @@ the maintainer's, and everything here is this spec's.
 - **Stricter than Mastodon on multi-profile `ld+json`.** Mastodon's
   `valid_activitypub_content_type?` splits the quoted `profile` value on whitespace and accepts it
   when any entry is the AS profile (`str[9...-1].split.include?(…)` in
-  `JsonLdHelper#valid_activitypub_content_type?`).
-  The middleware, like `OpenAPIMIMEType.evaluate`, compares the whole parameter value, so FAP
-  rejects an
-  `application/ld+json` whose `profile` lists the AS profile beside another one. This spec keeps
-  that difference rather than adding a profile parser; a remote server that sends only such a value
-  cannot be fetched by FAP.
+  `JsonLdHelper#valid_activitypub_content_type?`). The middleware, like `OpenAPIMIMEType.evaluate`,
+  compares the whole parameter value, so FAP rejects an `application/ld+json` whose `profile` lists
+  the AS profile beside another one. This spec keeps that difference rather than adding a profile
+  parser; a remote server that sends only such a value cannot be fetched by FAP.
 - **Errors arrive wrapped.** The runtime wraps every error thrown by the transport, by a middleware
   or while decoding the response in `ClientError` (`Interface/UniversalClient.swift:94-185`). For
   transport and middleware failures it puts the original error in `underlyingError`
@@ -721,9 +719,8 @@ the maintainer's, and everything here is this spec's.
   the body wrapper's size or deadline error, the error itself (`UniversalClient.swift:119-126`;
   `Errors/ClientError.swift:71`). `fetchRemoteObject` and `fetchRemoteActor` unwrap
   `ClientError.underlyingError` before mapping to their own error cases, and the Step 0 tests
-  assert on the unwrapped case. A failure in
-  the generated decode step is a `ClientError` with `response` set whose underlying error is not
-  one of FAP's, and its two causes can be told apart:
+  assert on the unwrapped case. A failure in the generated decode step is a `ClientError` with
+  `response` set whose underlying error is not one of FAP's, and its two causes can be told apart:
   - **An invalid document.** The runtime's JSON body decode, `getResponseBodyAsJSON`
     (`Conversion/Converter+Client.swift:315-327`), ends in `convertJSONToBodyCodable`, which calls
     `decoder.decode(T.self, from: data)` (`Conversion/CurrencyExtensions.swift:140-143`) and so
@@ -761,11 +758,12 @@ the maintainer's, and everything here is this spec's.
   refuse, and it replaces the two separate cases, `undocumentedStatus` and `decodeFailed`, an
   earlier revision had for that purpose (Testing).
 - **The error type.** `fetchRemoteObject` and `fetchRemoteActor` throw one public enum,
-  `RemoteFetchError: Error, Sendable`, which replaces today's `FetchRemoteObjectError`
+  `RemoteFetchError: Error`, which replaces today's `FetchRemoteObjectError`
   (`FetchRemoteObject.swift:19-26`, used nowhere else in `Sources/` or `Tests/`). Every other
   section names these cases by their meaning ("the deadline error" and so on); this is the one
   declaration:
-  - `invalidURI(String)`: the URI does not parse as an absolute URL.
+  - `invalidURI(String)`: the URI, or a redirect's `Location` resolved against its hop, does not
+    parse as an absolute URL.
   - `noContext`: the middleware ran with no `RemoteFetchContext` bound ("the no-target error").
   - `schemeRefused(URL)`: a hop's scheme is not admitted by the scheme policy ("the scheme
     error").
@@ -784,8 +782,10 @@ the maintainer's, and everything here is this spec's.
     middleware passed (below).
   - `transportFailed(underlying: any Error)`: the connection, TLS or AHC failed (below).
 
-  `UndocumentedStatusError(statusCode:)`, the underlying error for an undocumented status, is
-  `internal`. `KeyManager.fetchActorDocument` lets these errors through unchanged.
+  It needs no separate `Sendable` conformance: in Swift 6 `Error` refines it
+  (`public protocol Error: Sendable`, swiftlang/swift `stdlib/public/core/ErrorType.swift` at tag
+  `swift-6.0-RELEASE`, read 2026-10-21). `UndocumentedStatusError(statusCode:)`, the underlying
+  error for an undocumented status, is `internal`. `KeyManager.fetchActorDocument` lets these errors through unchanged.
 - **The generated client is `internal`** (`accessModifier: internal` in
   `openapi-generator-config.yaml`). Only `fetchRemoteObject`, `fetchRemoteActor` and the two
   document structs are public.
@@ -1584,15 +1584,15 @@ macOS, but no CI job does.
 
 The harness uses real sockets, not a stub transport, because a stub skips the layer under test.
 
-- **Test servers.** Written in the test target on SwiftNIO, as the spike's is (#283): listening
-  on `127.0.0.1:0`, counting connections, bytes received and closes. They serve fixed responses,
+- **Test servers.** Written in the test target on SwiftNIO, as the spike's is (#283): listening on
+  `127.0.0.1:0`, counting connections, bytes received and closes. They serve fixed responses,
   redirects, oversize bodies, a slow drip and a stall. `NIOCore`, `NIOPosix`, `NIOSSL` and
   `NIOHTTP2` are already resolved through `async-http-client` (its `Package.swift` depends on
-  `swift-nio-ssl` and `swift-nio-http2`). They become direct dependencies of the test target
-  only (decision 16). That needs package entries for `swift-nio`, `swift-nio-ssl` and
-  `swift-nio-http2` (§0.2, Dependencies), but no package that isn't already resolved. None of them
-  pulls `libxml2-dev` or `libicu-dev` onto the runner, which
-  crashes `FoundationNetworking` test binaries.
+  `swift-nio-ssl` and `swift-nio-http2`). They become direct dependencies of the test target only
+  (decision 16). That needs package entries for `swift-nio`, `swift-nio-ssl` and `swift-nio-http2`
+  (§0.2, Dependencies), but no package that isn't already resolved. None of them pulls
+  `libxml2-dev` or `libicu-dev` onto the runner, which crashes `FoundationNetworking` test
+  binaries.
 - **TLS.** The TLS server uses `NIOSSLServerHandler` with a certificate from a test-only CA. The
   CA and the leaf (for `127.0.0.1` and `localhost`, long validity) are committed test fixtures,
   generated once with `openssl`; they are not secrets. The test client sets the CA as
@@ -1603,16 +1603,16 @@ The harness uses real sockets, not a stub transport, because a stub skips the la
 - **Shutdown.** Every client a test builds, test, control and bare, runs inside
   `withTestClient(_:body:)` and is shut down on every exit path (§0.1, AHC's debug `deinit`
   precondition).
-- **The negative control removes one capability.** For a check the middleware owns (scheme, redirect
-  count, body cap, content type, status, deadline), the control is the production construction with
-  that one check switched off, everything else unchanged. The switch is an `internal` option set on
-  `RemoteFetchMiddleware`'s initializer, defaulted to every check, so production code can't reach it
-  and tests set it through `@testable import ActivityPubCore`. For a setting of the `HTTPClient`
-  (hook, close, retries, HTTP version, trust), the control is the production construction with that
-  one setting changed. The test asserts the control gets the response the FAP client refuses or, where the generated
-  layer behind the middleware refuses the same input (undeclared concrete content types, statuses
-  other than 200), that the refusal now comes from that layer, with its error, and not from the
-  middleware.
+- **The negative control removes one capability.** For a check the middleware owns (scheme,
+  redirect count, body cap, content type, status, deadline), the control is the production
+  construction with that one check switched off, everything else unchanged. The switch is an
+  `internal` option set on `RemoteFetchMiddleware`'s initializer, defaulted to every check, so
+  production code can't reach it and tests set it through `@testable import ActivityPubCore`. For a
+  setting of the `HTTPClient` (hook, close, retries, HTTP version, trust), the control is the
+  production construction with that one setting changed. The test asserts the control gets the
+  response the FAP client refuses or, where the generated layer behind the middleware refuses the
+  same input (undeclared concrete content types, statuses other than 200), that the refusal now
+  comes from that layer, with its error, and not from the middleware.
 - **The bare client is a fixture check, not a control.** The same request through an
   `HTTPClient` with AHC defaults and no generated layer or middleware, called with `execute`,
   shows that the test server serves what the test claims. It runs beside the control and does
@@ -1729,18 +1729,17 @@ Tests (control in brackets):
   connection. [A test-only middleware variant that keeps the target in a stored property on the
   shared middleware sends one fetch to the wrong server.]
 
-**Phases 1 to 3b: what the controls are.** Most tests below exercise symbols their step
-introduces, so on the step's parent commit they don't compile; that is not a capability-removed
-red, and no blanket parent-commit control is claimed. The control for each test is the case it
-lists as "negative control": an input on the other side of the rule that the same code must
-tell apart, so a test that passes on both sides fails. The test that comes closest to a
-parent-commit run still doesn't have one: the `buildNoteJSON` test sets `inReplyToId`, which
-phase 1 adds, so it doesn't compile on the parent. Phase 1's capability-removed control is the
-integration tests' run against the
-pre-change stage build (Integration, below). Phase 2 has no integration-level capability-removed
-control: a reply by ULID to another actor's status gets `.notFound` on both builds until a search
-writes the `REF#` pointer (§2.3). Its capability-removed control is the resolver unit test with a
-seeded pointer (Phase 2, below).
+**Phases 1 to 3b: what the controls are.** Most tests below exercise symbols their step introduces,
+so on the step's parent commit they don't compile; that is not a capability-removed red, and no
+blanket parent-commit control is claimed. The control for each test is the case it lists as
+"negative control": an input on the other side of the rule that the same code must tell apart, so a
+test that passes on both sides fails. The test that comes closest to a parent-commit run still
+doesn't have one: the `buildNoteJSON` test sets `inReplyToId`, which phase 1 adds, so it doesn't
+compile on the parent. Phase 1's capability-removed control is the integration tests' run against
+the pre-change stage build (Integration, below). Phase 2 has no integration-level
+capability-removed control: a reply by ULID to another actor's status gets `.notFound` on both
+builds until a search writes the `REF#` pointer (§2.3). Its capability-removed control is the
+resolver unit test with a seeded pointer (Phase 2, below).
 
 **Phase 1**
 - **`buildNoteJSON`** emits `inReplyTo` when `inReplyToId` is set.
@@ -1964,8 +1963,8 @@ code" means the defect was seen in FAP's source, not in production.
 
 The maintainer decided items 1–15 on 2026-10-20 and items 16 and 17 on 2026-10-21. Each item states
 his decision; where his own words are known they are quoted. Section references, function and type
-names, and anything
-labelled as this spec's are the spec's implementation of the decision, not his words.
+names, and anything labelled as this spec's are the spec's implementation of the decision, not his
+words.
 
 1. **Scope: all replies.** Self, other local actors and remote statuses, each shippable on its own.
 2. **`replies` collection:** a follow-up.
