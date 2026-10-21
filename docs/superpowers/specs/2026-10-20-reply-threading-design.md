@@ -42,7 +42,8 @@ work. Step 0 also carries the signer that FederatedActivityPublisher#280 asks fo
 shipped the other controls first on the `URLSession` fetch and moved them to a new transport later.
 With the generated client and the AsyncHTTPClient hook decided (decision 14), that would build the
 controls twice, once on a `URLSession` delegate that is then thrown away. Step 0 builds them once,
-in the middleware.
+in the middleware. Keeping step 0 folded or splitting it back is Open question 3, with both
+options' costs.
 
 **Why 3a waits for 0.** Phase 3a adds a new way for an authenticated user to make the server fetch
 an arbitrary URL (`resolve=true` search, §3.3) and adds signed actor fetches in `DeliverHandler`
@@ -65,8 +66,10 @@ therefore work without 3b. Only forwarding to the parent author's followers wait
 
 ## Standards
 
-All sources were fetched 2026-10-20. Mastodon source references are to `mastodon/mastodon` branch
-`main` on that date, so line numbers may drift.
+All sources were fetched 2026-10-20. Mastodon source references are to `mastodon/mastodon`
+`main` as of 2026-10-20, whose head that day was commit `2c540e458d6bb99ecb7729aec82078fc3dd2e175`
+(github.com/mastodon/mastodon/commits/main, read 2026-10-20). References into
+`app/helpers/json_ld_helper.rb` name the method or constant in `JsonLdHelper` rather than a line.
 
 ### ActivityStreams 2.0 Vocabulary
 
@@ -171,8 +174,8 @@ No FEP covers self-threads specifically. FEP-76ea is the closest.
   ```
 
   - `url` is `TagManager#url_for(account)`. For a remote account, it is `nil` unless the URL's
-    scheme is `http` or `https` (`tag_manager.rb:18-19`; `unsupported_uri_scheme?`,
-    `app/helpers/json_ld_helper.rb:95-97`).
+    scheme is `http` or `https` (`tag_manager.rb:18-19`; `JsonLdHelper#unsupported_uri_scheme?`,
+    `app/helpers/json_ld_helper.rb`).
   - Both values are HTML-escaped with `h()`.
   - `display_username` is `pretty_acct` when `with_domain` is set. For a remote account,
     `pretty_acct` is `username@domain`, where `domain` is the account's WebFinger domain. For a
@@ -203,9 +206,9 @@ No FEP covers self-threads specifically. FEP-76ea is the closest.
 - **Signature on receipt.** `@json = compact(@json) if @json['signature'].is_a?(Hash)`
   (`app/services/activitypub/process_activity_service.rb:24`).
   - The signature is kept only if `safe_for_forwarding?` holds after `patch_for_forwarding!`
-    (`:59-66`; `json_ld_helper.rb:184-235`).
+    (`:59-66`; `JsonLdHelper#patch_for_forwarding!`, `#safe_for_forwarding?`).
   - That requires every original key to survive compaction against `full_context`
-    (`json_ld_helper.rb:125-129`; `app/helpers/context_helper.rb:75-76`).
+    (`JsonLdHelper#compact`; `app/helpers/context_helper.rb:75-76`).
 - **Verification.** Forward recipients verify the LD signature (`process_activity_service.rb:36-48,89-94`).
 - **Acceptance.** A forwarded copy is accepted where a local account follows the replied-to
   account (`create.rb:464-479`).
@@ -220,11 +223,11 @@ No FEP covers self-threads specifically. FEP-76ea is the closest.
   - **Context:** `https://w3id.org/security/v1` is appended to `@context` and `uniq!`ed
     (`:56-59`), so it is a no-op when already present.
 - **`verify_actor!`** (`:12-37`):
-  - It rejects `@graph`, `@included` and `@reverse` (`json_ld_helper.rb:6,155-161`).
+  - It rejects `@graph`, `@included` and `@reverse` (`JsonLdHelper::UNSUPPORTED_JSONLD_KEYWORDS`, `#unsupported_jsonld_features?`).
   - It requires `type == "RsaSignature2017"`.
   - It rejects an `expires` in the past *if one is present* (`:22`). `expires` isn't required.
 - **Canonicalization:** `RDF::Graph.new << JSON::LD::API.toRdf(json, documentLoader: …)`, dumped
-  as `:normalize` (`json_ld_helper.rb:120-123`).
+  as `:normalize` (`JsonLdHelper#canonicalize`).
   - Gem versions: `json-ld` 3.3.2, `json-ld-preloaded` 3.3.2, `rdf-normalize` 0.7.0
     (`Gemfile:101-103`; `Gemfile.lock:369,377,709`).
   - `rdf-normalize` 0.7.0 defaults to RDFC-1.0: `options.fetch(:algorithm, :rdfc10)`
@@ -236,7 +239,7 @@ No FEP covers self-threads specifically. FEP-76ea is the closest.
     - `config/initializers/json_ld_security.rb:5`, aliased at `:49`
   - `json-ld-preloaded` provides `activitystreams` (`ruby-rdf/json-ld-preloaded`,
     `lib/json/ld/preloaded/activitystreams.rb:6`).
-  - `load_jsonld_context` (`json_ld_helper.rb:388-402`) fetches other contexts and caches them
+  - `JsonLdHelper#load_jsonld_context` fetches other contexts and caches them
     for 30 days.
 - **The live URL is dead.** `https://w3id.org/identity/v1` redirects to
   `web-payments.org/contexts/identity-v1.jsonld`, which refused connections on 2026-10-20.
@@ -268,8 +271,9 @@ contains no `visibility` handling.
 - Visibility from the audience (`app/lib/activitypub/parser/status_parser.rb:101-111`).
 
 **How Mastodon fetches.**
-- `fetch_resource` requires `json['id'] == uri` (`json_ld_helper.rb:242-252`).
-- **Response checks:** status 200 and an AP content type (`:281,351` onward), a 1 MB body
+- `JsonLdHelper#fetch_resource` requires `json['id'] == uri`.
+- **Response checks:** status 200 and an AP content type (`JsonLdHelper#fetch_resource_without_id_validation`,
+  `#valid_activitypub_content_type?`), a 1 MB body
   (`app/lib/request.rb:293-294`), and at most 3 redirect hops (`:101-102`).
 - Each request it sends is signed (`:72-75`).
 - Private addresses are rejected per connection (`:325-334,389-394`).
@@ -277,7 +281,9 @@ contains no `visibility` handling.
   with `attributedTo` read through `value_or_id(first_of_value(...))` (`:29`).
 - **Types:** `Note` and `Question` are supported, and `Image`, `Audio`, `Video`, `Article`, `Page`
   and `Event` are converted (`app/lib/activitypub/activity.rb:9-10`).
-- **Actors:** the `id` must equal the requested URI (`fetch_remote_actor_service.rb:16`).
+- **Actors:** the `id` must equal the requested URI. `FetchRemoteActorService` fetches with
+  `fetch_resource(uri, true, …)` (`fetch_remote_actor_service.rb:18`), and the comparison
+  `json['id'] == uri` is in `JsonLdHelper#fetch_resource`.
 
 **Search and URL resolution.**
 - **Docs** (https://docs.joinmastodon.org/methods/search/):
@@ -461,11 +467,11 @@ where FAP is stricter:
 
 | Control | Requirement | Where it lives | Reference |
 |---|---|---|---|
-| Scheme | `https` on the initial URI and every hop | Middleware | Stricter than Mastodon, which allows `http` (`json_ld_helper.rb:95-97`) |
+| Scheme | `https` on the initial URI and every hop | Middleware | Stricter than Mastodon, which allows `http` (`JsonLdHelper#unsupported_uri_scheme?`) |
 | Redirects | At most 3 hops, each validated and, with a signer, re-signed | Middleware; AHC follows none | `request.rb:101-102,72-75` |
 | Body | 1 MB cap. Abort the read past it. | Middleware | `request.rb:293-294` |
-| Content type | A concrete received type that is `application/activity+json`, or `application/ld+json` with the AS profile | Generated client, plus the middleware's concrete-type check (§0.1) | `json_ld_helper.rb:281,351` onward. Stricter than Mastodon on a multi-profile `ld+json` value (§0.1) |
-| Status | Only 200 counts as success | Generated client | `json_ld_helper.rb:281` |
+| Content type | The received `Content-Type` parses with the runtime's own `OpenAPIMIMEType` to a concrete type that matches a declared type: `application/activity+json`, or `application/ld+json` with the AS profile. Anything else is refused: missing, empty, unparsable or wildcard | Middleware (§0.1), with the generated client's match behind it | `JsonLdHelper#fetch_resource_without_id_validation`, `#valid_activitypub_content_type?`. Stricter than Mastodon on a multi-profile `ld+json` value (§0.1) |
+| Status | Only 200 counts as success | Middleware, with the generated client's `.undocumented` case behind it | `JsonLdHelper#fetch_resource_without_id_validation` (`response.code == 200`) |
 | Deadline | An absolute deadline from the caller, enforced even while bytes keep arriving | Middleware | Platform limits |
 | Address | Reject loopback, private (RFC 1918 / ULA), link-local and unspecified addresses, applied to the address actually connected to, on every connection | `HTTPClient` connection hook | `request.rb:325-334,389-394` |
 
@@ -532,10 +538,14 @@ maintainer's, and everything here is this spec's.
      `next` under the remaining time.
   3. On a 3xx with a `Location`, discard the body, resolve `Location` against the hop's URL and
      loop. A 4th redirect throws.
-  4. On any other response, require a `Content-Type` header whose media type is concrete: a
-     missing header, `*/*` or a partial wildcard such as `text/*` throws the content-type error
-     (the runtime accepts all three, below). Then return the response with its body wrapped in a
-     sequence that throws past 1 MB and past the deadline.
+  4. On any other response, require status 200, or throw the status error. Then read the
+     `Content-Type` as the runtime does, `headerFields[.contentType]` parsed with
+     `OpenAPIMIMEType(_:)` (`Converter+Common.swift:30-33`), and require that it parses to a
+     `.concrete` kind and matches a declared type (below). Anything else throws the content-type
+     error: a missing header, an empty value, a value that doesn't parse (`html`, `*/html`,
+     `text/html/x`), `*/*`, a partial wildcard such as `text/*`, and an undeclared concrete type.
+     Then return the response with its body wrapped in a sequence that throws past 1 MB and past
+     the deadline.
 - **Response decoding.** The document declares the 200 response as `type: object` with no
   properties, which the generator maps to `OpenAPIRuntime.OpenAPIObjectContainer`
   (`_OpenAPIGeneratorCore/Translator/TypeAssignment/TypeMatcher.swift:321-326`, generator 1.11.1).
@@ -545,25 +555,41 @@ maintainer's, and everything here is this spec's.
   (`FetchRemoteObject.swift:36-58`) by walking it, dropping JSON `null`s. The bytes are parsed
   once; there is no re-encode and second `JSONSerialization` pass. A typed schema is not used,
   because JSON-LD lets a value and a one-element array stand for each other.
-- **Content type and status: one check each.** The generated client picks the response case
-  with `converter.bestContentType(received:options:)`, which throws
-  `RuntimeError.unexpectedContentTypeHeader` when every option is `.incompatible`
-  (`Converter+Common.swift:43-76`, runtime 1.11.0). `OpenAPIMIMEType.evaluate` makes a parameter
-  in the option that is missing from the received type incompatible, ignores extra received
-  parameters, and compares values case-sensitively. So with the two documented types, a bare
-  `application/ld+json` is rejected and `application/activity+json; charset=utf-8` is accepted.
-  FAP doesn't repeat that check for concrete types. It does not cover non-concrete ones:
-  `bestContentType` returns the first option when no type was received *or* the received type
-  is not concrete (`guard let received, case let .concrete(...) = received.kind else { return
-  options[0] }`, `:45-52`; a partial wildcard such as `text/*` is treated as `*/*`, per the
-  comment at `:48-51`). So a missing header, `*/*` and `text/*` would all be read as
-  `application/activity+json`. The middleware's concrete-type check (step 4 above) closes those
-  three. A status not in the document comes back as the generated `.undocumented` case, which
-  `fetchRemoteObject` turns into its status error.
+- **Content type and status: the middleware checks, the generated layer stands behind.**
+  - **Parsing.** `OpenAPIMIMEType` is declared `@_spi(Generated) public struct`
+    (`Base/OpenAPIMIMEType.swift:22`, runtime 1.11.0), so the middleware imports it with
+    `@_spi(Generated) import OpenAPIRuntime`, as generated code does. `init?(_:)` splits the value
+    on `;` and returns `nil` when nothing is left, as for an empty value, or when the first part
+    is not a valid kind (`:123-130`). `Kind.init?(_:)` returns `nil` unless that part splits on
+    `/` into exactly two parts, and for a `*` type with a subtype other than `*` (`:97-107`). So
+    `html`, `*/html` and `text/html/x` don't parse. Reading the header with the runtime's own
+    parser means the middleware and the generated client see the same value.
+  - **Matching.** The runtime's matcher, `OpenAPIMIMEType.evaluate`, is `internal` (`:206-251`),
+    so the middleware applies its rule for a concrete received type itself. Type and subtype
+    compare case-insensitively. Every parameter of the declared type must be present in the
+    received one, with parameter names compared case-insensitively and values case-sensitively.
+    Extra received parameters are ignored (`:217-249`). With the two declared types, a bare
+    `application/ld+json` is refused and `application/activity+json; charset=utf-8` is accepted.
+  - **Why the middleware owns it.** The runtime's match covers concrete received types only.
+    `extractContentTypeIfPresent` returns `nil` both for a missing header and for one that doesn't
+    parse (`Converter+Common.swift:30-33`). `bestContentType` returns the first option when it gets
+    `nil` *or* a non-concrete type (`guard let received, case let .concrete(...) = received.kind
+    else { return options[0] }`, `:45-53`; a partial wildcard is treated as `*/*`, per the comment
+    at `:48-51`). So without the middleware, a missing, empty, unparsable or wildcard
+    `Content-Type` would be read as `application/activity+json`. Owning the whole check also gives
+    the middleware one switch for the test's negative control (Testing). The runtime's match still
+    runs behind it and refuses the same undeclared concrete types: `bestContentType` throws
+    `RuntimeError.unexpectedContentTypeHeader` when every option is `.incompatible` (`:43-76`).
+  - **Status.** The middleware refuses any final status other than 200 with its status error. A
+    status not in the document also comes back from the generated client as the `.undocumented`
+    case, which `fetchRemoteObject` turns into a separate `undocumentedStatus` error, so a test can
+    tell which layer refused.
 - **Stricter than Mastodon on multi-profile `ld+json`.** Mastodon's
   `valid_activitypub_content_type?` splits the quoted `profile` value on whitespace and accepts it
-  when any entry is the AS profile (`json_ld_helper.rb:344-354`, the split at `:352`).
-  `OpenAPIMIMEType.evaluate` compares the whole parameter value, so FAP rejects an
+  when any entry is the AS profile (`str[9...-1].split.include?(…)` in
+  `JsonLdHelper#valid_activitypub_content_type?`).
+  The middleware, like `OpenAPIMIMEType.evaluate`, compares the whole parameter value, so FAP
+  rejects an
   `application/ld+json` whose `profile` lists the AS profile beside another one. This spec keeps
   that difference rather than adding a profile parser; a remote server that sends only such a value
   cannot be fetched by FAP.
@@ -573,11 +599,23 @@ maintainer's, and everything here is this spec's.
   (`Errors/RuntimeError.swift:77-83`), and for a non-runtime error thrown while decoding, such as
   the body wrapper's size or deadline error, the error itself (`UniversalClient.swift:119-126`;
   `Errors/ClientError.swift:71`). `fetchRemoteObject` unwraps `ClientError.underlyingError` before
-  mapping to its own error cases, and the Step 0 tests assert on the unwrapped case. The runtime's
-  own error type is `internal` (`Errors/RuntimeError.swift:23`), so a failure in the generated
-  decode step (a `ClientError` with `response` set whose underlying error is not one of FAP's) can't
-  be told apart by case: `fetchRemoteObject` maps it to one decode error that covers both a refused
-  content type and invalid JSON.
+  mapping to its own error cases, and the Step 0 tests assert on the unwrapped case. A failure in
+  the generated decode step is a `ClientError` with `response` set whose underlying error is not
+  one of FAP's, and its two causes can be told apart:
+  - **Invalid JSON.** The runtime's JSON body decode, `getResponseBodyAsJSON`
+    (`Conversion/Converter+Client.swift:315-327`), ends in `convertJSONToBodyCodable`, which calls
+    `decoder.decode(T.self, from: data)` (`Conversion/CurrencyExtensions.swift:140-143`) and so
+    throws Swift's `DecodingError`. That is not a `RuntimeError`, so `makeError` puts it in
+    `underlyingError` unchanged (`UniversalClient.swift:123-126`).
+  - **A content type the runtime refuses.** `RuntimeError.unexpectedContentTypeHeader`
+    (`Errors/RuntimeError.swift:46`) has a `nil` `underlyingError` (`:77-83`), so `makeError`
+    puts the `RuntimeError` itself there (`UniversalClient.swift:120-122`). `RuntimeError` is
+    `internal` (`:23`), so FAP can't match its case.
+
+  `fetchRemoteObject` tests `underlyingError is DecodingError`: if it is, it throws its
+  `invalidJSON` error; any other non-FAP decode-step error becomes its `decodeFailed` error. With
+  the middleware's content-type check in place, a refused content type never reaches the runtime's
+  match; with that check switched off, it surfaces as `decodeFailed` (Testing).
 - **The generated client is `internal`** (`accessModifier: internal` in
   `openapi-generator-config.yaml`). It is generated inside `ActivityPubCore`, beside
   `fetchRemoteObject`, `HTTPSignature` and `FetchSigningKey`; a separate target would need those
@@ -630,8 +668,9 @@ it is bounded by `timeout.read`; whether cancelling the task also ends a pending
 **Dependencies.** One new package entry, `swift-server/swift-openapi-async-http-client`
 (product `OpenAPIAsyncHTTPClient`), declared `from: "1.5.0"`, its latest release tag
 (github.com/swift-server/swift-openapi-async-http-client/releases/tag/1.5.0, read 2026-10-20).
-It is new to FAP's dependency graph and is a third-party package; it follows from decision 14
-as set out there, and the step 0 PR's review covers it. `swift-server/async-http-client`
+It is a new third-party dependency, and it needs the maintainer's explicit approval before
+step 0 builds on it (pending; Open question 4). It follows from the transport choice in decision
+14's implementation, which is this spec's design, not the maintainer's words. `swift-server/async-http-client`
 becomes a direct dependency; it is already resolved through `smithy-swift`, and the spike's
 `Package.swift` change left the resolved pins unchanged (#283). `swift-openapi-runtime` and the
 generator are already declared (`Package.swift:36-38`). Nothing imports `APIClient` today (only
@@ -901,7 +940,7 @@ mention `href` (§2.5, §3.5) and the "In reply to" link (§1.8, §3.8).
    - For a remote one, it is the object's `url` when that is a string. When it is an array or an
      object, use the first `Link`'s `href`, or the first string.
 2. **Check the scheme.** The candidate must be `https` or `http` and parse as an absolute URL, as
-   Mastodon's `url_for` requires (`tag_manager.rb:18-19`; `json_ld_helper.rb:95-97`).
+   Mastodon's `url_for` requires (`tag_manager.rb:18-19`; `JsonLdHelper#unsupported_uri_scheme?`).
 3. **Fall back.** If it fails, use the validated actor URI or status URI instead. Those already
    passed the Step 0 `https` check and the §3.3 checks.
 4. **Escape.** HTML-attribute-escape every interpolated value (`&`, `<`, `>`, `"`, `'`), as
@@ -1024,13 +1063,14 @@ nothing.
 
 1. **Fetch** the object signed as the caller.
 2. **Canonicalize.** If `json['id']` ≠ `q`, re-fetch `id` and require equality
-   (`json_ld_helper.rb:242-252`). A pasted web URL resolves this way.
+   (`JsonLdHelper#fetch_resource`). A pasted web URL resolves this way.
 3. **Validate.**
    - `type` must be in Mastodon's supported or converted set (`activity.rb:9-10`).
    - `attributedTo` is read via `first_of_value`/`value_or_id`.
    - The host of `attributedTo` must equal the host of `id` (`fetch_remote_status_service.rb:61-66`).
 4. **Fetch the actor** signed.
-   - Require `json['id'] == attributedTo` (`fetch_remote_actor_service.rb:16`).
+   - Require `json['id'] == attributedTo` (Mastodon: `JsonLdHelper#fetch_resource`, called from
+     `fetch_remote_actor_service.rb:18`).
    - Parse it with the parser extracted from `KeyManager.fetchActorDocument` (`KeyManager.swift:89-105`),
      extended to return `followers` and `url`.
    - It writes nothing to `REMOTE_ACTOR#`. The record is the inbound-signature trust anchor and
@@ -1149,7 +1189,7 @@ direct parent is remote**. Those are exactly the activities `forward_for_reply` 
 `rdf-normalize` 0.7.0 uses by default (`lib/rdf/normalize.rb:62`).
 
 **`@context` alignment, so the signature survives Mastodon's compaction**
-(`process_activity_service.rb:59-66`; `json_ld_helper.rb:184-235`):
+(`process_activity_service.rb:59-66`; `JsonLdHelper#patch_for_forwarding!`, `#safe_for_forwarding?`):
 - **The Create's context.** The signed Create carries one top-level `@context`:
   `["https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1", {…}]`. The extension
   object maps every term FAP emits to the IRIs in Mastodon's `full_context`:
@@ -1161,7 +1201,7 @@ direct parent is remote**. Those are exactly the activities `forward_for_reply` 
   The embedded Note has no `@context` of its own.
 - **Every Note.** `buildNoteJSON` uses the same mapping for every Note. Already-published Notes
   keep identical JSON keys and values, and only the context IRIs change.
-- FAP emits no `@graph`, `@included` or `@reverse` (`json_ld_helper.rb:6`).
+- FAP emits no `@graph`, `@included` or `@reverse` (`JsonLdHelper::UNSUPPORTED_JSONLD_KEYWORDS`).
 
 **Contexts are embedded and never fetched.**
 - ActivityPubCore embeds three context documents as Swift string constants. There are no SwiftPM
@@ -1249,12 +1289,15 @@ The harness uses real sockets, not a stub transport, because a stub skips the la
   `withTestClient(_:body:)` and is shut down on every exit path (§0.1, AHC's debug `deinit`
   precondition).
 - **The negative control removes one capability.** For a check the middleware owns (scheme, redirect
-  count, body cap, content type, deadline), the control is the production construction with that one
-  check switched off, everything else unchanged. The switch is an `internal` option set on
+  count, body cap, content type, status, deadline), the control is the production construction with
+  that one check switched off, everything else unchanged. The switch is an `internal` option set on
   `RemoteFetchMiddleware`'s initializer, defaulted to every check, so production code can't reach it
   and tests set it through `@testable import ActivityPubCore`. For a setting of the `HTTPClient`
   (hook, close, retries, HTTP version, trust), the control is the production construction with that
-  one setting changed. The test asserts the control gets the response the FAP client refuses.
+  one setting changed. The test asserts the control gets the response the FAP client refuses or, where the generated
+  layer behind the middleware refuses the same input (undeclared concrete content types, statuses
+  other than 200), that the refusal now comes from that layer, with its error, and not from the
+  middleware.
 - **The bare client is a fixture check, not a control.** The same request through an
   `HTTPClient` with AHC defaults and no generated layer or middleware, called with `execute`,
   shows that the test server serves what the test claims. It runs beside the control and does
@@ -1271,16 +1314,22 @@ Tests (control in brackets):
   policy admitting A and B, or `http`, succeed.]
 - **Body:** a body over 1 MB fails with the size error. [With the body cap off, it is read in
   full.]
-- **Content type:** `text/html`, `text/html; charset=utf-8` and bare `application/ld+json` fail
-  with the decode error, on a body that is a valid JSON object, so the content type is the only
-  thing that can refuse it; `application/activity+json; charset=utf-8` and
-  `application/ld+json; profile="https://www.w3.org/ns/activitystreams"` (the exact profile
-  string, since values compare case-sensitively) pass. [The bare client accepts the refused
-  ones; the runtime owns this check, so there is no FAP flag to switch off.]
-- **Non-concrete content type:** a 200 with no `Content-Type`, one with `*/*` and one with
-  `text/*` each fail with the middleware's content-type error. [The generated client without the
-  middleware accepts all three, which is the runtime behaviour §0.1 names.]
-- **Status:** a 404 and a 204 fail. [The bare client returns them; the runtime owns this check.]
+- **Content type:** `text/html`, `text/html; charset=utf-8`, bare `application/ld+json`, and an
+  `application/ld+json` whose `profile` lists the AS profile beside another one, each fail with the
+  middleware's content-type error, on a body that is a valid JSON object, so the content type is the
+  only thing that can refuse it. `application/activity+json; charset=utf-8` and
+  `application/ld+json; profile="https://www.w3.org/ns/activitystreams"` (the exact profile string,
+  since values compare case-sensitively) pass. [The production client with the content-type check
+  switched off: the four refused values now fail in the runtime's match instead, with
+  `decodeFailed`, whose underlying error is not a `DecodingError` (§0.1).]
+- **Non-concrete or unparsable content type:** a 200 with a valid JSON object body and no
+  `Content-Type`, an empty one, `*/*`, `text/*`, `html` or `*/html` each fails with the
+  middleware's content-type error. [The production client with only the content-type check switched
+  off, every other middleware check still on, accepts all six and decodes the body, the runtime
+  behaviour §0.1 names.]
+- **Status:** a 404 and a 204 fail with the middleware's status error. [The production client with
+  the status check switched off: both come back from the generated client as `.undocumented`, and
+  `fetchRemoteObject` throws `undocumentedStatus` instead.]
 - **Deadline, slow drip:** with a 2 s deadline, a body that sends one byte every 100 ms for 5 s
   fails with the deadline error between 2 s and 2.5 s. [With the deadline check off, it
   completes after about 5 s; `timeout.read` never fires, because bytes keep arriving.]
@@ -1337,8 +1386,9 @@ tell apart, so a test that passes on both sides fails. Two tests come closest to
 parent-commit run and still don't have one: the `buildNoteJSON` test sets `inReplyToId`, which
 phase 1 adds, so it doesn't compile on the parent; and the `signGet` test exercises #279's
 function, which exists before phase 3a, so on the parent it is expected to pass and acts as a
-regression guard. The capability-removed controls for phases 1 and 2 are the integration
-tests' runs against the pre-change stage build (Integration, below).
+regression guard. Phase 1's capability-removed control is the integration tests' run against the
+pre-change stage build (Integration, below). Phase 2 has one for its reply half only, run on the
+phase 1 build (Integration); its search half has none.
 
 **Phase 1**
 - **`buildNoteJSON`** emits `inReplyTo` when `inReplyToId` is set.
@@ -1439,6 +1489,12 @@ These count only once FederatedActivityPublisher#278 is fixed (Sequence).
 - Negative controls:
   - B's private status: search returns nothing, and replying with its ULID gets `.notFound`.
   - Search without a token gets 401.
+- Capability-removed control, for the reply half only: on the phase 1 stage build, A replies with
+  the ULID of B's unlisted status, taken from B's own create response, and gets `.notFound`,
+  because phase 1 resolves only the caller's own statuses (§1.2; the phase 1 resolver test).
+- The search half has no capability-removed control. Before phase 2, `/api/v2/search` doesn't
+  exist, and a 404 for a missing route is not the capability going red, any more than a compile
+  failure is. Search rests on its other-side inputs above.
 
 Phase 3 needs a third-party server, so it is in the manual federation checks below, not in CI.
 
@@ -1517,13 +1573,13 @@ code" means the defect was seen in FAP's source, not in production.
 | `httpVersion = .http1Only` | §0.2 | Not observed. FederatedActivityPublisher#283 notes the hook is HTTP/1.1-only as a source reading (its finding 3), and every spike client was `.http1Only`; the step 0 "HTTP/1.1 only" test is the first observation |
 | `timeout.connect` / `timeout.read`, and the transport's 10 s `timeout` backstop | §0.1, §0.2 | None. Bounds on stalls the deadline race can't interrupt |
 | Middleware throws with no target bound | §0.1 | None |
-| Missing or non-concrete `Content-Type` refused | §0.1 | None. Closes a gap read in the runtime |
+| Missing, empty, unparsable or non-concrete `Content-Type` refused | §0.1 | None. Closes a gap read in the runtime |
 | 10 s search deadline | §3.3 | None. Rests on the documented 29 s API Gateway limit |
 | `repliesCount` failure logged and swallowed | §1.6 | None |
 | Safe-link scheme check and fallback | §2.7 | None. Security control |
 | Remote validation (`id`, `attributedTo` host, actor `id`) | §3.3 | None. Matches Mastodon |
 | Search returns empty and writes nothing on any failure | §3.3 | None |
-| `DeliverHandler` requires the fetched actor's `id == targetActorUri` | §3.5 | None. Matches Mastodon's actor check (`fetch_remote_actor_service.rb:16`) |
+| `DeliverHandler` requires the fetched actor's `id == targetActorUri` | §3.5 | None. Matches Mastodon's actor check (`JsonLdHelper#fetch_resource`, called from `fetch_remote_actor_service.rb:18`) |
 | Read-time `ttl` comparison on `REF#` entries | §3.1 | None |
 | Legacy `inReplyTo` without `inReplyToId` ignored | §1.3 | None. No legacy item has been observed |
 | `META` deleted when a re-search derives `private` | §3.1 | None. Security control |
@@ -1599,14 +1655,12 @@ labelled as this spec's are the spec's implementation of the decision, not his w
 
     **Implementation (this spec's design, not the maintainer's words):**
     - **Transport.** FAP's existing OpenAPI transport is `URLSessionTransport`
-      (`OpenAPIURLSession`, `integration-tests/Package.swift:18,29`). It can't host a
-      connection-level hook on Linux. Its `Configuration` takes only a `URLSession` and a
-      body-processing mode (`Sources/OpenAPIURLSession/URLSessionTransport.swift:67-81`,
-      swift-openapi-urlsession 1.2.0), so a hook would have to come from `URLSession` itself, and
-      FoundationNetworking's `URLSession` offers no callback that runs per connection with the
-      connected address before the request is sent [unverified: not checked in
-      swift-corelibs-foundation source; the transport choice rests on the accepted hook, not on
-      this point]. The address check the maintainer accepted is AsyncHTTPClient's
+      (`OpenAPIURLSession`, `integration-tests/Package.swift:18,29`). Its `Configuration` takes
+      only a `URLSession` and a body-processing mode
+      (`Sources/OpenAPIURLSession/URLSessionTransport.swift:67-81`, swift-openapi-urlsession
+      1.2.0), so a connection-level hook would have to come from `URLSession` itself. Whether
+      FoundationNetworking's `URLSession` on Linux offers one has not been checked; the transport
+      choice doesn't rest on it. The address check the maintainer accepted is AsyncHTTPClient's
       `http1_1ConnectionDebugInitializer`, so the transport follows from that acceptance: the
       existing `AsyncHTTPClientTransport` (`swift-server/swift-openapi-async-http-client`) over
       `swift-server/async-http-client`. FAP's fetch controls live in a `ClientMiddleware`, and FAP
@@ -1617,12 +1671,14 @@ labelled as this spec's are the spec's implementation of the decision, not his w
       FAP's middleware.
     - **Residual weakness.** The TCP connect, and for `https` the TLS handshake, reach the address
       before the hook rejects it; only the HTTP request is blocked (§0.2).
-    - **What the generated layer contributes and costs.** It contributes status dispatch (the
-      `.undocumented` case), the concrete content-type match, and JSON decoding into
-      `OpenAPIObjectContainer`, in place of about three hand-written checks; it costs an OpenAPI
-      document that describes no real API (a placeholder `.invalid` origin, rewritten per hop), a
-      `@TaskLocal` side channel because the operation has no real input, a middleware check for
-      the content types the runtime lets through, and the generator plugin in every Lambda build.
+    - **What the generated layer contributes and costs.** It contributes JSON decoding into
+      `OpenAPIObjectContainer`, and a second status check (the `.undocumented` case) and concrete
+      content-type match behind the middleware's. It costs an OpenAPI document that describes no
+      real API (a placeholder `.invalid` origin, rewritten per hop), a `@TaskLocal` side channel
+      because the operation has no real input, the middleware's own status and content-type
+      checks (the runtime lets missing, unparsable and wildcard types through, and its checks have
+      no switch for a negative control), `@_spi(Generated)` use of `OpenAPIMIMEType`, and the
+      generator plugin in every Lambda build.
     - **Structure** (§0.1, §0.2). One client per container; one `@TaskLocal`
       `RemoteFetchContext` carrying target, signer, deadline and scheme policy; the address policy
       and trust roots set when the client is built; the client injected into `fetchRemoteObject`
@@ -1635,8 +1691,8 @@ labelled as this spec's are the spec's implementation of the decision, not his w
 1. **Guards without an observed failure.** Most rows in "Guards and fallbacks" rest on no
    observed failure. They fall in two groups.
    - **a. Security controls:** the step 0 scheme, redirect, body, content-type, status and
-     deadline controls; the connection-level address check; the non-concrete `Content-Type`
-     refusal; the safe-link check; remote validation; the `DeliverHandler` actor-`id` check;
+     deadline controls; the connection-level address check; the refusal of a missing, empty,
+     unparsable or non-concrete `Content-Type`; the safe-link check; remote validation; the `DeliverHandler` actor-`id` check;
      deleting `META` on a re-derived `private`; never changing `visibility` from an Update; and
      origin-only invalidation. Are these exempt from the observed-failure rule, or should any of
      them be dropped?
@@ -1648,3 +1704,16 @@ labelled as this spec's are the spec's implementation of the decision, not his w
 2. **"List them as contributors."** This spec reads it as a new `CONTRIBUTORS.md` plus a README
    Acknowledgements section (decision 13). Confirm, or name another place (for example GitHub's
    co-author trailers on the vendoring commit).
+3. **Step 0: keep it folded, or split it back?**
+   - **a. Keep it folded** (this revision). The controls are built once, in the AsyncHTTPClient
+     middleware. The change is bigger: a new package entry, the generator plugin in the Lambda
+     build for the first time, AsyncHTTPClient linked into all 19 handlers, and a dependency on
+     FederatedActivityPublisher#279. The step 0 PR's deploy archive build is the first
+     measurement of AsyncHTTPClient in the deployed image (C4); if it fails, the simple quote-path
+     controls stall with it.
+   - **b. Split it back.** The scheme, redirect, body, content-type, status and deadline controls
+     ship first on the existing `URLSession` fetch; AsyncHTTPClient and the address check follow.
+     The controls that live in a `URLSession` delegate are then built twice, once there and once in
+     the middleware.
+4. **New dependency.** `swift-server/swift-openapi-async-http-client` is a new third-party
+   dependency (§0.2, Dependencies). Step 0 as written needs it. Approve it, or not.
