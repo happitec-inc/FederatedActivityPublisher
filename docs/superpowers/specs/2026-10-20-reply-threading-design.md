@@ -520,7 +520,8 @@ the maintainer's, and everything here is this spec's.
   ContinuousClock.Instant, schemePolicy: SchemePolicy}`, for the duration of the call. The
   middleware reads all four. `deadline` is the instant the caller passes for that fetch
   (§0.2, "Fetch deadlines by call site").
-  The runtime gives middleware no other per-call channel: `intercept(_:body:baseURL:operationID:next:)` and `next:
+  The runtime gives middleware no other per-call channel:
+  `intercept(_:body:baseURL:operationID:next:)` and `next:
   @Sendable (HTTPRequest, HTTPBody?, URL)` carry only the request, body, base URL and operation id
   (`apple/swift-openapi-runtime`, `Sources/OpenAPIRuntime/Interface/ClientTransport.swift`).
   `UniversalClient.send` awaits the middleware chain inline with no new `Task`, so the binding is
@@ -719,7 +720,8 @@ the maintainer's, and everything here is this spec's.
   (`Errors/RuntimeError.swift:77-83`), and for a non-runtime error thrown while decoding, such as
   the body wrapper's size or deadline error, the error itself (`UniversalClient.swift:119-126`;
   `Errors/ClientError.swift:71`). `fetchRemoteObject` and `fetchRemoteActor` unwrap
-  `ClientError.underlyingError` before mapping to their own error cases, and the Step 0 tests assert on the unwrapped case. A failure in
+  `ClientError.underlyingError` before mapping to their own error cases, and the Step 0 tests
+  assert on the unwrapped case. A failure in
   the generated decode step is a `ClientError` with `response` set whose underlying error is not
   one of FAP's, and its two causes can be told apart:
   - **An invalid document.** The runtime's JSON body decode, `getResponseBodyAsJSON`
@@ -739,7 +741,7 @@ the maintainer's, and everything here is this spec's.
   (`Interface/UniversalClient.swift:179-188`, runtime 1.11.0). An error from the transport is
   wrapped with no response (`:146-155`, as `RuntimeError.transportFailed`), and one from a
   middleware likewise (`:160-175`). Both functions map the unwrapped error in this order:
-  1. One of FAP's own errors (the middleware's, the hook's and the body wrapper's) is rethrown as
+  1. A `RemoteFetchError` thrown by the middleware, the hook or the body wrapper is rethrown as
      it is.
   2. A `DecodingError` becomes `invalidDocument`, carrying it.
   3. An `HTTPClientError` from AHC, such as `readTimeout` (`HTTPClient.swift:1596`), becomes
@@ -758,6 +760,32 @@ the maintainer's, and everything here is this spec's.
   case exists so that a test with one middleware check switched off can see the generated layer
   refuse, and it replaces the two separate cases, `undocumentedStatus` and `decodeFailed`, an
   earlier revision had for that purpose (Testing).
+- **The error type.** `fetchRemoteObject` and `fetchRemoteActor` throw one public enum,
+  `RemoteFetchError: Error, Sendable`, which replaces today's `FetchRemoteObjectError`
+  (`FetchRemoteObject.swift:19-26`, used nowhere else in `Sources/` or `Tests/`). Every other
+  section names these cases by their meaning ("the deadline error" and so on); this is the one
+  declaration:
+  - `invalidURI(String)`: the URI does not parse as an absolute URL.
+  - `noContext`: the middleware ran with no `RemoteFetchContext` bound ("the no-target error").
+  - `schemeRefused(URL)`: a hop's scheme is not admitted by the scheme policy ("the scheme
+    error").
+  - `tooManyRedirects(URL)`: a 4th redirect ("the redirect error").
+  - `deadlineExceeded`: the fetch's deadline passed before a hop, during the head, or at a body
+    chunk ("the deadline error").
+  - `status(Int)`: the final status was not 200 ("the status error").
+  - `contentType(String?)`: the `Content-Type` was missing, empty, unparsable, a wildcard or
+    undeclared ("the content-type error").
+  - `bodyTooLarge`: the body passed 1 MB ("the size error").
+  - `addressRefused(String)`: the connection hook refused the connected address ("the address
+    error").
+  - `invalidDocument(DecodingError)`: the body is not JSON, or doesn't match the operation's
+    schema.
+  - `generatedLayerRefused(underlying: any Error)`: the generated layer refused a response the
+    middleware passed (below).
+  - `transportFailed(underlying: any Error)`: the connection, TLS or AHC failed (below).
+
+  `UndocumentedStatusError(statusCode:)`, the underlying error for an undocumented status, is
+  `internal`. `KeyManager.fetchActorDocument` lets these errors through unchanged.
 - **The generated client is `internal`** (`accessModifier: internal` in
   `openapi-generator-config.yaml`). Only `fetchRemoteObject`, `fetchRemoteActor` and the two
   document structs are public.
@@ -864,18 +892,40 @@ for the other handlers, was dropped (decision 17) and is FederatedActivityPublis
 The quote path and the inbox are within the limit when every fetch answers promptly, and a single
 fetch is within it in the worst case. Only a run of slow fetches in one request can pass 29 s,
 and what follows differs:
-- **Quote path: a duplicate post on retry.** API Gateway answers the client 504 at 29 s, but the
-  function's own timeout is 60 s (`activity-app/functions/template.yaml:127`), so it keeps
-  running. Both quote fetches run before the status is stored (`PostHandler/main.swift:264-273`,
-  then `storeStatus` at `:318`), and the handler then stores the status, counts it and enqueues
-  its delivery. FAP has no client idempotency key (the only idempotency in `Sources/` is the
-  inbox's activity dedup, `DynamoDBStore.swift:256` onward). So a client that retries after the
-  504 creates a second, duplicate post.
-- **Inbox: the delivery fails.** The function's 30 s timeout (Globals, `:76-77`) stops it too.
-  The remote server's retry redelivers the activity, and inbound dedup makes that safe.
+- **Quote path: a duplicate post on retry.** API Gateway answers the client 504 at 29 s. The
+  function's own timeout is 60 s (`activity-app/functions/template.yaml:127`), so Lambda does not
+  stop it at 29 s. That API Gateway leaves the invocation running after its 504 is [inferred]:
+  neither AWS page read for it, the REST API quotas page (Platform limits) and Lambda's
+  synchronous-invocation page (https://docs.aws.amazon.com/lambda/latest/dg/invocation-sync.html),
+  both read 2026-10-21, says what happens to the function. If it keeps running, it continues
+  past both quote fetches (`PostHandler/main.swift:264-273`) to `storeStatus` (`:319`), counts
+  the status and enqueues its delivery. FAP has no client idempotency key (the only idempotency
+  in `Sources/` is the inbox's activity dedup, `DynamoDBStore.swift:256` onward), so a client
+  that retries after the 504 creates a second, duplicate post.
+- **Inbox: lost at `8a78008`, delayed with #279.** The function's 30 s timeout (Globals,
+  `:76-77`) stops the invocation. What a redelivery then does depends on where the fetches sit
+  relative to the dedup write:
+  - **The key fetch and its refresh** (`InboxHandler/main.swift:125,153`) run during signature
+    verification, before any dedup write. A delivery killed there leaves no record, and the
+    remote server's redelivery is processed normally.
+  - **The Follow path's refresh and the QuoteRequest actor lookup** (`:390`, `:1598`) run after
+    it. At `8a78008` the inbox marks the activity seen with `storeReceivedActivity` before routing
+    (`:211`), and a redelivery of a seen activity gets 202 "already processed" (`:219-226`). So a
+    delivery killed in one of those fetches is lost, and nothing logs it.
+  - **With FederatedActivityPublisher#279, which step 0 builds on**, the inbox claims the
+    activity instead (`DynamoDBStore.claimReceivedActivity`, a `pending` record whose
+    `claimExpiresAt` is `activityClaimLease`, 300 s, ahead), and `processActivityOnce` marks it
+    processed with `completeReceivedActivity` only after the handler succeeds, or drops the claim
+    with `releaseReceivedActivity` after it fails. A killed invocation runs neither, so the claim
+    stays `pending` until the lease expires. A redelivery inside the lease finds it `pending`,
+    gets `ActivityClaim.inProgress`, and is answered 503; the claim's conditional write admits the
+    first redelivery after `claimExpiresAt` (`processingState = :pending AND claimExpiresAt <
+    :now`), which processes the activity. So with #279 the activity is delayed by at least the
+    300 s lease, not lost. When the remote server retries is its own schedule, which this spec
+    does not rely on.
 
-This spec does not close that gap; #284 tracks it. The transport's 10 s `timeout` backstop (§0.1) applies per hop, inside each
-fetch's deadline, and doesn't raise the worst case.
+This spec does not close that gap; #284 tracks it. The transport's 10 s `timeout` backstop
+(§0.1) applies per hop, inside each fetch's deadline, and doesn't raise the worst case.
 
 **Dependencies.**
 - **`swift-server/swift-openapi-async-http-client`** (product `OpenAPIAsyncHTTPClient`), a new
@@ -1540,7 +1590,8 @@ The harness uses real sockets, not a stub transport, because a stub skips the la
   `NIOHTTP2` are already resolved through `async-http-client` (its `Package.swift` depends on
   `swift-nio-ssl` and `swift-nio-http2`). They become direct dependencies of the test target
   only (decision 16). That needs package entries for `swift-nio`, `swift-nio-ssl` and
-  `swift-nio-http2` (§0.2, Dependencies), but no package that isn't already resolved. None of them pulls `libxml2-dev` or `libicu-dev` onto the runner, which
+  `swift-nio-http2` (§0.2, Dependencies), but no package that isn't already resolved. None of them
+  pulls `libxml2-dev` or `libicu-dev` onto the runner, which
   crashes `FoundationNetworking` test binaries.
 - **TLS.** The TLS server uses `NIOSSLServerHandler` with a certificate from a test-only CA. The
   CA and the leaf (for `127.0.0.1` and `localhost`, long validity) are committed test fixtures,
@@ -1566,7 +1617,8 @@ The harness uses real sockets, not a stub transport, because a stub skips the la
   `HTTPClient` with AHC defaults and no generated layer or middleware, called with `execute`,
   shows that the test server serves what the test claims. It runs beside the control and does
   not replace it.
-- **Every refusal test checks which control refused.** Each control throws its own error case.
+- **Every refusal test checks which control refused.** Each control throws its own
+  `RemoteFetchError` case (§0.1, "The error type").
   The test unwraps `ClientError.underlyingError` (§0.1) and asserts that case, so a test can't
   pass on a connection error or a different control.
 
@@ -1683,7 +1735,8 @@ red, and no blanket parent-commit control is claimed. The control for each test 
 lists as "negative control": an input on the other side of the rule that the same code must
 tell apart, so a test that passes on both sides fails. The test that comes closest to a
 parent-commit run still doesn't have one: the `buildNoteJSON` test sets `inReplyToId`, which
-phase 1 adds, so it doesn't compile on the parent. Phase 1's capability-removed control is the integration tests' run against the
+phase 1 adds, so it doesn't compile on the parent. Phase 1's capability-removed control is the
+integration tests' run against the
 pre-change stage build (Integration, below). Phase 2 has no integration-level capability-removed
 control: a reply by ULID to another actor's status gets `.notFound` on both builds until a search
 writes the `REF#` pointer (§2.3). Its capability-removed control is the resolver unit test with a
@@ -1910,7 +1963,8 @@ code" means the defect was seen in FAP's source, not in production.
 ## Decisions (2026-10-20 and 2026-10-21)
 
 The maintainer decided items 1–15 on 2026-10-20 and items 16 and 17 on 2026-10-21. Each item states
-his decision; where his own words are known they are quoted. Section references, function and type names, and anything
+his decision; where his own words are known they are quoted. Section references, function and type
+names, and anything
 labelled as this spec's are the spec's implementation of the decision, not his words.
 
 1. **Scope: all replies.** Self, other local actors and remote statuses, each shippable on its own.
