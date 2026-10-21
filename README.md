@@ -74,16 +74,20 @@ See [Sources/ActivityPubCore/Documentation.docc/ManagingActorsAndTokens.md](Sour
 
 ## Building
 
-Requires Swift 6.3, Docker (for the AL2023 build image), and AWS SAM CLI.
+Requires Docker (for the AL2023 build image) and AWS SAM CLI. The Lambda build runs entirely in the container, so you only need a local Swift 6.3 toolchain for `swift test` and the `ActivityProvisioner` CLI.
+
+The handlers are glibc binaries built on Amazon Linux 2023 (not the Static Linux SDK), with the Swift standard library linked statically. OpenSSL is not linked statically: each zip carries `lib/libcrypto.so.3` and `lib/libssl.so.3` from the build image, and the template sets `LD_LIBRARY_PATH=/var/task/lib` so the Lambda finds them. `Package.resolved` is committed, so builds use pinned dependency versions.
 
 ```bash
 # Build the Docker image
 docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
 
-# Build all Lambda zips
-swift package --allow-network-connections docker archive \
-  --base-docker-image swift-al2023:6.3 \
-  --disable-docker-image-update
+# Build all Lambda zips: one swift build for every product, then one zip per
+# handler in activity-app/functions/template.yaml, written to
+# .build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/{Target}/{Target}.zip
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp/home \
+  -v "$PWD:/workspace" -w /workspace swift-al2023:6.3 \
+  bash scripts/build-all-lambdas.sh
 
 # Deploy to stage
 sam deploy \
