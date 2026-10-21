@@ -485,7 +485,7 @@ the maintainer's, and everything here is this spec's.
   holding the generated `Client`), built once:
   - an `HTTPClient` (`swift-server/async-http-client`) configured as in §0.2;
   - `AsyncHTTPClientTransport` (`swift-server/swift-openapi-async-http-client`) over that
-    `HTTPClient`, with its `timeout` set to the per-fetch deadline every caller uses (10 s, §0.2).
+    `HTTPClient`, with its `timeout` set to the per-fetch deadline every non-search caller uses (10 s, §0.2).
     Its `Configuration` is `init(client: HTTPClient = .shared, timeout: TimeAmount = .minutes(1))`
     (`Sources/OpenAPIAsyncHTTPClient/AsyncHTTPClientTransport.swift:71`, at tag 1.5.0, the
     version step 0 declares). The transport hands `configuration.client` and
@@ -1121,6 +1121,9 @@ follow-up issue.
 
 - **Added:** none. Two helpers move to ActivityPubCore, and a resolver, a cap function and three
   optional attributes are added.
+- **Test seam** (Testing, "Test seam"): the internal `ReplyStore` protocol, which `DynamoDBStore`
+  conforms to, and an in-memory implementation in the test target. It lands here with
+  `getStatus`; phases 2 and 3a add their calls to it.
 - **Not added:** no handler, route, table, index, queue or workflow.
 
 ## Phase 2 — Replies to other local actors
@@ -1167,9 +1170,12 @@ FAP id is its ULID, whoever owns it.
   given ULID it is always `{kind: "local", owner, uri}`, so rewriting it is idempotent without a
   condition. A remote entry (§3.1) is meant to be overwritten: a re-search refreshes it. A
   conditional write (`attribute_not_exists`) would be refused for an entry whose `ttl` has passed
-  but that DynamoDB has not deleted yet, because TTL deletion is lazy (§3.1); the client would be
-  told to search again and still get 404. So every `REF#` write, local and remote, is a plain
-  `PutItem`, and nothing can refuse it.
+  but that DynamoDB has not deleted yet, because TTL deletion is lazy: AWS's TTL page says expired
+  items "might be deleted by the system at any time, typically within a few days after their
+  expiration", and "You can still update the expired items that are pending deletion"
+  (https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/howitworks-ttl.html, read
+  2026-10-21). The client would be told to search again and still get 404. So every `REF#` write,
+  local and remote, is a plain `PutItem`, which can't be refused by a condition.
 - **How a client meets an id.** Local ULIDs are visible in public status URLs and on the web, so a
   client can have another actor's ULID without having searched. Such an id gets a 404 from
   `POST /api/v1/statuses` until a search writes its pointer. That avoids a backfill or an index.
@@ -1347,7 +1353,8 @@ mention `href` (§2.5, §3.5) and the "In reply to" link (§1.8, §3.7).
   - **Re-search.** If a re-search derives `private` while a `META` entry exists, `META` is deleted.
 
 **TTL: 30 days.**
-- Readers compare `ttl` with the current time, because DynamoDB TTL deletion is lazy.
+- Readers compare `ttl` with the current time, because DynamoDB TTL deletion is lazy: expired
+  items are deleted "typically within a few days after their expiration" (AWS TTL page, §2.3).
 - An expired entry is treated as absent, so the client searches again.
 
 **Invalidation in InboxHandler** (it has DynamoDB CRUD):
@@ -1384,7 +1391,9 @@ Signing itself ships in step 0: `fetchRemoteObject` and `fetchRemoteActor` take 
 search passes to each of its fetches (§0.2). Its worst case is 20 s, the deadline plus one
 `timeout.read` on a stalled body (§0.2), under the 29 s API Gateway limit. On overrun or
 any failure, it returns empty `statuses` and writes nothing, except that a `META` delete for a
-private derivation (step 6) may already have succeeded.
+private derivation (step 6) may already have succeeded. The other residual: if that delete
+itself fails, `META` stays, and every caller keeps resolving the now-private status through it
+until its `ttl` passes or a later private re-search deletes it.
 
 1. **Fetch** the object signed as the caller, with `fetchRemoteObject`.
 2. **Canonicalize.** If the document's `.id` ≠ `q`, re-fetch `.id` and require equality
@@ -1758,6 +1767,34 @@ Tests (control in brackets):
   connection. [A test-only middleware variant that keeps the target in a stored property on the
   shared middleware sends one fetch to the wrong server.]
 
+**Test seam (phases 1 to 3a).** The resolver (§1.2, §2.4, §3.4), the search core (§2.1, §3.3)
+and the `REF#` invalidation (§3.1) live in `ActivityPubCore`. Each is an `internal` function
+generic over a store, with a `public` entry point that passes `DynamoDBStore`; the handlers
+call the public one, and tests reach the internal one through `@testable import
+ActivityPubCore`. `SearchHandler`, `PostHandler` and `InboxHandler` keep only the Lambda glue.
+- **The protocol.** `ReplyStore`, `internal` to `ActivityPubCore`, over exactly the store calls
+  these phases make. `DynamoDBStore` conforms to it.
+  - `getStatus(username:id:consistentRead:)` exists (`DynamoDBStore.swift:728`).
+  - `listAllFollowers(username:)` exists (`:788`); the followers union (§2.5) and
+    `replyAudience` (§2.6) use it.
+  - New: `getRef(id:sortKey:)`, a `GetItem` on `REF#{id}`; `putRef(_:ifAbsent:)`, a `PutItem`
+    that is unconditional when `ifAbsent` is `false`, which is all production ever passes, and
+    carries `attribute_not_exists(PK)` when it is `true`; `deleteRef(id:sortKey:)`, an
+    unconditional `DeleteItem`; and `listRefs(id:)`, a `Query` on `PK=REF#{id}` for the §3.1
+    invalidation, which refreshes an entry by putting it again.
+- **The in-memory store.** `InMemoryReplyStore`, in `Tests/ActivityPubCoreTests`, keeps items by
+  partition and sort key. An `ifAbsent` put is refused when any item is present at the key,
+  whatever its `ttl`, because DynamoDB still holds and accepts updates on expired items until it
+  deletes them, "typically within a few days after their expiration" (AWS TTL page, §2.3). That
+  is what lets the expired-`META` test's control go red. A test can make `deleteRef` throw, for
+  the order test. Nothing else is simulated, and no DynamoDB Local or new dependency is added.
+- **Test-only switches**, named as the middleware's are: an `internal` option set on the search
+  core's entry point, `SearchWriteOptions`, defaulted to every option, with `.unconditionalPut`
+  (off: puts pass `ifAbsent: true`, the expired-`META` control), `.deleteMetaOnPrivate` (off: no
+  `META` delete, the private-derivation control) and `.deleteBeforePut` (off: the put-first order,
+  the order test's control). The resolver's `REF#` lookup switch (§2.4 step 2, Phase 2 tests) is
+  an option set of the same kind, `ResolverOptions.refLookup`.
+
 **Phases 1 to 3b: what the controls are.** Most tests below exercise symbols their step introduces,
 so on the step's parent commit they don't compile; that is not a capability-removed red, and no
 blanket parent-commit control is claimed. The control for each test is the case it lists as
@@ -1826,8 +1863,12 @@ resolver unit test with a seeded pointer (Phase 2, below).
   - A re-search over an expired-but-present `META` rewrites it, and a reply then resolves.
     [Control: the same put with `attribute_not_exists` is refused, and the reply gets
     `notFound`.]
-  - A re-search that derives `private` while `META` exists deletes `META`. [Control: with the
-    delete switched off, caller B still resolves the id through `META`.]
+  - A re-search that derives `private` while `META` exists deletes `META`, and caller B then gets
+    `notFound` for the id. [Control: with the delete switched off, caller B still resolves the id
+    through `META`.]
+  - With the store's `META` delete made to fail, a re-search that derives `private` returns
+    empty and writes no `VIEWER#{caller}` entry. [Control: with the put-first order, the same
+    failing delete leaves `VIEWER#{caller}` written while `META` is still present.]
   - Delete removes `META` and every `VIEWER#` entry. Update refreshes `content`, and never
     `visibility`.
   - Negative controls: a Delete from a different host leaves the entries, and an Update whose
