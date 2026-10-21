@@ -1508,8 +1508,9 @@ The harness uses real sockets, not a stub transport, because a stub skips the la
   on `127.0.0.1:0`, counting connections, bytes received and closes. They serve fixed responses,
   redirects, oversize bodies, a slow drip and a stall. `NIOCore`, `NIOPosix`, `NIOSSL` and
   `NIOHTTP2` are already resolved through `async-http-client` (its `Package.swift` depends on
-  `swift-nio-ssl` and `swift-nio-http2`), so they become direct test-target dependencies and no
-  new package is added. None of them pulls `libxml2-dev` or `libicu-dev` onto the runner, which
+  `swift-nio-ssl` and `swift-nio-http2`). They become direct dependencies of the test target
+  only (decision 16). That needs package entries for `swift-nio`, `swift-nio-ssl` and
+  `swift-nio-http2` (§0.2, Dependencies), but no package that isn't already resolved. None of them pulls `libxml2-dev` or `libicu-dev` onto the runner, which
   crashes `FoundationNetworking` test binaries.
 - **TLS.** The TLS server uses `NIOSSLServerHandler` with a certificate from a test-only CA. The
   CA and the leaf (for `127.0.0.1` and `localhost`, long validity) are committed test fixtures,
