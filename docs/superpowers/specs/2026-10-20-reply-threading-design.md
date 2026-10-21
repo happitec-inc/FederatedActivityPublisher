@@ -42,8 +42,7 @@ work. Step 0 also carries the signer that FederatedActivityPublisher#280 asks fo
 shipped the other controls first on the `URLSession` fetch and moved them to a new transport later.
 With the generated client and the AsyncHTTPClient hook decided (decision 14), that would build the
 controls twice, once on a `URLSession` delegate that is then thrown away. Step 0 builds them once,
-in the middleware. Keeping step 0 folded or splitting it back is Open question 2, with both
-options' costs.
+in the middleware. The maintainer chose to keep step 0 folded (decision 15).
 
 **Why 3a waits for 0.** Phase 3a adds a new way for an authenticated user to make the server fetch
 an arbitrary URL (`resolve=true` search, §3.3) and adds signed actor fetches in `DeliverHandler`
@@ -668,8 +667,8 @@ it is bounded by `timeout.read`; whether cancelling the task also ends a pending
 **Dependencies.** One new package entry, `swift-server/swift-openapi-async-http-client`
 (product `OpenAPIAsyncHTTPClient`), declared `from: "1.5.0"`, its latest release tag
 (github.com/swift-server/swift-openapi-async-http-client/releases/tag/1.5.0, read 2026-10-20).
-It is a new third-party dependency, and it needs the maintainer's explicit approval before
-step 0 builds on it (pending; Open question 3). It follows from the transport choice in decision
+It is a new third-party dependency, and the maintainer approved it on 2026-10-20
+(decision 15). It follows from the transport choice in decision
 14's implementation, which is this spec's design, not the maintainer's words. `swift-server/async-http-client`
 becomes a direct dependency; it is already resolved through `smithy-swift`, and the spike's
 `Package.swift` change left the resolved pins unchanged (#283). `swift-openapi-runtime` and the
@@ -1695,31 +1694,21 @@ labelled as this spec's are the spec's implementation of the decision, not his w
       control; the generated client `internal` to `ActivityPubCore`; the placeholder origin
       `https://remote-fetch.invalid`.
 
+15. **Guards, step 0 and the new dependency.** Decided 2026-10-20, from the options the spec put
+    to the maintainer (former Open questions 1–3):
+    - **Security controls** (the first group in "Guards and fallbacks": the step 0 scheme,
+      redirect, body, content-type, status and deadline controls, the address check, the
+      `Content-Type` refusals, the safe-link check, remote validation, the `DeliverHandler`
+      actor-`id` check, deleting `META` on a re-derived `private`, never changing `visibility`
+      from an Update, and origin-only invalidation): exempt from the observed-failure rule, all
+      kept.
+    - **Other guards and fallbacks** (the `repliesCount` swallow, unsigned delivery when LD signing
+      fails, the no-target throw, the 10 s search deadline, search's empty-on-failure result, the
+      `timeout.connect`/`timeout.read` and transport backstops, the read-time `ttl` comparison,
+      and ignoring legacy `inReplyTo`): all kept as written.
+    - **Step 0:** kept folded. The controls are built once, in the AsyncHTTPClient middleware.
+    - **`swift-server/swift-openapi-async-http-client`** (`from: "1.5.0"`): approved.
+
 ## Open questions
 
-1. **Guards without an observed failure.** Most rows in "Guards and fallbacks" rest on no
-   observed failure. They fall in two groups.
-   - **a. Security controls:** the step 0 scheme, redirect, body, content-type, status and
-     deadline controls; the connection-level address check; the refusal of a missing, empty,
-     unparsable or non-concrete `Content-Type`; the safe-link check; remote validation; the `DeliverHandler` actor-`id` check;
-     deleting `META` on a re-derived `private`; never changing `visibility` from an Update; and
-     origin-only invalidation. Are these exempt from the observed-failure rule, or should any of
-     them be dropped?
-   - **b. Other guards and fallbacks:** the `repliesCount` swallow; unsigned delivery when LD
-     signing fails; the no-target throw; the 10 s search deadline; search's empty-on-failure
-     result; the `timeout.connect`/`timeout.read` and transport backstops; the read-time `ttl`
-     comparison; and ignoring legacy `inReplyTo`. Should any of these be dropped, or kept only
-     once a failure is observed?
-2. **Step 0: keep it folded, or split it back?**
-   - **a. Keep it folded** (this revision). The controls are built once, in the AsyncHTTPClient
-     middleware. The change is bigger: a new package entry, the generator plugin in the Lambda
-     build for the first time, AsyncHTTPClient linked into all 19 handlers, and a dependency on
-     FederatedActivityPublisher#279. The step 0 PR's deploy archive build is the first
-     measurement of AsyncHTTPClient in the deployed image (C4); if it fails, the simple quote-path
-     controls stall with it.
-   - **b. Split it back.** The scheme, redirect, body, content-type, status and deadline controls
-     ship first on the existing `URLSession` fetch; AsyncHTTPClient and the address check follow.
-     The controls that live in a `URLSession` delegate are then built twice, once there and once in
-     the middleware.
-3. **New dependency.** `swift-server/swift-openapi-async-http-client` is a new third-party
-   dependency (§0.2, Dependencies). Step 0 as written needs it. Approve it, or not.
+None. The three questions this revision raised were decided on 2026-10-20 (decision 15).
