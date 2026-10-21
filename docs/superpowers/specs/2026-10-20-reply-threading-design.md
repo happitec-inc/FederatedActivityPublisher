@@ -14,23 +14,36 @@ remote servers as N unrelated posts.
 
 ## Sequence
 
-The work ships as six changes, in order. Each can be released on its own.
+The work ships as five changes, in order. Each can be released on its own.
 
 | Step | Change | Depends on | New components (full list in each section) |
 |---|---|---|---|
-| 0 | **Fetch hardening**, a security change to the existing shared fetch | — | None. Scheme, redirect, body, content-type, status and deadline controls on `fetchRemoteObject`. |
-| 0b | **Generated fetch client and transport** (decision 14) | 0, Open question 1 | A FAP-authored OpenAPI document, a generated client target, a FAP-written `ClientTransport` that owns redirects, per-hop checks and re-signing, the body cap, the deadline and the per-connection address check |
+| 0 | **Fetch hardening**, a security change to the existing shared fetch, built on the generated client (decision 14) | FederatedActivityPublisher#279 merged | A FAP-authored OpenAPI document and a client generated from it inside `ActivityPubCore`; one FAP `ClientMiddleware`; one long-lived `HTTPClient` per container behind `AsyncHTTPClientTransport`, with the connection-level address check |
 | 1 | Self-replies | — | None |
 | 2 | Replies to other local actors | 1 | `SearchHandler` Lambda; `GET /api/v2/search` route and CloudFront behaviour; `REF#` item type |
-| 3a | Replies to remote statuses, delivered unsigned | 0b, 2 | Remote resolve in `SearchHandler`; remote `REF#` entries; `signGet`; actor-URI delivery in `DeliverHandler` |
+| 3a | Replies to remote statuses, delivered unsigned | 0, 2 | Remote resolve in `SearchHandler`; remote `REF#` entries; actor-URI delivery in `DeliverHandler` |
 | 3b | Linked Data Signatures on remote replies | 3a | LD signing in ActivityPubCore: FAP-owned canonicalization with vendored, credited reference code (decision 13), and `@context` alignment |
+
+**Precondition for the live tests: FederatedActivityPublisher#278.** The stage integration gate
+(`deploy-stage.yml:513-530`) discards the test exit code and passes on XCTest's empty
+`Test Suite … passed` line, which `swift test` prints in every run of these Swift Testing suites,
+so it can't go red. The phase 1
+and phase 2 integration tests and their negative controls (Testing) count only once #278 is fixed
+and its own negative control (a stage run with one failing test fails the job) has been seen red.
+Phases 1 and 2 can be written before that, but their integration criteria aren't discharged until
+then.
 
 **Why step 0 goes first.** The quote path already sends client-supplied URIs to `fetchRemoteObject`
 with no scheme check, unlimited redirects and no body cap (`FetchRemoteObject.swift:37-45`;
 `PostHandler/main.swift:252,264`). That exposure exists today and depends on nothing in the reply
-work.
+work. Step 0 also carries the signer that FederatedActivityPublisher#280 asks for (§3.2).
 
-**Why 3a waits for 0b.** Phase 3a adds a new way for an authenticated user to make the server fetch
+**Why step 0 ships the address check and the generated client together.** An earlier revision
+shipped the other controls first on the `URLSession` fetch and moved them to a new transport
+later. With the transport decided (decision 14), that would build the controls twice, once on
+a `URLSession` delegate that is then thrown away. Step 0 builds them once, in the middleware.
+
+**Why 3a waits for 0.** Phase 3a adds a new way for an authenticated user to make the server fetch
 an arbitrary URL (`resolve=true` search, §3.3) and adds signed actor fetches in `DeliverHandler`
 (§3.5). Without the address check, search adds a path to loopback and link-local addresses that
 a signed-in user controls directly and whose result is returned to that user. Steps 1 and 2 don't
@@ -160,21 +173,27 @@ No FEP covers self-threads specifically. FEP-76ea is the closest.
     scheme is `http` or `https` (`tag_manager.rb:18-19`; `unsupported_uri_scheme?`,
     `app/helpers/json_ld_helper.rb:95-97`).
   - Both values are HTML-escaped with `h()`.
-  - `display_username` is `pretty_acct` when `with_domain` is set. `pretty_acct` is
-    `username@domain`, where `domain` is the account's WebFinger domain (`app/models/account.rb:249-254`).
+  - `display_username` is `pretty_acct` when `with_domain` is set. For a remote account,
+    `pretty_acct` is `username@domain`, where `domain` is the account's WebFinger domain. For a
+    local account it is the bare `username` (`app/models/account.rb:249-254`).
 
 **Who Mastodon delivers to** (`app/lib/status_reach_finder.rb`):
 - Inboxes are reached accounts, plus followers, plus relays (`:12-13`).
 - Reached accounts include:
-  - `replied_to_account_id` (`:31`), which is reached only `if distributable?` (`:47-48`)
+  - `replied_to_account_id` (`:31`), which is reached only `if distributable?` (`:48-49`)
   - mentioned accounts (`:34`)
   - `replies_account_ids` (`:38,79-81`)
-- The direct parent's followers are reached too, when that parent's author is local (`:105-106`;
-  `app/models/status.rb:210-212`).
+  - `replies_account_ids` and the other interaction lookups run only when the status is
+    `distributable? || unsafe?` (`:79-81`).
+- **Followers.** For a distributable reply to a local account, the author's followers plus the
+  direct parent author's followers (`:105-106`; `app/models/status.rb:210-212`). For a direct or
+  limited status, none (`:108-109`). Otherwise, including a private status, the author's followers
+  (`:110-111`).
 - Create and Update are distributed with `StatusReachFinder`
   (`app/workers/activitypub/distribution_worker.rb:22-23`; `status_update_distribution_worker.rb:3`).
 - Delete uses `StatusReachFinder.new(@status, unsafe: true)` (`app/services/remove_status_service.rb:92-106`).
-  So Mastodon delivers a status's Delete and Update to every account that replied to it.
+  So Mastodon delivers a status's **Delete** to every account that replied to it. Its **Update**
+  reaches those accounts only when the status is distributable (public or unlisted).
 
 **How Mastodon forwards:**
 - **The forwarding condition.** `forward_for_reply` runs only when
@@ -261,8 +280,8 @@ contains no `visibility` handling.
 
 **Search and URL resolution.**
 - **Docs** (https://docs.joinmastodon.org/methods/search/):
-  - `GET /api/v2/search` with `q` an HTTPS URL and `resolve=true` attempts "resolving the URL and
-    returning the matching status".
+  - `GET /api/v2/search` with `q` an HTTPS URL and `resolve=true`: "if `true`, resolving the URL
+    and returning the matching status, account or Collection is attempted."
   - With `resolve=false`, "this resolving logic is circumvented and a regular search is performed
     instead".
   - `resolve` requires a user token.
@@ -292,14 +311,17 @@ contains no `visibility` handling.
 
 ### Swift JSON-LD and RDF canonicalization
 
-Code on the signing path must be code FAP owns, or a dependency the maintainer has vetted and
-approved explicitly. Candidate packages found by searching package indexes are not evidence. A
-project's own README and CI results are statements from the party being evaluated, so they don't
-count as vetting.
+Code on the signing path must be code FAP owns, or a dependency the maintainer has approved
+explicitly. Candidate packages found by searching package indexes are not evidence. A project's
+own README and CI results are statements from the party being evaluated, so they don't count as
+evidence of fitness.
 
-The maintainer has vetted two packages on the strength of their authors (2026-10-20). Both were
-read from their repository pages only, and their scope comes from their own READMEs, so it is
-unverified until FAP's gate runs:
+The maintainer chose to vendor two packages as reference code (decision 13). What he said about
+their authors, 2026-10-20: of `mattmassicotte/JSONLD`'s author, "a very known entity in the swift
+community that I'd trust"; of `1amageek/swift-knowledge-graph`'s author, "very reputable developer
+again". That is a statement about the authors, not a review of the code: the code passes the
+same §3.6 gate as code FAP writes. Both packages were read from their repository pages only, and
+their scope below comes from their own READMEs, so it is unverified until that gate runs:
 
 - **`mattmassicotte/JSONLD`** (BSD-3-Clause, no tagged releases).
   - Codable decoding and encoding of JSON-LD documents, centred on `@context` (`ContextOnlyDocument`).
@@ -340,7 +362,12 @@ Verified by reading the code at `8a78008`.
 - Statuses are keyed `ACTOR#{username}` / `STATUS#{ulid}` (`Status.swift:216-221`). There is no
   index on `inReplyTo` or on a bare id.
 - `REMOTE_ACTOR#{actorUri}` has a 24 h TTL (`DynamoDBStore.swift:593-630`). It is the
-  inbound-signature trust anchor (`KeyManager.swift:41-42`), and today only `KeyManager` writes it.
+  inbound-signature trust anchor (`KeyManager.swift:41-42`). Two code paths write it:
+  `KeyManager` on a key fetch (`KeyManager.swift:47,55`), and `InboxHandler` on an inbox `Update`
+  of a `Person` (`InboxHandler/main.swift:947`, through `DynamoDBStore.swift:478-480`), after
+  checking that the activity's actor is the actor being updated (`:909`). Readers besides
+  `KeyManager`: the quote path's inbox lookup (`PostHandler/main.swift:267`) and
+  `InboxHandler/main.swift:388,1592`. This spec adds no writer (§3.3).
 
 **Outbound Note.**
 - `buildNoteJSON` (`Note.swift:23-109`) emits no `inReplyTo`. It does serialize `tags`
@@ -385,7 +412,14 @@ unlisted `[followers]`/`[Public]`, and private `[followers]`/`[]`.
 
 **Infrastructure.**
 - `PostFunction` reads SSM `activity/${Stage}/*` (`functions/template.yaml:122-140`).
-- `InboxFunction` has DynamoDB CRUD and SQS only (`:429-433`).
+- `InboxFunction` has DynamoDB CRUD and SQS only (`:429-433`). FederatedActivityPublisher#279
+  (open) adds SSM read of `activity/${Stage}/keys/*` with an explicit `Deny` on
+  `session-signing-key`, `jwt-signing-key` and `client-token` and on `ssm:GetParametersByPath`,
+  so the inbox can sign its key fetches. FederatedActivityPublisher#282 tracks moving actor keys
+  to their own sub-path, `keys/actors/{username}`, so grants no longer need a deny-list.
+- Bearer auth falls back to the legacy SSM parameter `{ssmKeyPrefix}/client-token`
+  (`BearerAuth.swift:97,151`), so a handler that authenticates clients reads `client-token` as
+  well as `session-signing-key`.
 - `ClientApi` is a REST API with no timeout override (`:111-120`), so 29 s applies.
 - No function has a `VpcConfig`.
 - The CloudFront default behaviour targets the ActivityPub API origin (`cdn/template.yaml:312-313`).
@@ -408,49 +442,180 @@ unlisted `[followers]`/`[Public]`, and private `[followers]`/`[]`.
 
 ## Step 0 — Fetch hardening (security)
 
-Every control is added inside `fetchRemoteObject`. `KeyManager.fetchActorDocument` moves onto
-`fetchRemoteObject` in the same change, keeping its parser (`KeyManager.swift:89-105`), so every
-remote GET is covered: the quote path, inbox object fetches and key fetches. Delivery POSTs from
-`DeliverHandler` are not fetches and are outside this spec; their address check is tracked
-separately (FederatedActivityPublisher#277). These requirements match Mastodon's `Request` and `fetch_resource`:
+Every remote `GET` goes through `fetchRemoteObject`, and every control below applies to it.
+`KeyManager.fetchActorDocument` moves onto `fetchRemoteObject` in the same change, keeping its
+parser (`KeyManager.swift:89-105`) and the signing key FederatedActivityPublisher#279 gives it.
+So every remote GET is covered: the quote path, inbox object fetches and key fetches. Delivery
+POSTs from `DeliverHandler` are not fetches and are outside this spec; their address check is
+tracked separately (FederatedActivityPublisher#277).
 
-| Control | Requirement | Reference |
+**Base.** Step 0 builds on FederatedActivityPublisher#279, which adds
+`HTTPSignature.signGet(privateKeyPem:keyId:path:host:date:)` (signing `(request-target) host
+date`) and `FetchSigningKey {keyId, privateKeyPem}`, and changes `fetchActorDocument` to
+`fetchActorDocument(actorUri:signingKey:)`. Step 0 reuses both types and adds no second GET
+signer. If #279 changes before it merges, step 0 follows what merged.
+
+The requirements match Mastodon's `Request` and `fetch_resource`:
+
+| Control | Requirement | Where it lives | Reference |
+|---|---|---|---|
+| Scheme | `https` on the initial URI and every hop | Middleware | Stricter than Mastodon, which allows `http` (`json_ld_helper.rb:95-97`) |
+| Redirects | At most 3 hops, each validated and, with a signer, re-signed | Middleware; AHC follows none | `request.rb:101-102,72-75` |
+| Body | 1 MB cap. Abort the read past it. | Middleware | `request.rb:293-294` |
+| Content type | `application/activity+json`, or `application/ld+json` with the AS profile | Generated client, plus a presence check in the middleware | `json_ld_helper.rb:281,351` onward |
+| Status | Only 200 counts as success | Generated client | `json_ld_helper.rb:281` |
+| Deadline | An absolute deadline from the caller, enforced even while bytes keep arriving | Middleware | Platform limits |
+| Address | Reject loopback, private (RFC 1918 / ULA), link-local and unspecified addresses, applied to the address actually connected to, on every connection | `HTTPClient` connection hook | `request.rb:325-334,389-394` |
+
+### 0.1 Shape
+
+This section is the spec's design for the maintainer's decision 14 and his transport decision
+(Decisions); the quoted words are his, the rest is this spec's.
+
+- **One client per container.** A process-wide `RemoteFetchClient.shared` (a struct holding the
+  generated `Client`), built once:
+  - an `HTTPClient` (`swift-server/async-http-client`) configured as in §0.2;
+  - `AsyncHTTPClientTransport` (`swift-server/swift-openapi-async-http-client`) over that
+    `HTTPClient`, with its `timeout` set to the longest deadline any caller uses (10 s). Its
+    `Configuration` is `init(client: HTTPClient = .shared, timeout: TimeAmount = .minutes(1))`,
+    and `send` calls `client.execute(request, timeout: configuration.timeout)`, so this is a
+    backstop, not the per-call deadline;
+  - the generated `Client`, with `serverURL` the placeholder origin `https://remote-fetch.invalid`
+    (RFC 6761 §6.4: `.invalid` never resolves) and one middleware, `RemoteFetchMiddleware`.
+
+  The `HTTPClient` lives for the life of the Lambda container and is never shut down; it is
+  built on the shared singleton event-loop group (`eventLoopGroupProvider: .singleton`, as the
+  spike's client is, FederatedActivityPublisher#283).
+- **Per-call context.** `fetchRemoteObject` binds one `@TaskLocal` value,
+  `RemoteFetchContext {target: URL, signer: FetchSigningKey?, deadline: ContinuousClock.Instant,
+  schemePolicy: SchemePolicy}`, for the duration of the call. The middleware reads all four. The
+  runtime gives middleware no other per-call channel: `intercept(_:body:baseURL:operationID:next:)`
+  and `next: @Sendable (HTTPRequest, HTTPBody?, URL)` carry only the request, body, base URL and
+  operation id (`apple/swift-openapi-runtime`, `Sources/OpenAPIRuntime/Interface/ClientTransport.swift`).
+  `UniversalClient.send` awaits the middleware chain inline with no new `Task`, so the binding is
+  visible in the middleware and isolated per task, which concurrent fetches on the one client
+  rely on [inferred from source; the concurrent "One client" test measures it].
+- **Why a TaskLocal and not a header parameter.** A declared header (`X-Fap-Target`) would show
+  the target in the generated call's signature, but it puts a non-wire header in the document and
+  the middleware would still need the signer, deadline and policy from somewhere else; a single
+  TaskLocal carries all four, and keeping the generated client `internal` means no caller ever
+  sees the operation without `fetchRemoteObject` around it.
+- **Set at construction, not per call.** The address policy (§0.2) and the TLS trust roots are
+  properties of the `HTTPClient`. Production uses the address policy below and the system trust
+  store. Tests build their own `RemoteFetchClient` with a test address policy and a test CA.
+- **Injection.** `fetchRemoteObject(uri:signer:deadline:schemePolicy:client:)`, with
+  `signer: FetchSigningKey? = nil`, `schemePolicy: SchemePolicy = .httpsOnly` and
+  `client: RemoteFetchClient = .shared`. Every production call site passes only `uri`, `deadline`
+  and, where it has one, `signer`. A test passes its own client; no global is swapped.
+- **One middleware.** `RemoteFetchMiddleware` does the whole exchange, so there is no separate
+  URL-rewrite middleware and no FAP transport:
+  1. Throw if no context is bound, so the placeholder origin is never contacted.
+  2. For each hop (the initial request plus at most 3 redirects): check the hop's scheme against
+     `schemePolicy`; set the base URL to the hop's origin and the request's path and query to the
+     hop's, byte for byte (`HTTPRequest.path` is the `:path` pseudo-header, path plus query, in
+     `apple/swift-http-types`); with a signer, add the headers from `HTTPSignature.signGet` using that path-and-query and the
+     `host[:port]`, as #279's `KeyManager.actorDocumentRequest(url:signingKey:)` does; call
+     `next` under the remaining time.
+  3. On a 3xx with a `Location`, discard the body, resolve `Location` against the hop's URL and
+     loop. A 4th redirect throws.
+  4. On any other response, require a `Content-Type` header to be present (the runtime accepts a
+     missing one, below), then return the response with its body wrapped in a sequence that
+     throws past 1 MB and past the deadline.
+- **Response decoding.** The document declares the 200 response as `type: object` with no
+  properties, which the generator maps to `OpenAPIRuntime.OpenAPIObjectContainer`
+  (`_OpenAPIGeneratorCore/Translator/TypeAssignment/TypeMatcher.swift:321-326`, generator 1.11.1).
+  Its `value` is `[String: (any Sendable)?]`, with nested objects as `[String: (any Sendable)?]`
+  and arrays as `[(any Sendable)?]` (`Sources/OpenAPIRuntime/Base/OpenAPIValue.swift`).
+  `fetchRemoteObject` converts that tree to the `[String: Any]` its callers use today
+  (`FetchRemoteObject.swift:36-58`) by walking it, dropping JSON `null`s. The bytes are parsed
+  once; there is no re-encode and second `JSONSerialization` pass. A typed schema is not used,
+  because JSON-LD lets a value and a one-element array stand for each other.
+- **Content type and status: one check each.** The generated client picks the response case
+  with `converter.bestContentType(received:options:)`, which throws
+  `RuntimeError.unexpectedContentTypeHeader` when every option is `.incompatible`
+  (`Converter+Common.swift:43-76`, runtime 1.11.0). `OpenAPIMIMEType.evaluate` makes a parameter
+  in the option that is missing from the received type incompatible, ignores extra received
+  parameters, and compares values case-sensitively. So with the two documented types, a bare
+  `application/ld+json` is rejected and `application/activity+json; charset=utf-8` is accepted.
+  FAP doesn't repeat that check. The one gap is a response with no `Content-Type` at all:
+  `bestContentType` then returns the first option (`:45-52`), so the middleware rejects it. A
+  status not in the document comes back as the generated `.undocumented` case, which
+  `fetchRemoteObject` turns into its status error.
+- **The generated client is `internal`** (`accessModifier: internal` in
+  `openapi-generator-config.yaml`). It is generated inside `ActivityPubCore`, beside
+  `fetchRemoteObject`, `HTTPSignature` and `FetchSigningKey`; a separate target would need those
+  types and would make the dependency circular. Only `fetchRemoteObject` is public.
+
+### 0.2 The `HTTPClient` configuration
+
+Each setting below was required by the spike, FederatedActivityPublisher#283, or follows from its
+findings. Symbols are from `async-http-client` 1.33.1, the version resolved in FAP's graph today.
+
+| Setting | Why | Evidence |
 |---|---|---|
-| Scheme | `https` on the initial URI and every hop | Stricter than Mastodon, which allows `http` (`json_ld_helper.rb:95-97`) |
-| Redirects | At most 3 hops, validated per hop. With a signer (§3.2), each hop is re-signed. | `request.rb:101-102,72-75` |
-| Body | 1 MB cap. Abort the read past it. | `request.rb:293-294` |
-| Content type | `application/activity+json`, or `application/ld+json` with the AS profile | `json_ld_helper.rb:281,351` onward |
-| Status | Only 200 counts as success | `json_ld_helper.rb:281` |
-| Deadline | An absolute deadline from the caller, enforced even while bytes keep arriving | Platform limits |
-| Address | Reject loopback, private (RFC 1918 / ULA), link-local and unspecified addresses on every connection, applied to the address actually connected to | `request.rb:325-334,389-394`. **Ships in step 0b, with the transport (Open question 1).** |
+| `http1_1ConnectionDebugInitializer` checks `channel.remoteAddress` against the address policy and fails the future for a refused address (`HTTPClient.swift:922`) | The address check (C1, C2) | C1 [measured+negative-control]: T1 throws the hook's error and the server receives 0 bytes; T1-control, hook removed, gets 200 and the server receives bytes. C2 [measured]: `remoteAddress` was non-nil in every hook call. macOS and Linux CI (run 39520739042). |
+| The hook calls `channel.close()` itself before failing | AHC passes a hook failure to `failedToCreateHTTPConnection` and does not close the channel (`HTTPConnectionPool+Factory.swift:84-92`) | [measured+negative-control]: T1 (no close) left the connection open, `closes=0`; T1c (close in the hook) `closes=1`, still 0 bytes |
+| `connectionPool.retryConnectionEstablishment = false` (default `true`, `HTTPClient.swift:1396`) | With retries on, a refused host is reconnected with backoff until the deadline | [measured+negative-control]: T1, retries off, 1 connection; T1b, retries on, 7 connections in 2 s on macOS and 9 on Linux, 0 bytes each |
+| `httpVersion = .http1Only` (`HTTPClient.swift:1428`) | The hook only runs for HTTP/1.1 connections; HTTP/2 has its own `http2ConnectionDebugInitializer` (`HTTPConnectionPool+Factory.swift:114`) | [inferred from source]; the step 0 h2 test measures it (Testing) |
+| `proxy = nil` | Through a proxy, `remoteAddress` is the proxy's | Set explicitly; the spike's clients set it (`config.proxy = nil`) |
+| `redirectConfiguration = .disallow` (`HTTPClient.swift:1351`) | Redirects come back to the middleware, which validates and re-signs each hop | C3 [measured+negative-control]: T2, `.disallow`, the caller gets the 302 and the target gets 0 connections; T2-control, `.follow(max: 3, allowCycles: false)`, the target is contacted |
+| `timeout.connect` and `timeout.read` (`HTTPClient.swift:1249,1251`) | Bound a stall that the deadline race can't interrupt (below) | [unverified] until the stall test runs |
 
-- **Ships first.** Every control except the address check ships first, on the existing
-  `URLSession` fetch (`FetchRemoteObject.swift:36-58`).
-  - The body cap, deadline and per-hop checks need the response delivered incrementally and
-    redirects surfaced to FAP code: a delegate-based data task with
-    `urlSession(_:dataTask:didReceive:)` and
-    `urlSession(_:task:willPerformHTTPRedirection:newRequest:completionHandler:)`, not
-    `data(for:)`. In `swift-corelibs-foundation`, both callbacks fire only when a delegate is
-    attached: `HTTPURLProtocol.redirectFor(request:)` asks the task delegate and otherwise follows
-    up to 20 redirects itself, and `NativeProtocol.notifyDelegate(aboutReceivedData:)` calls
-    `didReceive` only for delegate-backed tasks (`Sources/FoundationNetworking/URLSession/`). The
-    Step 0 tests on Linux are the measurement.
-  - Step 0b moves these controls into the FAP-written transport. The step 0 tests carry over and
-    must pass on both, with the test address policy added so the plain-http test server stays
-    reachable; 0b adds the TLS and address tests (Testing).
-- **Quote-path behaviour change.** A `quoted_status_id` that is `http://`, redirects too often,
-  is oversize or has a non-AP type now fails. The quote is then marked `failed`, through the
-  existing path (`PostHandler/main.swift:282-287`).
-- **Inbound key-fetch behaviour change.** Verifying an inbound signature now fetches the key
-  through `fetchRemoteObject`: only status 200 and the two ActivityStreams content types are
-  accepted, with at most 3 redirects and a 1 MB cap. The deadline is an absolute 10 seconds.
-  Today's 10 seconds (`KeyManager.swift:75`) is an idle timeout, so a slow response that keeps
-  sending bytes now fails where it used to succeed. A remote server whose actor document
-  fails these checks can no longer deliver to FAP.
+**Address policy.** Refuse loopback (`127.0.0.0/8`, `::1`), RFC 1918, `100.64.0.0/10`, link-local
+(`169.254.0.0/16`, `fe80::/10`), ULA (`fc00::/7`), unspecified, and IPv4-mapped IPv6 forms of
+all of these. The spike's policy test covers 20 literals, among them `::ffff:127.0.0.1`,
+`::ffff:169.254.169.254`, `fe80::1` and `fd00::1`; step 0's classifier test adds literals for
+every range above. A test policy admits named loopback ports only.
+
+**What the hook does not prevent, stated plainly.** The hook runs after the connection is set
+up: after the TCP connect, and for `https` after the TLS handshake, since the factory completes
+the connection only once `tlsEstablishedFuture` has fired (`HTTPConnectionPool+Factory.swift:532`).
+So a refused address still receives a TCP connection, and for `https` a TLS ClientHello with the
+requested host as SNI. Only the HTTP request is blocked: no request line, headers or signature
+reach it. The spike measured the plain-`http` case; the `https` ordering is from the source.
+
+**Deadline.** The middleware runs each hop's `next` raced against the remaining time and cancels
+it on expiry; AHC's `execute` honours task cancellation (`AsyncAwait/HTTPClient+execute.swift:170-173`).
+That covers the response head only: `execute` returns once the head arrives ("the `body` of the
+response may not yet have been fully received", `:38`). The body wrapper checks the deadline on
+every chunk, which stops a slow drip. A body that stalls completely sends no chunk to check, so
+it is bounded by `timeout.read`; whether cancelling the task also ends a pending body read is
+[unverified], and the stall test measures it.
+
+**Dependencies.** One new package entry, `swift-server/swift-openapi-async-http-client`
+(product `OpenAPIAsyncHTTPClient`), chosen by the maintainer. `swift-server/async-http-client`
+becomes a direct dependency; it is already resolved through `smithy-swift`, and the spike's
+`Package.swift` change left the resolved pins unchanged (#283). `swift-openapi-runtime` and the
+generator are already declared (`Package.swift:36-38`). Nothing imports `APIClient` today (only
+`Package.swift:240` names it), so `OpenAPIRuntime`, `AsyncHTTPClient` and the generator plugin
+reach the deployed Lambdas, and the plugin runs in the Lambda archive build, for the first time.
+Every handler links `ActivityPubCore`, so every handler links AHC.
+
+**Deployed build (C4, not yet measured).** The deploy build is
+`swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3`
+(`deploy-stage.yml:326`): a glibc Amazon Linux 2023 image with the UBI9 Swift toolchain
+(`docker/Dockerfile.al2023-swift`), with `libcrypto.so.3` and `libssl.so.3` copied into each
+zip's `lib/` (`deploy-stage.yml:334-350`). It is not the static Linux SDK. No deployed handler
+links AHC today (#283: 0 `AsyncHTTPClient` symbols in each of the 19 handler binaries), so the
+existing deploy build says nothing about it. The step 0 PR's archive build on that image is the
+measurement, before merge.
+
+### 0.3 Behaviour changes
+
+- **Quote path.** A `quoted_status_id` that is `http://`, redirects too often, is oversize, has a
+  non-AP type or resolves to a refused address now fails. The quote is then marked `failed`,
+  through the existing path (`PostHandler/main.swift:282-287`). Quote-path fetches are signed as
+  the posting actor, which closes FederatedActivityPublisher#280 for `PostHandler`; the
+  QuoteRequest actor lookup in `InboxHandler` (`InboxHandler/main.swift:1598`) is signed as the
+  inbox owner, with the key #279 already loads.
+- **Inbound key fetch.** Verifying an inbound signature now fetches the key through
+  `fetchRemoteObject`: only status 200 and the two ActivityStreams content types are accepted,
+  with at most 3 redirects, a 1 MB cap and the address check. The deadline is an absolute
+  10 seconds. Today's 10 seconds (`KeyManager.swift:75`) is an idle timeout, so a slow response
+  that keeps sending bytes now fails where it used to succeed. A remote server whose actor
+  document fails these checks can no longer deliver to FAP.
 - **Release notes:** both behaviour changes.
-- **Tests:** these are the Step 0 tests listed under Testing.
-- **Components:** none. `fetchRemoteObject` changes, and `KeyManager.fetchActorDocument` moves
-  onto it.
+- **Tests:** the Step 0 tests under Testing.
 
 ## Phase 1 — Self-replies
 
@@ -467,8 +632,9 @@ Insert this step between visibility validation and addressing, before anything i
 1. If `in_reply_to_id` is absent or empty, the status is not a reply.
 2. Otherwise call `store.getStatus(username: <author>, id: in_reply_to_id, consistentRead: true)`.
    InboxHandler already reads this way after a write (`InboxHandler/main.swift:1284`).
-3. If nothing is found, return **404** `{"error":"Status to reply to not found"}` and write
-   nothing, as Mastodon does. Phases 2 and 3 widen what resolves.
+3. If nothing is found, return **404** and write nothing. The 404 matches Mastodon's `set_thread`
+   (`statuses_controller.rb:106-111`); the body, `{"error":"Status to reply to not found"}`, is
+   FAP's own text. Phases 2 and 3 widen what resolves.
 4. If found, set:
    - `inReplyTo = parent.uri`, which equals the Note `id` (`PostHandler/main.swift:293`;
      `Note.swift:25`)
@@ -624,8 +790,9 @@ Two accounts matter here:
   ```
 
   - **`url`** comes from §2.7.
-  - **`acct`** is `R@handleDomain`. The handle domain is the local WebFinger domain, which is what
-    `pretty_acct` uses (`account.rb:249-254`).
+  - **`acct`** is `R@handleDomain`, FAP's choice. Mastodon's `pretty_acct` for a local account is
+    the bare username (`account.rb:249-254`); FAP shows the full handle so the mention reads the
+    same on every server it reaches.
   - **No duplicate.** If the client text begins with `@{username}` followed by an optional
     `@{any domain}`, matched case-insensitively and followed by whitespace or the end of the text,
     that leading token is removed before conversion and replaced by the linked form. This covers
@@ -635,9 +802,11 @@ Two accounts matter here:
 **Carried-over self-reply (*P* = poster, *R* carried over).** Decided 2026-10-20 (decision 11):
 - *R* goes in `cc`, with **no** Mention and **no** visible mention.
 - **This goes beyond Mastodon for private replies, and FAP chooses it deliberately.** Mastodon
-  reaches the replied-to account only for distributable replies (`status_reach_finder.rb:47-48`),
-  and puts only mentioned accounts in `cc` (`tag_manager.rb:215,228`). So on Mastodon, *R* never
-  receives a private self-continuation. On FAP, *R* is in `cc` at every visibility, and receives it.
+  reaches the replied-to account only for distributable replies (`status_reach_finder.rb:48-49`),
+  and puts only mentioned accounts in `cc` (`tag_manager.rb:215,228`). So on Mastodon, *R*
+  receives a private self-continuation only as one of the poster's followers
+  (`status_reach_finder.rb:110-111`). On FAP, *R* is in `cc` at every visibility, and receives it
+  whether or not *R* follows the poster.
 
 **Delivery.**
 - No HTTP delivery is made to a local *R*.
@@ -656,8 +825,11 @@ Two accounts matter here:
 - *P*'s followers, under the §2.5 union rule
 - *R*, when *R* is in `cc`
 
-This mirrors `StatusReachFinder` for Create, Update and Delete (`distribution_worker.rb:22-23`;
-`remove_status_service.rb:92-106`).
+This mirrors `StatusReachFinder` for Create and for Delete (`distribution_worker.rb:22-23`;
+`remove_status_service.rb:92-106`). For Update it reaches further than Mastodon on private
+statuses: Mastodon's Update reaches repliers only when the status is distributable
+(`status_reach_finder.rb:80-81`), while `replyAudience` always includes *R* when *R* is in `cc`.
+That follows from decision 11 putting *R* in `cc` at every visibility.
 
 **Callers:**
 - PostHandler's Create fan-out.
@@ -699,7 +871,7 @@ mention `href` (§2.5, §3.5) and the "In reply to" link (§1.8, §3.8).
 
 | Component | What it is |
 |---|---|
-| `SearchHandler` | New Lambda. Auth, local resolution, `show?`, `REF#` writes. Policies: DynamoDB CRUD, plus SSM read limited to `activity/${Stage}/keys/*`, which holds both the session key (`PostHandler/main.swift:51-52`) and the actor keys. |
+| `SearchHandler` | New Lambda. Auth, local resolution, `show?`, `REF#` writes. Policies: DynamoDB CRUD, plus SSM read of exactly the two parameters client auth reads: `activity/${Stage}/keys/session-signing-key` (`PostHandler/main.swift:51-52`) and `activity/${Stage}/keys/client-token` (`BearerAuth.swift:97,151`), with `kms:Decrypt` on `alias/aws/ssm`. Phase 2 needs no actor key; phase 3a widens the grant (§3.2). |
 | `GET /api/v2/search` | New `ClientApi` route |
 | CloudFront `/api/v2/search` | New behaviour on `ClientApiGateway`: `CachingDisabled`, `ClientApiOriginRequestPolicy`, GET/HEAD/OPTIONS (beside `cdn/template.yaml:340-346`) |
 | `REF#` item type | A new item type in the existing table |
@@ -772,17 +944,21 @@ mention `href` (§2.5, §3.5) and the "In reply to" link (§1.8, §3.8).
 
 ### 3.2 Signed fetch
 
-This adds signing to the Step 0 fetch.
-- **`signGet`.** `HTTPSignature.signGet(privateKeyPem:keyId:pathAndQuery:host:)` signs
-  `(request-target) host date`.
-  - The request target includes the query string (`signed_request.rb:113`).
-  - It satisfies `signed_request.rb:54-57`.
-  - It reuses `buildSigningString` (`HTTPSignature.swift:181-190`).
-- **Re-signing.** `fetchRemoteObject` takes an optional signer and re-signs every redirect hop.
-- **Signer.** The signer is the requesting actor, with keyId `https://{serverDomain}/users/{u}#main-key`.
-  - The key comes from `{SSM_KEY_PREFIX}/{u}`, cached per container in a dictionary keyed by
-    username.
-  - Mastodon accepts any verifying account key (`signature_verification.rb:45` onward).
+Signing itself ships in step 0: `fetchRemoteObject` takes a `FetchSigningKey` and the middleware
+re-signs every hop with FederatedActivityPublisher#279's
+`HTTPSignature.signGet(privateKeyPem:keyId:path:host:date:)`. That helper signs
+`(request-target) host date`, with the query string in the request target, which is what
+`signed_request.rb:54-57,113` requires. Phase 3a only adds signers:
+- **Search** signs as the caller, with keyId `https://{serverDomain}/users/{u}#main-key`.
+  Mastodon accepts any verifying account key (`signature_verification.rb:45` onward).
+- **`DeliverHandler`** signs its actor fetch (§3.5) as the job's `actorUsername`, with the key it
+  already reads (`DeliverHandler/main.swift:52-58`).
+- **Keys** come from `{SSM_KEY_PREFIX}/{u}`, cached per container in a dictionary keyed by
+  username.
+- **IAM.** `SearchHandler`'s grant widens to the actor keys. If FederatedActivityPublisher#282 has
+  landed, that is `activity/${Stage}/keys/actors/*`. If not, it is `activity/${Stage}/keys/*`
+  with #279's pattern: an explicit `Deny` on `jwt-signing-key` and on `ssm:GetParametersByPath`
+  (it still needs `session-signing-key` and `client-token` for auth).
 
 ### 3.3 Remote resolution in search
 
@@ -801,9 +977,9 @@ nothing.
    - Require `json['id'] == attributedTo` (`fetch_remote_actor_service.rb:16`).
    - Parse it with the parser extracted from `KeyManager.fetchActorDocument` (`KeyManager.swift:89-105`),
      extended to return `followers` and `url`.
-   - Then write `REMOTE_ACTOR#{attributedTo}`. **This makes `SearchHandler` a second writer of the
-     inbound-signature trust anchor.** It writes only after the `id` check, from a document the
-     actor's own origin served. That is the same trust basis `KeyManager` uses.
+   - It writes nothing to `REMOTE_ACTOR#`. The record is the inbound-signature trust anchor and
+     already has two writers (Current FAP behaviour). Nothing in this spec would read a
+     search-time copy: `DeliverHandler` fetches *R*'s actor at delivery (§3.5).
 5. **Derive visibility** (`status_parser.rb:101-111`).
    - `to` and `cc` may be arrays or strings.
    - All three public spellings count (`tag_manager.rb:14-15`).
@@ -880,8 +1056,8 @@ quote-accept Update reaches *R* without SSM access.
 |---|---|
 | Remote resolve in `SearchHandler` | An extension of the phase 2 handler |
 | Remote `REF#` entries (`META` or `VIEWER#`) | The existing item type, with a TTL |
-| `signGet` and signer support in `fetchRemoteObject` | An extension of the Step 0 fetch |
-| Second `REMOTE_ACTOR#` writer | `SearchHandler`, after actor validation |
+| Signers for search and `DeliverHandler` | Callers of the step 0 signer support (§3.2) |
+| `SearchHandler` SSM widening | Actor keys added to its grant (§3.2) |
 | `DeliveryJob.targetActorUri` | An extension of the job and of `DeliverHandler` |
 | `REF#` invalidation | An extension of `handleDelete` / `handleUpdate` |
 | Shared actor-document parser | Extracted from `KeyManager` |
@@ -956,11 +1132,18 @@ direct parent is remote**. Those are exactly the activities `forward_for_reply` 
   features FAP's documents use, run in FAP's own CI.
 - **Mastodon-generated fixtures.** These are committed together with the generator script that
   produced them, run once against Mastodon's reference stack (Ruby `json-ld` 3.3.2,
-  `json-ld-preloaded` 3.3.2, `rdf-normalize` 0.7.0, and Mastodon's two context initializers):
-  - a FAP-shaped Create
-  - its canonical N-Quads and both hashes
-  - the signature for a fixed test key and timestamps
-  - the document **compacted against Mastodon's `full_context`**, for the compaction-safety test
+  `json-ld-preloaded` 3.3.2, `rdf-normalize` 0.7.0, and Mastodon's two context initializers).
+  - **Where it runs** (this spec's design): in a throwaway container on a maintainer's machine,
+    from a stock Ruby image with those three gems pinned, with no FAP credentials: no AWS
+    credentials or SSM access, no GitHub token, no FAP actor keys and no mounted home directory.
+    The test key is generated for the fixture and is not an actor key. Its network use is the gem
+    install. It runs third-party code, which the maintainer's option B ("Mastodon-generated
+    fixtures", decision 13) covers; it never runs in FAP's CI.
+  - The fixtures it writes are:
+    - a FAP-shaped Create
+    - its canonical N-Quads and both hashes
+    - the signature for a fixed test key and timestamps
+    - the document **compacted against Mastodon's `full_context`**, for the compaction-safety test
 
 ### Phase 3b components
 
@@ -968,10 +1151,10 @@ direct parent is remote**. Those are exactly the activities `forward_for_reply` 
 |---|---|
 | LD signer | A new ActivityPubCore module: three embedded contexts, RSA-SHA256, using the canonicalization module |
 | Canonicalization | A module FAP owns in ActivityPubCore: `toRdf` for FAP's shapes and RDFC-1.0 (decision 13) |
-| Vendored reference code | The two vetted packages' source at a pinned commit, licences retained, authors credited (decision 13) |
+| Vendored reference code | The two packages' source at a pinned commit, licences retained, authors credited (decision 13) |
 | Credits | `CONTRIBUTORS.md` and a README Acknowledgements section (decision 13) |
 | Context alignment | A change to `buildNoteJSON` / `buildCreateActivityJSON` |
-| Fixture generator | A committed script, run once outside CI |
+| Fixture generator | A committed script, run once outside CI in an isolated container with no FAP credentials |
 
 **Invariants.**
 - LD signing is required by decision 10.
@@ -980,77 +1163,100 @@ direct parent is remote**. Those are exactly the activities `forward_for_reply` 
 
 ## Testing
 
-Every test includes a negative control, and each must be seen going red with its capability
-removed before it counts.
+Every test below names a negative control, and each control must be seen going red with its
+capability removed before the test counts.
 
 ### Unit (`Tests/ActivityPubCoreTests`, Swift Testing)
 
-**Step 0 and 0b**, each against a local test server, run on Linux as well as macOS.
+**Step 0**, against local test servers, run on Linux as well as macOS.
 
-The harness uses real sockets, not a `URLProtocol` stub, because a stub skips the layer under test.
+The harness uses real sockets, not a stub transport, because a stub skips the layer under test.
 
-- **Step 0 server.** A minimal HTTP/1.1 server written in the test target on POSIX sockets,
-  listening on loopback over plain `http`. No new package. It serves fixed responses, redirects,
-  oversize bodies and a slow drip.
-- **Scheme policy is injected.** `fetchRemoteObject` takes its scheme policy as a parameter
-  whose default is `https` only. `KeyManager` takes the same defaulted parameter and passes it
-  through. Every production call site uses the default, and the permissive policy is built only
-  in the test target. Step 0 tests pass one that admits `http` to the test server's ports they
-  name (A, or A and B below) and nothing else, on the initial request and on every hop.
-  Negative control: the default policy refuses the test server's `http` URI.
-- **Per-hop scheme check in step 0.** The test server listens on two loopback ports, A and B.
-  With a policy admitting only A, a redirect from A to B fails with the policy's refusal.
-  Control: with a policy admitting A and B, the same redirect succeeds. The full
-  `https`→`http` hop test needs a TLS server and runs in 0b.
-- **Every "fails" test checks which control refused.** Each control throws its own error case,
+- **Test servers.** Written in the test target on SwiftNIO, as the spike's is (#283): listening
+  on `127.0.0.1:0`, counting connections, bytes received and closes. They serve fixed responses,
+  redirects, oversize bodies, a slow drip and a stall. `NIOCore`, `NIOPosix`, `NIOSSL` and
+  `NIOHTTP2` are already resolved through `async-http-client` (its `Package.swift` depends on
+  `swift-nio-ssl` and `swift-nio-http2`), so they become direct test-target dependencies and no
+  new package is added. None of them pulls `libxml2-dev` or `libicu-dev` onto the runner, which
+  crashes `FoundationNetworking` test binaries.
+- **TLS.** The TLS server uses `NIOSSLServerHandler` with a certificate from a test-only CA. The
+  CA and the leaf (for `127.0.0.1` and `localhost`, long validity) are committed test fixtures,
+  generated once with `openssl`; they are not secrets. The test client sets the CA as
+  `tlsConfiguration.trustRoots = .certificates([…])` (`NIOSSL`, `TLSConfiguration.swift:352`).
+- **Test client.** Built with the production construction function, given a test address policy
+  that admits only the loopback ports a test names, and the test CA. Tests pass a scheme policy
+  that admits `http` to named test ports. Production builds neither.
+- **The bare client is the negative control for every refusal test.** It is the same request
+  through an `HTTPClient` with AHC defaults (redirects followed, no hook, retries on) and no
+  generated layer or middleware, called with `execute`. Each refusal test asserts that the bare
+  client gets the response the FAP client refuses.
+- **Every refusal test checks which control refused.** Each control throws its own error case,
   and the test asserts that case, so a test can't pass on a connection error or a different
   control.
-- **Why plain http in step 0.** On Linux, `FoundationNetworking` reads its CA bundle from fixed
-  system paths and handles no server-trust challenge, so a test CA can't be injected per task.
-  Plain http still exercises the delegate callbacks, incremental delivery and redirects on Linux,
-  which is what step 0 measures.
-- **Step 0b adds TLS and the address check.** The test server presents a certificate from a
-  test-only CA, passed to the transport as an injected trust value; production passes none and
-  uses the system store. The address policy is injected the same way; tests admit only the test
-  server's loopback port. Negative controls: a production-configured client refuses the test
-  server, on trust and on address.
-- **0b server.** Which TLS server runs the 0b harness on Linux is decided with Open question 1,
-  and any new test-only package is flagged there. It must not pull `libxml2-dev` or
-  `libicu-dev` onto the runner, which crashes `FoundationNetworking` test binaries.
 
-Tests:
-- **Redirects:** 3 pass, and a 4th fails.
-- **Scheme:** an `http://` initial URI fails under the default policy, and a hop to a
-  non-admitted `http` URI fails. In 0b, an `https`→`http` hop fails.
-- **Body:** a body over 1 MB fails.
-- **Content type:** a `text/html` response fails.
-- **Status:** a non-200 fails.
-- **Deadline:** a slow drip fails at the deadline.
-- Negative control: a compliant response passes.
-- **Content type with parameters:** `application/activity+json; charset=utf-8` passes, and
-  `text/html; charset=utf-8` fails.
-- **LD profile:** `application/ld+json; profile="https://www.w3.org/ns/activitystreams"` passes,
-  and bare `application/ld+json` fails.
-- **Key fetch:** the test calls the internal `fetchActorDocument(actorUri:schemePolicy:)` through
-  `@testable import ActivityPubCore`, so no `DynamoDBStore` is needed (`KeyManager.swift:68`).
-  The policy is a method parameter with the `https`-only default. With the test policy, it
-  fetches a valid key document from the test server. An actor URI whose 4-redirect chain ends at
-  a valid key document fails with the redirect error. An actor URI serving a valid key document
-  padded with whitespace past 1 MB fails with the size error. Negative control: the same calls
-  against the pre-move `fetchActorDocument(actorUri:)`, with no policy argument, succeed,
-  because that code has no scheme check, redirect cap or size cap, and both fixtures parse.
-- **Address check (0b):** redirects to `127.0.0.1`, `169.254.169.254` and `10.0.0.1` fail.
-- **Request target (0b):** a URI with a query string and percent-encoded characters reaches the
-  test server byte for byte. Negative control: the same URI through a plain `/{path}` template
-  fails.
-- **One client (0b):** two fetches to different origins through the same client instance each
-  reach their own test server. A fetch with no target bound throws before any connection, and
-  the placeholder origin receives nothing.
+Tests (control in brackets):
+- **Redirects:** 3 pass, and a 4th fails with the redirect error. [Bare client follows the 4th.]
+- **Scheme:** an `http://` initial URI fails under the default policy. With a policy admitting
+  port A only, a redirect from A to B fails. An `https`→`http` hop fails. [Same calls with a
+  policy admitting A and B, or `http`, succeed.]
+- **Body:** a body over 1 MB fails with the size error. [Bare client reads it all.]
+- **Content type:** `text/html`, `text/html; charset=utf-8` and bare `application/ld+json` fail;
+  `application/activity+json; charset=utf-8` and
+  `application/ld+json; profile="https://www.w3.org/ns/activitystreams"` (the exact profile
+  string, since values compare case-sensitively) pass. [Bare client accepts the refused ones.]
+- **Missing content type:** a 200 with no `Content-Type` fails with the middleware's error.
+  [The generated client without the middleware accepts it, which is the runtime gap §0.1 names.]
+- **Status:** a 404 and a 204 fail. [Bare client returns them.]
+- **Deadline:** a slow drip that keeps sending bytes fails at the deadline; a stall after the
+  response head fails within the deadline plus `timeout.read`. [Bare client with no deadline
+  completes the drip.]
+- **Key fetch:** `fetchActorDocument(actorUri:signingKey:client:)`, through
+  `@testable import ActivityPubCore`, fetches a valid key document from the test server; a
+  4-redirect chain ending at a valid document fails with the redirect error; a valid document
+  padded past 1 MB fails with the size error. [On the parent commit (with #279, before step 0),
+  `fetchActorDocument(actorUri:signingKey: nil)` returns a key for both, because that code has
+  no redirect or size cap and both fixtures parse.]
+- **Address check, end to end:** a redirect from port A (admitted) to `127.0.0.1` on port C (not
+  admitted) fails with the address error; server C records a connection, 0 bytes and a close.
+  [A client built without the hook delivers the request to C.]
+- **Address classifier:** the policy refuses every literal in §0.2, including the IPv4-mapped
+  forms, `169.254.169.254` and `10.0.0.1`, and admits a public address. These are unit tests on
+  literals: an end-to-end connect to the metadata address would reach a real service on a cloud
+  runner. [An allow-all policy turns every refusal case red.]
+- **Rejected channel is closed:** server C above records the close. [A hook that fails without
+  calling `close()` leaves `closes == 0`, as the spike's T1 did.]
+- **No connection retries:** a refused address gets exactly 1 connection. [With
+  `retryConnectionEstablishment = true`, more than 1, as in the spike's T1b.]
+- **HTTP/1.1 only:** a TLS test server offering `h2` and `http/1.1` by ALPN, on a port the
+  address policy refuses, is refused. [With `httpVersion = .automatic`, the connection
+  negotiates `h2`, the HTTP/1.1 hook never runs, and the request reaches the server.]
+- **Trust:** the test client reaches the TLS server. [A client with the system trust store
+  refuses it.]
+- **Request target:** a URI with a query string and percent-encoded characters reaches the test
+  server byte for byte. [The same URI through a plain `/{path}` template does not.]
+- **Signing:** a signed fetch carries a `Signature` over `(request-target) host date` that
+  verifies against the actor's public key, and a redirected fetch is signed again with the
+  second hop's path. [An unsigned call carries no `Signature`; reusing the first hop's headers
+  fails verification on the second.]
+- **One client, concurrent:** two fetches to servers A and B run concurrently through one
+  `RemoteFetchClient`, and server A holds its response until B has received its request; each
+  reaches its own server. A fetch with no context bound throws the no-target error before any
+  connection. [A test-only middleware variant that keeps the target in a stored property on the
+  shared middleware sends one fetch to the wrong server.]
+
+**Phases 1 to 3b: the capability-removed control.** For every unit test below, the control is the
+same test on the step's parent commit, where the behaviour under test doesn't exist yet; it must
+fail there. The cases each test lists as "negative control" are additional inputs on the other
+side of the rule, which the test must also tell apart.
 
 **Phase 1**
 - **`buildNoteJSON`** emits `inReplyTo` when `inReplyToId` is set.
   - Negative control: a legacy `inReplyTo` without it emits no key.
-- **The resolver** returns `none`, `resolved` or `notFound`.
+- **The resolver** returns `none` for no `in_reply_to_id`, `resolved` for the caller's own status,
+  and `notFound` for an unknown id.
+  - Negative control: an id that exists only in another actor's partition gives `notFound` in
+    phase 1. On the parent commit, the create path copies any id verbatim
+    (`PostHandler/main.swift:310`) and the `notFound` case fails.
 - **`cappedReplyVisibility`** covers all nine pairs.
   - Negative control: `public` under `private` gives `private`.
 - **`buildStatusResponse`** returns the stored ids.
@@ -1106,6 +1312,7 @@ Tests:
   byte, and passes the W3C suites in FAP's CI.
   - Negative control: changing one character of `content` changes `document_hash`.
 - **Signature.** The signed fixture verifies with an independent RSA-SHA256 check.
+  - Negative control: flipping one byte of `signatureValue` fails the check.
 - **Compaction safety.** A port of `safe_for_forwarding?` compares the FAP document with the
   committed Mastodon compaction fixture, and passes.
   - Negative control: the fixture of a document with the pre-alignment `quoteUri` mapping fails
@@ -1119,10 +1326,16 @@ Fixtures are decoded through the generated types:
 - `status-reply.json` and `status-legacy.json` (`Components.Schemas.Status`).
   Negative control: marking `in_reply_to_account_id` `required:` makes the legacy fixture fail.
 - `search-results.json` (`SearchResults`).
+  Negative control: the same fixture without `statuses` fails to decode.
 
 ### Integration (`integration-tests/`, on stage, generated `APIClient`)
 
+These count only once FederatedActivityPublisher#278 is fixed (Sequence).
+
 **Phase 1:** round trip, unknown parent, visibility cap, and a chain of three.
+- Negative control: the same four cases run against the stage build before phase 1 fail: the
+  round trip has no `inReplyTo` on the Note, the unknown parent gets 200, the reply keeps the
+  requested visibility, and the chain's Notes are unlinked.
 
 **Phase 2** (needs a second stage actor and token)
 - A searches B's unlisted status URL, gets B's ULID and replies.
@@ -1137,6 +1350,7 @@ Phase 3 needs a third-party server, so it is in the manual federation checks bel
 ### Federation (manual, against stage)
 
 - **BrowserPub** (https://browse.activitypub.dev) renders "in reply to" up the chain.
+  - Negative control: a chain posted by the pre-change build shows no "in reply to".
 - **Mastodon, phases 1 and 2.** `/context` for the last post lists the others as `ancestors`.
 - **Mastodon, phase 3a.** On a Mastodon instance the tester controls or has an account on:
   - Search *R*'s public post, then reply with the returned id.
@@ -1160,18 +1374,32 @@ Phase 3 needs a third-party server, so it is in the manual federation checks bel
 
 ### Build gate
 
-- Build every target for Linux with `swift package archive --allow-network-connections docker`.
-  The deployed binary is the Linux build, and a macOS `swift build` doesn't catch Linux-only
-  compile errors.
-- Run the Step 0, 0b and 3b unit tests on Linux.
+- Build every target the way the deploy does:
+  `swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3`
+  (`deploy-stage.yml:326`), on the glibc Amazon Linux 2023 image from
+  `docker/Dockerfile.al2023-swift`, with OpenSSL's shared libraries bundled into each zip's `lib/`.
+  The deployed binary is that build, and a macOS `swift build` doesn't catch Linux-only compile
+  errors. For step 0 this is also the C4 measurement (§0.2).
+- Run the Step 0 and 3b unit tests on Linux.
 - Build the generated consumers against the branch's `openapi.yaml`.
 
 ## Unverified
 
-- **The transport under the FAP-generated fetch client.** The client is decided (decision 14).
-  The transport is Open question 1.
-- **Incremental delivery and redirect callbacks in `FoundationNetworking`.** Read in
-  `swift-corelibs-foundation` source (Step 0); the Step 0 Linux tests measure it.
+- **C4: AsyncHTTPClient in the deployed build.** No deployed handler links it today (#283). The
+  step 0 PR's archive build on `swift-al2023:6.3` and a stage key fetch are the measurement.
+- **Hook ordering for `https`.** Read in source: the hook runs after the TLS handshake
+  (`HTTPConnectionPool+Factory.swift:532`). The spike measured plain `http` only. A TLS variant
+  of the end-to-end address test (server C records a completed handshake and 0 HTTP bytes)
+  measures it.
+- **TaskLocal isolation on one client.** [inferred] from `UniversalClient.send` awaiting the chain
+  inline. The concurrent "One client" test measures it.
+- **Cancelling a pending body read.** Whether task cancellation ends an AHC body read that is
+  waiting for bytes. The stall test measures it; `timeout.read` bounds it either way.
+- **Pooled connections across a Lambda freeze.** The long-lived client keeps idle keep-alive
+  connections in its pool, and a frozen container can thaw after the server has closed them.
+  Whether AHC's pool detects that before reuse, or the first fetch after a long freeze fails, is
+  not known. `connectionPool.idleTimeout` defaults to 60 s (`HTTPClient.swift:1383`). A stage
+  fetch after an idle period longer than the remote server's keep-alive measures it.
 - **Live secure-mode acceptance of a regular actor key.** The source has been read
   (`signature_verification.rb:45` onward). The phase 3a secure-mode check is the measurement.
 - **Mastodon internals.** The `items_context_url` path shape, a read of `context` on intake, the
@@ -1179,9 +1407,33 @@ Phase 3 needs a third-party server, so it is in the manual federation checks bel
   of these is relied on.
 - **Forcing out-of-order delivery** for the manual check. No mechanism has been identified.
 
+## Guards and fallbacks
+
+Each guard or fallback this spec plans, and whether it rests on an observed failure. "Read in
+code" means the defect was seen in FAP's source, not in production.
+
+| Guard or fallback | Where | Observed failure it rests on |
+|---|---|---|
+| Signed fetches | Step 0, §3.2 | Yes: unsigned actor fetches answered 401 by mastodon.social, in inbox logs (FederatedActivityPublisher#279) |
+| Visibility cap on local parents | §1.2 | Read in code: `ObjectHandler` serves any visibility (FederatedActivityPublisher#270) |
+| Scheme, redirect, body, content-type, status and deadline controls | Step 0 | None. Security controls, matching Mastodon's fetch |
+| Connection-level address check | Step 0 | None. Security control |
+| Middleware throws with no target bound | §0.1 | None |
+| Missing `Content-Type` refused | §0.1 | None. Closes a gap read in the runtime |
+| 10 s search deadline | §3.3 | None. Rests on the documented 29 s API Gateway limit |
+| `repliesCount` failure logged and swallowed | §1.6 | None |
+| Safe-link scheme check and fallback | §2.7 | None. Security control |
+| Remote validation (`id`, `attributedTo` host, actor `id`) | §3.3 | None. Matches Mastodon |
+| `META` deleted when a re-search derives `private` | §3.1 | None. Security control |
+| Never change `visibility` from an Update | §3.1 | None. Security control |
+| Delete/Update invalidation only from the object's origin | §3.1 | None. Security control |
+| Unsigned delivery when LD signing fails | §3.6 | None |
+
 ## Decisions (2026-10-20)
 
-The maintainer decided the following on 2026-10-20.
+The maintainer decided the following on 2026-10-20. Each item states his decision; where his
+own words are known they are quoted. Section references, function and type names, and anything
+labelled as this spec's are the spec's implementation of the decision, not his words.
 
 1. **Scope: all replies.** Self, other local actors and remote statuses, each shippable on its own.
 2. **`replies` collection:** a follow-up.
@@ -1232,61 +1484,37 @@ The maintainer decided the following on 2026-10-20.
       `rdf-normalize` are linked from the code as references. Nothing is copied from them.
     - The gate in §3.6 applies to all of it. Step 3b stays last, because delivery degrades to
       unsigned.
-14. **HTTP client for remote fetches: FAP's own, generated with swift-openapi-generator**
-    (former Open Question 2; the revision at `6271b24`).
-    - FAP writes an OpenAPI document for the remote ActivityPub object fetch: a `GET` with the
-      AS `Accept` header, a 200 response in `application/activity+json` or
-      `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`, and redirects.
-    - The client is generated by `swift-openapi-generator`, which `Package.swift` already declares
-      (`Package.swift:36-38`) for the `APIClient` target (`:238-248`). It gets its own target.
-    - **Mapping a remote URI to the operation.** OpenAPI path parameters default to `simple` style
-      and `allowReserved` applies only to query parameters, so one `/{path}` template can't carry an
-      arbitrary path and query. Instead:
-      - the document's `servers:` holds a placeholder origin and the operation path is `/`;
-      - **one client** is built once per Lambda container and reused for every fetch;
-      - `fetchRemoteObject` binds the target URI in a `@TaskLocal` for the duration of the call;
-      - a FAP `ClientMiddleware` reads it and calls `next` with the URI's origin as the base URL
-        and the request's path and query set to the URI's, byte for byte. `next` takes the
-        request and the base URL as arguments: `next: @Sendable (HTTPRequest, HTTPBody?, URL)`
-        (`apple/swift-openapi-runtime`, `Sources/OpenAPIRuntime/Interface/ClientTransport.swift`).
-      - With no target bound, the middleware throws, so the placeholder origin is never contacted.
-      The signed `(request-target)` (§3.2) and the `id == q` check (§3.3) both depend on this.
-    - **Where the controls live.** The transport owns everything that happens during the exchange:
-      redirects, per-hop scheme checks, signing of every hop including the first, the body cap,
-      the deadline and the address check. Signing in the transport happens after the middleware
-      has set the path and query, so `(request-target)` is the real one. Content-type and status
-      checks can run on the response in FAP code.
-    - **Dependencies.** The generator and runtime are already declared. Whether the transport adds a
-      package entry to `Package.swift` is part of Open question 1. Nothing imports `APIClient` today
-      (only `Package.swift:240` names it), so `swift-openapi-runtime` and the generator plugin
-      reach the deployed Lambdas, and the plugin runs in the `swift package archive` Docker build,
-      for the first time.
+
+14. **HTTP client for remote fetches: generated, on an existing transport.** The maintainer's
+    words, in order:
+    - On the client (former Open Question 2, the revision at `6271b24`): "2 we write our own by
+      generating from swift-OpenAPI-generator".
+    - On a client built per request: "A client being built per request?! No."
+    - On writing a transport: "Why would we write our own transport layer when they already
+      exist from the Apple Swift ecosystem that we've already used?" So the transport is the
+      existing `AsyncHTTPClientTransport` (`swift-server/swift-openapi-async-http-client`) over
+      `swift-server/async-http-client`, FAP's fetch controls live in a `ClientMiddleware`, and FAP
+      writes no transport.
+    - On AsyncHTTPClient's connection debug initializer as the address check, after the spike
+      (FederatedActivityPublisher#283): "Yes acceptable. No more probe." The production settings
+      the spike requires are part of that decision: the hook closes the rejected channel itself,
+      `retryConnectionEstablishment = false`, `.http1Only`, no proxy, and
+      `redirectConfiguration = .disallow` with each hop handled in FAP's middleware. The stated
+      residual weakness: the TCP connect, and for `https` the TLS handshake, reach the address
+      before the hook rejects it; only the HTTP request is blocked.
+
+    **Implementation (this spec's design, not the maintainer's words):** §0.1 and §0.2. One client
+    per container; one `@TaskLocal` `RemoteFetchContext` carrying target, signer, deadline and
+    scheme policy; the address policy and trust roots set when the client is built; the client
+    injected into `fetchRemoteObject` with `.shared` as the default; one middleware that does the
+    URL rewrite and every per-hop control; the generated client `internal` to `ActivityPubCore`;
+    the placeholder origin `https://remote-fetch.invalid`.
 
 ## Open questions
 
-1. **The transport under the generated fetch client (step 0b).** The transport owns redirects,
-   per-hop scheme checks and re-signing, the 1 MB cap, the absolute deadline and the address check
-   (decision 14).
-   - `OpenAPIURLSession` won't do. Its README says streaming is available only on Apple platforms
-     and points Linux users to the AsyncHTTPClient transport
-     (https://github.com/apple/swift-openapi-urlsession), so on the Lambda the body arrives
-     buffered. The per-hop checks also need the redirect callback on a delegate FAP owns, so they
-     live in the transport FAP writes.
-   - `URLSessionTaskTransactionMetrics.remoteAddress`
-     (https://developer.apple.com/documentation/foundation/urlsessiontasktransactionmetrics/remoteaddress)
-     is documented for Apple platforms only, and it reports a connection after it is made, so it
-     can't refuse one.
-   - So the transport needs a TLS-capable connection layer that either exposes a connect-time hook
-     or connects to a pre-validated address while keeping the original `Host` and SNI.
-
-   - The same choice settles the Linux test harness: which https server the step 0b tests run
-     against, and how a test-only CA is injected (Testing, Step 0 and 0b). The transport must also
-     accept plain `http` under an injected test policy, so the step 0 tests carry over.
-
-   **Proposed:** while planning step 0b, list what the resolved dependency graph already provides
-   for both, with receipts, name any new package (runtime or test-only), and bring the choice back
-   to the maintainer before writing it. Step 0 ships first, on the existing fetch, and step 3a
-   waits for 0b.
+1. **Guards without an observed failure.** Most guards and fallbacks in "Guards and fallbacks"
+   rest on no observed failure. Are these security controls exempt from the observed-failure
+   rule, or should any of them be dropped?
 2. **"List them as contributors."** This spec reads it as a new `CONTRIBUTORS.md` plus a README
    Acknowledgements section (decision 13). Confirm, or name another place (for example GitHub's
    co-author trailers on the vendoring commit).
