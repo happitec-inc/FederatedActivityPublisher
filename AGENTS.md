@@ -261,6 +261,18 @@ aws cloudformation describe-stacks --stack-name activity-app-{stage} \
 ```
 Replace `{stage}` with `prod` or `stage` as appropriate.
 
+## How the Lambdas Are Built
+
+Deploys build every Lambda in CI; you don't build them by hand to deploy. Knowing how helps when a deploy fails or a handler misbehaves at runtime:
+
+- **Platform.** Each handler is a glibc binary built on Amazon Linux 2023 with Swift 6.3, inside the `swift-al2023:6.3` image from `docker/Dockerfile.al2023-swift`. It is not a Static Linux SDK (musl) build. The Lambda runtime is `provided.al2023` on arm64.
+- **Linking.** The Swift standard library is linked statically (`--static-swift-stdlib`). OpenSSL is not: each zip carries `lib/libcrypto.so.3` and `lib/libssl.so.3` copied from the build image, and the template sets `LD_LIBRARY_PATH=/var/task/lib` so the handler finds them.
+- **One build.** `scripts/build-all-lambdas.sh` runs in a single `docker run` as the runner's uid. It resolves once, runs one `swift build -c release --static-swift-stdlib -Xlinker -s` for every product, then zips each handler named by a `CodeUri` in `activity-app/functions/template.yaml` to `.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/{Target}/{Target}.zip`. `ActivityProvisioner` is never zipped or deployed. Stage's fast path (`scripts/build-selective.sh`) rebuilds only changed handlers into the same layout.
+- **Pinned dependencies.** `Package.resolved` is committed and the build refuses to change it, so a deploy compiles exactly the pinned versions. Updating dependencies means committing a new `Package.resolved` (generated with Swift 6.3).
+- **PR check.** The `Lambda Build` workflow runs the same script on pull requests that touch the build (no AWS credentials) and checks the zip layout with `scripts/verify-lambda-zips.sh`.
+
+See `Sources/ActivityPubCore/Documentation.docc/BuildingAndDeploying.md` for the full pipeline.
+
 ## Limitations
 
 - No OAuth2 yet -- tokens are pre-shared per-account in DynamoDB, not obtainable via login flow

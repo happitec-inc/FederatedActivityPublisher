@@ -4,7 +4,7 @@ Build Lambda binaries with Docker, deploy with SAM, and manage CI/CD pipelines.
 
 ## Overview
 
-The project builds Swift Lambda binaries targeting Amazon Linux 2023 (ARM64). A custom Docker image handles cross-compilation, and SAM CLI manages packaging and CloudFormation deployment. Seven GitHub Actions workflows automate the full lifecycle from deployment through documentation publishing. Actor provisioning and token minting are deliberately not among them — they run locally via the `ActivityProvisioner` CLI (see <doc:ProvisioningAccounts>).
+The project builds Swift Lambda binaries targeting Amazon Linux 2023 (ARM64). Every Lambda is built inside a custom Amazon Linux 2023 Docker image (glibc, Swift 6.3), and SAM CLI manages packaging and CloudFormation deployment. GitHub Actions workflows automate the full lifecycle from deployment through documentation publishing. Actor provisioning and token minting are deliberately not among them — they run locally via the `ActivityProvisioner` CLI (see <doc:ProvisioningAccounts>).
 
 ## GitHub Actions Workflows
 
@@ -14,7 +14,7 @@ The primary stage deployment workflow with a forking path: a **detect** job anal
 
 **Fast path** (~2.5 min with cache): When only individual Lambda handler source files changed (not `ActivityPubCore`, `Package.swift`, templates, or workflows), the workflow builds only the affected targets, bundles OpenSSL libraries, and updates each Lambda function directly via `aws lambda update-function-code`. No SAM deploy, no CloudFormation changeset.
 
-**Full path** (~5-10 min): When core dependencies, templates, workflows, or the Dockerfile changed, the workflow builds all Lambda handlers via `swift package archive`, bundles OpenSSL, and deploys via SAM with nested stacks (`CAPABILITY_AUTO_EXPAND`).
+**Full path**: When core dependencies, templates, workflows, or the Dockerfile changed, the workflow builds all Lambda handlers with `scripts/build-all-lambdas.sh` (see Building Lambda Binaries, below) and deploys via SAM with nested stacks (`CAPABILITY_AUTO_EXPAND`).
 
 After either path completes, integration tests run automatically in a Docker container against the deployed stage stack.
 
@@ -29,13 +29,14 @@ After either path completes, integration tests run automatically in a Docker con
 **Key steps (full path):**
 1. Clean workspace (self-hosted runners only)
 2. Run `scripts/substitute-variables.sh` to replace domain placeholders in templates
-3. Install Swift 6.3 on the runner if not already present
-4. Build or reuse a cached Docker image from `docker/Dockerfile.al2023-swift`
-5. Build Lambda zip archives via `swift package archive`
-6. Bundle OpenSSL libraries (`libcrypto.so.3`, `libssl.so.3`) into each Lambda zip
-7. Deploy with `sam deploy` using `CAPABILITY_IAM CAPABILITY_AUTO_EXPAND`
-8. Upload frontend assets to S3 with immutable cache headers
-9. Run integration tests in Docker against the deployed stack
+3. Build or reuse a cached Docker image from `docker/Dockerfile.al2023-swift`
+4. Restore the Swift build cache (keyed on `Package.resolved` and the Dockerfile)
+5. Run `scripts/build-all-lambdas.sh` in one `docker run`, as the runner's uid: one `swift build` for every product, then one zip per deployed handler with `libcrypto.so.3` and `libssl.so.3` in `lib/`
+6. Deploy with `sam deploy` using `CAPABILITY_IAM CAPABILITY_AUTO_EXPAND`
+7. Upload frontend assets to S3 with immutable cache headers
+8. Run integration tests in Docker against the deployed stack
+
+The runner itself needs Docker but no Swift toolchain for the full path.
 
 See <doc:ArchitectureOverview> for a diagram of the resources this stack creates.
 
@@ -118,6 +119,19 @@ Runs the `ActivityPubCoreTests` unit test suite on every pull request.
 
 **Triggers:**
 - Pull request targeting `main`
+- Manual dispatch
+
+### Lambda Build (`lambda-build.yml`)
+
+Runs the full Lambda build on a pull request, without AWS credentials, and checks the zips. It runs `scripts/build-all-lambdas.sh` in the AL2023 image and then `scripts/verify-lambda-zips.sh`, which asserts that:
+
+- the produced zips are exactly the `CodeUri` zips in `activity-app/functions/template.yaml`, and there is no `ActivityProvisioner` zip;
+- each zip has an executable `bootstrap` (an ELF binary for the runner's architecture with no `libswiftCore.so` dependency) and `lib/libcrypto.so.3` plus `lib/libssl.so.3`.
+
+The job also logs the runner's CPU count, memory and Docker limits. It restores the deploy build cache but never saves one.
+
+**Triggers:**
+- Pull request targeting `main` that changes `Package.swift`, `Package.resolved`, `scripts/**`, `docker/**`, `.github/workflows/**` or `activity-app/functions/template.yaml`
 - Manual dispatch
 
 ### Run Integration Tests (`run-integration-tests.yml`)
@@ -243,11 +257,13 @@ Both deployment workflows cache the Docker build image using GitHub Actions `act
 
 ### Swift Build Caching
 
-The `.build` directory is cached across workflow runs, keyed by `Package.resolved` content and commit SHA. This significantly speeds up incremental builds, especially on the fast path where only a few targets need recompilation.
+The `.build` directory is cached across workflow runs. The key combines a hash of the committed `Package.resolved` and `docker/Dockerfile.al2023-swift` with the commit SHA, and a run restores the newest cache with the same `Package.resolved` and Dockerfile. Because dependency versions are pinned, an unchanged `Package.resolved` means the restored dependency builds are still valid. The full and fast paths share the key.
+
+The full build keeps dependency clones and the SwiftPM manifest cache inside `.build` (`--disable-dependency-cache --manifest-cache local`), so they are cached with it, and the container runs as the runner's uid so the cached files are never root-owned.
 
 ### OpenSSL Bundling
 
-Lambda functions require OpenSSL libraries (`libcrypto.so.3`, `libssl.so.3`) that are not available in the Lambda runtime. Both deployment workflows extract these libraries from the AL2023 Swift Docker image and bundle them into each Lambda zip file. The Lambda environment variable `LD_LIBRARY_PATH` is set to `/var/task/lib` so the bundled libraries are found at runtime.
+The handlers are glibc binaries built on Amazon Linux 2023, not with the Static Linux SDK (musl). The Swift standard library is linked statically (`--static-swift-stdlib`), but OpenSSL is not. The `provided.al2023` runtime does not ship `libcrypto.so.3` and `libssl.so.3`, so the build copies them out of the AL2023 Swift Docker image into each zip's `lib/` directory. The template's `Globals` set `LD_LIBRARY_PATH` to `/var/task/lib` so the bundled libraries are found at runtime. The full path does this inside `scripts/build-all-lambdas.sh`; the fast path adds them to each changed zip in a separate step.
 
 ### Frontend Assets
 
@@ -296,19 +312,34 @@ The repository includes a Dockerfile at `docker/Dockerfile.al2023-swift` for the
 docker build -t activity-builder -f docker/Dockerfile.al2023-swift .
 ```
 
-This image is based on Amazon Linux 2023 with Swift 6.3 and all required build dependencies (OpenSSL, libxml2, libcurl, SQLite). It supports both x86_64 and ARM64 architectures.
+This image is based on Amazon Linux 2023 with Swift 6.3 and all required build dependencies (OpenSSL, libxml2, libcurl, SQLite, plus `zip`, `unzip` and `binutils` for packaging and checks). It supports both x86_64 and ARM64 architectures. The workflows tag it `swift-al2023:6.3`.
 
-## Building Lambda Binaries Locally
+## Building Lambda Binaries
 
-Use the Swift Package Manager's Lambda archiver plugin to build all Lambda handlers:
+`scripts/build-all-lambdas.sh` is the full build. The deploy workflows and the PR check run it, and you can run it the same way on any machine with Docker:
 
 ```bash
-swift package --allow-network-connections docker archive \
-  --base-docker-image swift-al2023:6.3 \
-  --disable-docker-image-update
+docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp/home \
+  -v "$PWD:/workspace" -w /workspace swift-al2023:6.3 \
+  bash scripts/build-all-lambdas.sh
 ```
 
-This produces zip archives under `.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/` for each executable target.
+The script:
+
+1. Resolves the package once, against the committed `Package.resolved` (`--force-resolved-versions`, so a stale file fails the build instead of being updated).
+2. Runs one `swift build -c release --static-swift-stdlib -Xlinker -s` with no `--product`, so every product compiles and links in a single parallel build graph. Set `SWIFT_BUILD_JOBS` to cap the job count if parallel links run short of memory.
+3. Reads the deployed handlers from the `CodeUri` entries in `activity-app/functions/template.yaml`, so there is no hand-maintained list. `ActivityProvisioner` is built (it is a product) but never zipped.
+4. Stages each handler as `bootstrap` plus `lib/libcrypto.so.3` and `lib/libssl.so.3`, and zips it once to `.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/{Target}/{Target}.zip`, the path the template's `CodeUri` expects. The zips are written in parallel.
+5. Fails if any expected zip is missing, and prints timings for each phase.
+
+The output path keeps the `AWSLambdaPackager` name from the SwiftPM archive plugin the project used before, so the template did not have to change.
+
+The fast path (`scripts/build-selective.sh`) builds only the changed handlers into the same output layout.
+
+### Pinned dependencies
+
+`Package.resolved` is committed. Every build resolves to exactly the pinned versions, so a new aws-sdk-swift or smithy-swift release does not change what gets compiled until someone updates the file. To pick up new versions, run `swift package update` with Swift 6.3 and commit the new `Package.resolved`; `deploy-stage.yml` treats a `Package.resolved` change as a full build.
 
 ## Topics
 
