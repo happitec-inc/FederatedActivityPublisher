@@ -472,7 +472,7 @@ where FAP is stricter:
 | Content type | The received `Content-Type` parses with the runtime's own `OpenAPIMIMEType` to a concrete type that matches a declared type: `application/activity+json`, or `application/ld+json` with the AS profile. Anything else is refused: missing, empty, unparsable or wildcard | Middleware (§0.1), with the generated client's match behind it | `JsonLdHelper#fetch_resource_without_id_validation`, `#valid_activitypub_content_type?`. Stricter than Mastodon on a multi-profile `ld+json` value (§0.1) |
 | Status | Only 200 counts as success | Middleware, with the generated client's `.undocumented` case behind it | `JsonLdHelper#fetch_resource_without_id_validation` (`response.code == 200`) |
 | Deadline | An absolute deadline from the caller, enforced even while bytes keep arriving | Middleware | Platform limits |
-| Address | Reject loopback, private (RFC 1918 / ULA), link-local and unspecified addresses, applied to the address actually connected to, on every connection | `HTTPClient` connection hook | `request.rb:325-334,389-394` |
+| Address | Refuse every address Mastodon's private-address check refuses (§0.2), applied to the address actually connected to, on every connection | `HTTPClient` connection hook | Mastodon's `PrivateAddressCheck.private_address?`, called per connection (`request.rb:325-334,389-394`). Its `CIDR_LIST` (`app/lib/private_address_check.rb`) is adopted verbatim. The ranges behind its Ruby `IPAddr` predicates are named by FAP, not read from Ruby, so parity is claimed for `CIDR_LIST` only (§0.2) |
 
 ### 0.1 Shape
 
@@ -643,11 +643,33 @@ them.
 | `redirectConfiguration = .disallow` (`HTTPClient.swift:1351`) | Redirects come back to the middleware, which validates and re-signs each hop | C3 [measured+negative-control]: T2, `.disallow`, the caller gets the 302 and the target gets 0 connections; T2-control, `.follow(max: 3, allowCycles: false)`, the target is contacted |
 | `timeout.connect = .seconds(5)` and `timeout.read = .seconds(10)` (`HTTPClient.swift:1249,1251`) | `connect` bounds connection setup; AHC's default is 10 s (`connectionCreationTimeout`, `HTTPClient.swift:1256-1258`). `read` is an idle timeout: AHC passes it as the request's `idleReadTimeout` (`ConnectionPool/RequestOptions.swift:44`) and restarts it on every response part read (`ConnectionPool/HTTP1/HTTP1ClientChannelHandler.swift:148`); it has no default, so without it a fully stalled body is never ended. Both values are Mastodon's `connect_timeout: 5` and `read_timeout: 10` (`app/lib/request.rb:86`). With the longest caller deadline of 10 s, the worst case for a stalled body is 10 s + 10 s = 20 s, under the 29 s API Gateway limit | The values are a choice. That `read` ends a stalled body is [unverified] until the stall test runs |
 
-**Address policy.** Refuse loopback (`127.0.0.0/8`, `::1`), RFC 1918, `100.64.0.0/10`, link-local
-(`169.254.0.0/16`, `fe80::/10`), ULA (`fc00::/7`), unspecified, and IPv4-mapped IPv6 forms of
-all of these. The spike's policy test covers 20 literals, among them `::ffff:127.0.0.1`,
-`::ffff:169.254.169.254`, `fe80::1` and `fd00::1`; step 0's classifier test adds literals for
-every range above. A test policy admits named loopback ports only.
+**Address policy: Mastodon's, adopted verbatim.** The policy refuses every address Mastodon's
+`PrivateAddressCheck.private_address?` refuses. Source: `app/lib/private_address_check.rb` in
+`mastodon/mastodon` at `main`, read 2026-10-21
+(https://github.com/mastodon/mastodon/blob/main/app/lib/private_address_check.rb). The file last
+changed in commit `467c933459c7d0e5513475b9e4888afaedfb1074` (2026-07-27), so it is the same at
+the `2c540e4` head the Standards section cites. The method unwraps an IPv4-mapped or
+IPv4-compatible IPv6 address to IPv4, then refuses it if `IPAddr#private?`, `#loopback?` or
+`#link_local?` holds or if it falls in `CIDR_LIST`. FAP adopts that as follows:
+- **`CIDR_LIST`, verbatim, all 24 entries.** IPv4: `0.0.0.0/8`, `100.64.0.0/10`,
+  `172.16.0.0/12`, `192.0.0.0/24`, `192.0.2.0/24`, `192.88.99.0/24`, `198.18.0.0/15`,
+  `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4`, `240.0.0.0/4`, `255.255.255.255`. IPv6:
+  `::/128`, `64:ff9b::/96`, `64:ff9b:1::/48`, `100::/64`, `2001::/32`, `2001:10::/28`,
+  `2001:20::/28`, `2001:db8::/32`, `2002::/16`, `fc00::/7`, `3fff::/20`, `ff00::/8`.
+- **The three Ruby predicates, as named ranges.** Ruby's `IPAddr` source was not read for this
+  spec, so FAP does not claim to reproduce those predicates exactly. It refuses, by name, the
+  ranges they stand for: private `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` and
+  `fc00::/7`; loopback `127.0.0.0/8` and `::1`; link-local `169.254.0.0/16` and `fe80::/10`.
+  These are the ranges FAP's earlier policy already refused.
+- **Unwrapping** (this spec's design, following the method's first line). `::` and `::1` are
+  checked first, as IPv6. An IPv4-mapped address (`::ffff:0:0/96`) or an IPv4-compatible one
+  (`::/96`) is then checked as the IPv4 address it embeds. NAT64 (`64:ff9b::/96`,
+  `64:ff9b:1::/48`) and 6to4 (`2002::/16`) addresses also embed an IPv4 address, and need no
+  unwrapping, because their whole prefixes are refused.
+
+The spike's policy test covers 20 literals, among them `::ffff:127.0.0.1`,
+`::ffff:169.254.169.254`, `fe80::1` and `fd00::1`; step 0's classifier test adds a literal for
+every range above (Testing). A test policy admits named loopback ports only.
 
 **What the hook does not prevent, stated plainly.** The hook runs after the connection is set
 up: after the TCP connect, and for `https` after the TLS handshake, since the factory completes
@@ -1354,9 +1376,20 @@ Tests (control in brackets):
   admitted) fails with the address error; server C records a connection, 0 bytes and a close.
   [A client built without the hook delivers the request to C.]
 - **Address classifier:** the policy refuses every literal in §0.2, including the IPv4-mapped
-  forms, `169.254.169.254` and `10.0.0.1`, and admits a public address. These are unit tests on
+  forms, `169.254.169.254` and `10.0.0.1`, and one literal inside every range of §0.2's list:
+  - Mastodon's `CIDR_LIST`: `0.1.2.3`, `100.64.0.1`, `172.16.0.1`, `192.0.0.1`, `192.0.2.1`,
+    `192.88.99.1`, `198.18.0.1`, `198.51.100.1`, `203.0.113.1`, `224.0.0.1`, `240.0.0.1`,
+    `255.255.255.255`, `::`, `64:ff9b::1`, `64:ff9b:1::1`, `100::1`, `2001::1`, `2001:10::1`,
+    `2001:20::1`, `2001:db8::1`, `2002::1`, `fd00::1`, `3fff::1` and `ff02::1`;
+  - the named ranges: `10.0.0.1`, `192.168.0.1`, `127.0.0.1`, `::1`, `169.254.0.1` and `fe80::1`;
+  - embedded metadata addresses: `64:ff9b::a9fe:a9fe` (NAT64, embedding `169.254.169.254`),
+    `2002:a9fe:a9fe::1` (6to4, embedding it), `::ffff:169.254.169.254` (IPv4-mapped) and
+    `::169.254.169.254` (IPv4-compatible).
+
+  It admits the public addresses `1.1.1.1` and `2606:4700:4700::1111`. These are unit tests on
   literals: an end-to-end connect to the metadata address would reach a real service on a cloud
-  runner. [An allow-all policy turns every refusal case red.]
+  runner. [An allow-all policy turns every refusal case red. The policy without the unwrapping
+  step admits `::169.254.169.254`, and without `CIDR_LIST` admits `64:ff9b::a9fe:a9fe`.]
 - **Address check over TLS (hook ordering):** the same redirect to a refused port C, where C is
   the TLS test server. C records a completed TLS handshake, 0 HTTP bytes and a close, and the
   fetch fails with the address error. This measures the decision-14 residual for `https`: the
@@ -1574,7 +1607,7 @@ code" means the defect was seen in FAP's source, not in production.
 | Signed fetches | Step 0, §3.2 | Yes: unsigned actor fetches answered 401 by mastodon.social, in inbox logs (FederatedActivityPublisher#279) |
 | Visibility cap on local parents | §1.2 | Read in code: `ObjectHandler` serves any visibility (FederatedActivityPublisher#270) |
 | Scheme, redirect, body, content-type, status and deadline controls | Step 0 | None. Security controls, matching Mastodon's fetch |
-| Connection-level address check | Step 0 | None. Security control |
+| Connection-level address check, with Mastodon's `CIDR_LIST` | Step 0, §0.2 | None. Security control |
 | Hook closes the rejected channel itself | §0.2 | Yes, in the spike: without the close the connection stayed open, `closes=0` (FederatedActivityPublisher#283, T1 vs T1c) |
 | `retryConnectionEstablishment = false` | §0.2 | Yes, in the spike: with retries on, a refused host got 7 connections in 2 s on macOS and 9 on Linux (FederatedActivityPublisher#283, T1b) |
 | `httpVersion = .http1Only` | §0.2 | Not observed. FederatedActivityPublisher#283 notes the hook is HTTP/1.1-only as a source reading (its finding 3), and every spike client was `.http1Only`; the step 0 "HTTP/1.1 only" test is the first observation |
