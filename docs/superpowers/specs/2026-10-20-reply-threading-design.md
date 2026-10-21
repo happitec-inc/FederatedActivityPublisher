@@ -705,8 +705,25 @@ Every handler links `ActivityPubCore`, so every handler links AHC.
 (`docker/Dockerfile.al2023-swift`), with `libcrypto.so.3` and `libssl.so.3` copied into each
 zip's `lib/` (`deploy-stage.yml:334-350`). It is not the static Linux SDK. No deployed handler
 links AHC today (#283: 0 `AsyncHTTPClient` symbols in each of the 19 handler binaries), so the
-existing deploy build says nothing about it. The step 0 PR's archive build on that image is the
-measurement, before merge.
+existing deploy build says nothing about it.
+
+C4 is measured on stage, after merge, and fixed forward. That follows the maintainer's
+2026-06-12 call on build validation, as the repository's `CLAUDE.md` records it: PR CI validates
+with `swift test`, the full archive build runs only in `deploy-stage` after merge, no runner VM is
+used by hand, and a broken archive build is fixed forward. The step 0 PR's CI is therefore
+`swift test` on Linux (`.github/workflows/test.yml:13`), and step 0 adds no archive job to PR CI.
+- **Pass.** The `deploy-stage` run for the step 0 merge commit builds the archive
+  (`deploy-stage.yml:326`) and deploys, and on stage an inbound delivery signed by an actor whose
+  key is not cached in `REMOTE_ACTOR#`, for example a first Follow from a remote account, verifies.
+  That verification needs a key fetch, and after step 0 the only GET path in `ActivityPubCore` is
+  the AHC client, so the fetch ran on AHC in the deployed binary.
+- **Fail.** The archive step fails, a handler fails to start, or that key fetch fails with a
+  transport error. A follow-up PR fixes it forward.
+- **Release.** No prod release containing step 0 is cut until C4 has passed on stage. Prod
+  deploys only from a release tag (`CLAUDE.md`, Architecture).
+- **Control.** The before state is #283's count, 0 `AsyncHTTPClient` symbols in each handler
+  binary. The fetch's own capability controls are the Step 0 unit tests, which run on Linux on
+  every PR; C4 adds only the AL2023 build and runtime.
 
 ### 0.3 Behaviour changes
 
@@ -1565,19 +1582,24 @@ Phase 3 needs a third-party server, so it is in the manual federation checks bel
 
 ### Build gate
 
-- Build every target the way the deploy does:
+- **Before merge**, PR CI runs `swift test` on Linux (`.github/workflows/test.yml:13`), which
+  builds every target for Linux and runs the Step 0 and 3b unit tests there. A macOS
+  `swift build` doesn't catch Linux-only compile errors; this does.
+- **After merge**, `deploy-stage` builds every target the way the deploy does,
   `swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3`
   (`deploy-stage.yml:326`), on the glibc Amazon Linux 2023 image from
-  `docker/Dockerfile.al2023-swift`, with OpenSSL's shared libraries bundled into each zip's `lib/`.
-  The deployed binary is that build, and a macOS `swift build` doesn't catch Linux-only compile
-  errors. For step 0 this is also the C4 measurement (§0.2).
-- Run the Step 0 and 3b unit tests on Linux.
+  `docker/Dockerfile.al2023-swift`, with OpenSSL's shared libraries bundled into each zip's
+  `lib/`. The deployed binary is that build. Under the maintainer's 2026-06-12 call (§0.2), this
+  build runs only there, no runner VM is used by hand, and a break is fixed forward. For step 0
+  that run is the C4 measurement (§0.2), with its pass and fail criteria.
 - Build the generated consumers against the branch's `openapi.yaml`.
 
 ## Unverified
 
-- **C4: AsyncHTTPClient in the deployed build.** No deployed handler links it today (#283). The
-  step 0 PR's archive build on `swift-al2023:6.3` and a stage key fetch are the measurement.
+- **C4: AsyncHTTPClient in the deployed build.** No deployed handler links it today (#283). It
+  is measured on stage after merge: the `deploy-stage` archive build for the step 0 merge commit
+  and a stage key fetch for an uncached actor, with the pass and fail criteria in §0.2. A failure
+  is fixed forward, and no prod release containing step 0 is cut before it passes.
 - **Hook ordering for `https`.** Read in source: the hook runs after the TLS handshake
   (`HTTPConnectionPool+Factory.swift:532`). The spike measured plain `http` only. The Step 0
   "Address check over TLS" test measures it.
