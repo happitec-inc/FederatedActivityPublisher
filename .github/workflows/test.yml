@@ -59,6 +59,10 @@ jobs:
       - name: Run unit tests
         run: swift test --filter ActivityPubCoreTests
 
+      # SPIKE (do not merge): run the AsyncHTTPClient address-check spike on Linux.
+      - name: Run spike tests
+        run: swift test --filter SpikeTests
+
       - name: Run schema-conformance tests
         run: swift test --package-path integration-tests --filter SchemaConformanceTests
 
