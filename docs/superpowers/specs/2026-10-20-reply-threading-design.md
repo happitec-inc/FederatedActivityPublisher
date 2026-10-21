@@ -18,7 +18,7 @@ The work ships as five changes, in order. Each can be released on its own.
 
 | Step | Change | Depends on | New components (full list in each section) |
 |---|---|---|---|
-| 0 | **Fetch hardening**, a security change to the existing shared fetch, built on the generated client (decision 14) | FederatedActivityPublisher#279 merged | A FAP-authored OpenAPI document and a client generated from it inside `ActivityPubCore`; one FAP `ClientMiddleware`; one long-lived `HTTPClient` per container behind `AsyncHTTPClientTransport`, with the connection-level address check |
+| 0 | **Fetch hardening**, a security change to the existing shared fetch, built on the generated client (decisions 14 and 16) | FederatedActivityPublisher#279 merged | A FAP-authored OpenAPI document (`Sources/ActivityPubCore/openapi.yaml`) with typed actor and object schemas, and a client generated from it inside `ActivityPubCore`; one FAP `ClientMiddleware`; one long-lived `HTTPClient` per container behind `AsyncHTTPClientTransport`, with the connection-level address check and no connection reuse; `ActorKeyCache` (§0.1) |
 | 1 | Self-replies | — | None |
 | 2 | Replies to other local actors | 1 | `SearchHandler` Lambda; `GET /api/v2/search` route and CloudFront behaviour; `REF#` item type |
 | 3a | Replies to remote statuses, delivered unsigned | 0, 2 | Remote resolve in `SearchHandler`; remote `REF#` entries; actor-URI delivery in `DeliverHandler` |
@@ -448,12 +448,14 @@ unlisted `[followers]`/`[Public]`, and private `[followers]`/`[]`.
 
 ## Step 0 — Fetch hardening (security)
 
-Every remote `GET` goes through `fetchRemoteObject`, and every control below applies to it.
-`KeyManager.fetchActorDocument` moves onto `fetchRemoteObject` in the same change, keeping its
-parser (`KeyManager.swift:89-105`) and the signing key FederatedActivityPublisher#279 gives it.
-So every remote GET is covered: the quote path, inbox object fetches and key fetches. Delivery
-POSTs from `DeliverHandler` are not fetches and are outside this spec; their address check is
-tracked separately (FederatedActivityPublisher#277).
+Every remote `GET` goes through one of two public functions over one client, and every control
+below applies to both: `fetchRemoteObject`, which returns a typed object document, and the new
+`fetchRemoteActor`, which returns a typed actor document (§0.1, decision 16).
+`KeyManager.fetchActorDocument` moves onto `fetchRemoteActor` in the same change, keeping the
+signing key FederatedActivityPublisher#279 gives it; its hand parser (`KeyManager.swift:89-105`)
+is replaced by the actor schema. So every remote GET is covered: the quote path, inbox object
+fetches and key fetches. Delivery POSTs from `DeliverHandler` are not fetches and are outside
+this spec; their address check is tracked separately (FederatedActivityPublisher#277).
 
 **Base.** Step 0 builds on FederatedActivityPublisher#279, which adds
 `HTTPSignature.signGet(privateKeyPem:keyId:path:host:date:)` (signing `(request-target) host
@@ -471,24 +473,29 @@ where FAP is stricter:
 | Body | 1 MB cap. Abort the read past it. | Middleware | `request.rb:293-294` |
 | Content type | The received `Content-Type` parses with the runtime's own `OpenAPIMIMEType` to a concrete type that matches a declared type: `application/activity+json`, or `application/ld+json` with the AS profile. Anything else is refused: missing, empty, unparsable or wildcard | Middleware (§0.1), with the generated client's match behind it | `JsonLdHelper#fetch_resource_without_id_validation`, `#valid_activitypub_content_type?`. Stricter than Mastodon on a multi-profile `ld+json` value (§0.1) |
 | Status | Only 200 counts as success | Middleware, with the generated client's `.undocumented` case behind it | `JsonLdHelper#fetch_resource_without_id_validation` (`response.code == 200`) |
-| Deadline | An absolute deadline from the caller, enforced even while bytes keep arriving | Middleware | Platform limits |
+| Deadline | One absolute deadline per invocation, shared by all its fetches (§0.2), enforced before every hop and even while bytes keep arriving | Middleware | Platform limits |
 | Address | Refuse every address Mastodon's private-address check refuses (§0.2), applied to the address actually connected to, on every connection | `HTTPClient` connection hook | Mastodon's `PrivateAddressCheck.private_address?`, called per connection (`request.rb:325-334,389-394`). Its `CIDR_LIST` (`app/lib/private_address_check.rb`) is adopted verbatim. The ranges behind its Ruby `IPAddr` predicates are named by FAP, not read from Ruby, so parity is claimed for `CIDR_LIST` only (§0.2) |
 
 ### 0.1 Shape
 
-This section is the spec's design for decision 14 (Decisions); the words quoted there are the
-maintainer's, and everything here is this spec's.
+This section is the spec's design for decisions 14 and 16 (Decisions); the words quoted there are
+the maintainer's, and everything here is this spec's.
 
-- **One client per container.** A process-wide `RemoteFetchClient.shared` (a struct holding the
-  generated `Client`), built once:
+- **One client per container.** A process-wide `RemoteFetchClient.shared` (an `internal` struct
+  holding the generated `Client`), built once:
   - an `HTTPClient` (`swift-server/async-http-client`) configured as in §0.2;
   - `AsyncHTTPClientTransport` (`swift-server/swift-openapi-async-http-client`) over that
-    `HTTPClient`, with its `timeout` set to the longest deadline any caller uses (10 s). Its
+    `HTTPClient`, with its `timeout` set to the fetch deadline every caller uses (10 s, §0.2). Its
     `Configuration` is `init(client: HTTPClient = .shared, timeout: TimeAmount = .minutes(1))`,
     and `send` calls `client.execute(request, timeout: configuration.timeout)`, so this is a
-    backstop, not the per-call deadline;
-  - the generated `Client`, with `serverURL` the placeholder origin `https://remote-fetch.invalid`
-    (RFC 6761 §6.4: `.invalid` never resolves) and one middleware, `RemoteFetchMiddleware`.
+    backstop, not the invocation's fetch deadline;
+  - the generated `Client`, with `serverURL` read from the document's own `servers:` entry
+    through the generated `Servers` namespace, `try Servers.Server1.url()` (the generator emits
+    one `Servers.Server<n>` enum per server with a static `url()` function,
+    `Translator/TypesTranslator/translateServers.swift:119-160`, generator 1.11.1), and one
+    middleware, `RemoteFetchMiddleware`. That entry is the placeholder origin
+    `https://remote-fetch.invalid` (RFC 6761 §6.4: `.invalid` never resolves), so the origin is
+    written once, in the document, and never as a literal in Swift.
 
   The shared `HTTPClient` lives for the life of the Lambda container and is never shut down or
   deinitialized; it is built on the shared singleton event-loop group
@@ -505,10 +512,12 @@ maintainer's, and everything here is this spec's.
     that runs the body and awaits `shutdown()` on both the returning and the throwing path.
   - Production never builds a second client, and `RemoteFetchClient.shared` is never
     deinitialized.
-- **Per-call context.** `fetchRemoteObject` binds one `@TaskLocal` value, `RemoteFetchContext
-  {target: URL, signer: FetchSigningKey?, deadline: ContinuousClock.Instant, schemePolicy:
-  SchemePolicy}`, for the duration of the call. The middleware reads all four. The runtime gives
-  middleware no other per-call channel: `intercept(_:body:baseURL:operationID:next:)` and `next:
+- **Per-call context.** `fetchRemoteObject` and `fetchRemoteActor` each bind one `@TaskLocal`
+  value, `RemoteFetchContext {target: URL, signer: FetchSigningKey?, deadline:
+  ContinuousClock.Instant, schemePolicy: SchemePolicy}`, for the duration of the call. The
+  middleware reads all four. `deadline` is not per call: it is the invocation's one fetch
+  deadline, which every fetch in the invocation shares (§0.2, "Fetch deadline per invocation").
+  The runtime gives middleware no other per-call channel: `intercept(_:body:baseURL:operationID:next:)` and `next:
   @Sendable (HTTPRequest, HTTPBody?, URL)` carry only the request, body, base URL and operation id
   (`apple/swift-openapi-runtime`, `Sources/OpenAPIRuntime/Interface/ClientTransport.swift`).
   `UniversalClient.send` awaits the middleware chain inline with no new `Task`, so the binding is
@@ -518,18 +527,59 @@ maintainer's, and everything here is this spec's.
   the target in the generated call's signature, but it puts a non-wire header in the document and
   the middleware would still need the signer, deadline and policy from somewhere else; a single
   TaskLocal carries all four, and keeping the generated client `internal` means no caller ever
-  sees the operation without `fetchRemoteObject` around it.
+  sees an operation without `fetchRemoteObject` or `fetchRemoteActor` around it.
 - **Set at construction, not per call.** The address policy (§0.2) and the TLS trust roots are
   properties of the `HTTPClient`. Production uses the address policy below and the system trust
   store. Tests build their own `RemoteFetchClient` with a test address policy and a test CA.
-- **Injection.** `fetchRemoteObject(uri:signer:deadline:schemePolicy:client:)`, with
-  `signer: FetchSigningKey? = nil`, `schemePolicy: SchemePolicy = .httpsOnly` and
-  `client: RemoteFetchClient = .shared`. Every production call site passes only `uri`, `deadline`
-  and, where it has one, `signer`. A test passes its own client; no global is swapped.
+- **Injection.** The public functions are `fetchRemoteObject(uri:signer:deadline:)` and
+  `fetchRemoteActor(uri:signer:deadline:)`, with `signer: FetchSigningKey? = nil`. Each calls an
+  `internal` overload that adds `schemePolicy: SchemePolicy` and `client: RemoteFetchClient`, and
+  passes `.httpsOnly` and `.shared`. `SchemePolicy` and `RemoteFetchClient` are `internal` types,
+  so no code outside `ActivityPubCore` can pass a test-only policy or client; tests reach the
+  overloads through `@testable import ActivityPubCore`, as they reach the middleware's check
+  switch (Testing). Every production call site passes only `uri`, `deadline` and, where it has
+  one, `signer`. A test passes its own client; no global is swapped.
+- **How `KeyManager` gets the client.** `KeyManager` (a `Sendable` struct, `KeyManager.swift:26`)
+  gains a stored `let client: RemoteFetchClient`. Its `public init()` sets it to
+  `RemoteFetchClient.shared`, and an `internal init(client:)` takes a test client.
+  `fetchActorDocument(actorUri:signingKey:deadline:)` calls the internal
+  `fetchRemoteActor` overload with `client: self.client`. `RemoteFetchClient` is `Sendable` (it
+  holds the generated `Client` and the `HTTPClient`), so `KeyManager` stays `Sendable`.
+  `getPublicKey` and `refreshKey` keep #279's `signingKey:` closure and gain
+  `deadline: ContinuousClock.Instant`. InboxHandler's `let keyManager = KeyManager()`
+  (`InboxHandler/main.swift:50`) is unchanged. The `client:` parameter an earlier revision named
+  on `fetchActorDocument` is replaced by this stored property.
+- **Signing keys: `ActorKeyCache`.** Step 0's quote path signs as the posting actor, so step 0
+  adds the one key cache every signer uses. `ActorKeyCache` is a `final class` in
+  `ActivityPubCore`, `Sendable`, with two stored `let`s: the private keys by username, in a
+  `Mutex<[String: String]>` from the standard library's `Synchronization` module, and a
+  `@Sendable` loader that reads `{SSM_KEY_PREFIX}/{username}`. `Mutex` is declared
+  `public struct Mutex<Value: ~Copyable>: ~Copyable`, conforms `@unchecked Sendable` where
+  `Value: ~Copyable`, and offers `withLock(_:)`, whose closure is synchronous
+  (swiftlang/swift `main`, `stdlib/public/Synchronization/Mutex/Mutex.swift`, read 2026-10-21).
+  It is `@available(SwiftStdlib 6.0, *)`, which is macOS 15.0 (`utils/availability-macros.def`
+  in the same repository), and FAP's platform floor is `.macOS(.v15)` (`Package.swift:7`).
+  - **Owner.** Each handler that signs builds one, as a top-level `let`, once per container:
+    `PostHandler` and `InboxHandler` in step 0 (in `InboxHandler` it replaces #279's
+    `nonisolated(unsafe) var cachedActorKeys`), and `SearchHandler` and `DeliverHandler` in
+    phase 3a. `DeliverHandler` today reads SSM on every job (`DeliverHandler/main.swift:52-58`).
+  - **Concurrency.** `signingKey(for:)` reads the dictionary inside `withLock`. On a miss it
+    awaits the loader outside the lock, then stores the key inside a second `withLock`. No lock
+    is held across an `await`. Two concurrent misses for one username both read SSM and store the
+    same value.
+  - **Key rotation.** The cache is never invalidated, so a warm container keeps signing with the
+    key it first read until the container ends. FAP has no rotation operation: after #279 the
+    provisioner refuses an actor that already exists (its test
+    `provisioningExistingActorFailsAndChangesNothing`, `Tests/ActivityPubCoreTests/ActorProvisioningTests.swift`).
+    A key changed in SSM by other means reaches a container only when that container is
+    replaced. Until then remote servers, which fetch the actor's new public key, reject that
+    container's signatures. A rotation feature would have to clear this cache, and is out of
+    scope.
 - **One middleware.** `RemoteFetchMiddleware` does the whole exchange, so there is no separate
   URL-rewrite middleware and no FAP transport:
   1. Throw if no context is bound, so the placeholder origin is never contacted.
-  2. For each hop (the initial request plus at most 3 redirects): check the hop's scheme against
+  2. For each hop (the initial request plus at most 3 redirects): throw the deadline error,
+     before connecting, if the context's deadline has passed; check the hop's scheme against
      `schemePolicy`; set the base URL to the hop's origin and the request's path and query to the
      hop's, byte for byte (`HTTPRequest.path` is the `:path` pseudo-header, path plus query, in
      `apple/swift-http-types`); with a signer, add the headers from `HTTPSignature.signGet` using that path-and-query and the
@@ -545,15 +595,82 @@ maintainer's, and everything here is this spec's.
      `text/html/x`), `*/*`, a partial wildcard such as `text/*`, and an undeclared concrete type.
      Then return the response with its body wrapped in a sequence that throws past 1 MB and past
      the deadline.
-- **Response decoding.** The document declares the 200 response as `type: object` with no
-  properties, which the generator maps to `OpenAPIRuntime.OpenAPIObjectContainer`
-  (`_OpenAPIGeneratorCore/Translator/TypeAssignment/TypeMatcher.swift:321-326`, generator 1.11.1).
-  Its `value` is `[String: (any Sendable)?]`, with nested objects as `[String: (any Sendable)?]`
-  and arrays as `[(any Sendable)?]` (`Sources/OpenAPIRuntime/Base/OpenAPIValue.swift`).
-  `fetchRemoteObject` converts that tree to the `[String: Any]` its callers use today
-  (`FetchRemoteObject.swift:36-58`) by walking it, dropping JSON `null`s. The bytes are parsed
-  once; there is no re-encode and second `JSONSerialization` pass. A typed schema is not used,
-  because JSON-LD lets a value and a one-element array stand for each other.
+- **The document.** `Sources/ActivityPubCore/openapi.yaml`, with
+  `Sources/ActivityPubCore/openapi-generator-config.yaml` beside it. The generator plugin reads
+  a file of that name from the target's source directory (`Plugins/PluginsShared/PluginError.swift:110`,
+  generator 1.11.1). It is not the repository-root `openapi.yaml` that describes FAP's own API,
+  and the mirror workflow triggers on the root file only (`.github/workflows/sync-openapi.yml:5,12`).
+  It declares `servers: [{url: https://remote-fetch.invalid}]` and two operations, `getObject`
+  (`GET /object`) and `getActor` (`GET /actor`). Their paths are placeholders, like the origin:
+  the middleware replaces path and query with the hop's. Each declares a 200 response under both
+  ActivityStreams content types, with a typed schema (decision 16).
+- **Typed schemas** (decision 16). The schemas declare the fields FAP reads and nothing else:
+  - **`RemoteActor`**: `id` (string) and `inbox` (string) required; `endpoints` (an object
+    with an optional string `sharedInbox`), `publicKey`, `followers` (string), `url` and
+    `preferredUsername` (string) optional. `preferredUsername` is not in the decision's list; it
+    is declared because the existing parser reads it (`KeyManager.swift:101`) and the remote
+    `REF#` entry stores it (§3.1), and an undeclared field is dropped (below). `publicKey` is
+    `PublicKeyValue`: `oneOf` a `PublicKey` object (`publicKeyPem` string required, `id` and
+    `owner` strings optional) or an array of them.
+  - **`RemoteObject`**: `id` and `type` required; `attributedTo`, `to`, `cc`, `url`, `content`,
+    `summary`, `sensitive` (boolean), `published` (string) and `contentMap` (an object whose
+    values are strings) optional. These are the fields §3.3 validates (`id`, `type`,
+    `attributedTo`, `to`, `cc`) and the fields the remote `REF#` entry stores (§3.1).
+  - **Value or array.** Every field JSON-LD lets appear as a value, an object or an array uses
+    `oneOf`, through shared component schemas: `type` is `oneOf` a string or an array of strings;
+    `attributedTo`, `to` and `cc` are `IdRefs`, `oneOf` an `IdRef` or an array of `IdRef`, where
+    `IdRef` is `oneOf` a string or an object with a required string `id`; `url` is `UrlValue`,
+    `oneOf` a string, a `Link` (an object with a required string `href`) or an array of strings
+    and `Link`s.
+  - **How the generator handles `oneOf`.** A `oneOf` without a discriminator becomes an enum
+    with one case per child, named `case1`, `case2`… for inline children and after the type for
+    references (`Translator/CommonTranslations/translateAllAnyOneOf.swift:126-170`). Its decoder
+    tries each case in declared order and keeps the first that decodes
+    (`Translator/CommonTranslations/translateCodable.swift:260-281`). When none does, it throws
+    `DecodingError.failedToDecodeOneOfSchema` (`:299-311`), which the runtime builds as a
+    `DecodingError.valueNotFound` carrying every case's error (`Conversion/ErrorExtensions.swift:52-65`,
+    runtime 1.11.0). Cases are ordered so the first match is the intended one: string before
+    object, single value before array.
+  - **Unknown fields are tolerated.** No schema sets `additionalProperties`. When it is unspecified,
+    the generator emits no custom `Codable` code and the compiler synthesizes it from the stored
+    properties (`Translator/CommonTranslations/translateObjectStruct.swift:139`, returning
+    `.synthesized`; `translateCodable.swift:36`, which returns no decoder for that strategy; and
+    the generator's documentation, `Documentation.docc/Development/Generating-custom-Codable-conformance-methods.md:30-32`).
+    `additionalProperties: false` is the case that adds `ensureNoAdditionalProperties` (`:33-35`;
+    `translateCodable.swift:37-47`), and the document never uses it. So the many fields an
+    ActivityPub document carries beyond these are skipped, and only the declared fields are
+    checked: a missing required field, or a declared field of the wrong JSON type, refuses the
+    document. A JSON `null` in an optional field reads as absent.
+- **How the typed results are consumed.** The generated types are `internal`. `fetchRemoteObject`
+  and `fetchRemoteActor` map them to two public FAP structs, so no caller sees a generated type
+  or a `[String: Any]`:
+  - **`RemoteObjectDocument`** `{id, types: [String], attributedTo: String?, to: [String],
+    cc: [String], url: String?, content, summary: String?, sensitive: Bool?, published: String?,
+    language: String?}`. `attributedTo` is Mastodon's `value_or_id(first_of_value(...))`
+    (`fetch_remote_status_service.rb:29`): the first entry, as its string or its `id`. `to` and
+    `cc` are every entry the same way. `url` is the §2.7 step 1 candidate: the string, or the
+    first `Link`'s `href`, or the first string. `language` is `contentMap`'s key when it has
+    exactly one, and `nil` otherwise.
+  - **`RemoteActorDocument`** `{id, inbox, sharedInbox: String?, publicKeyPem: String?,
+    followers: String?, url: String?, preferredUsername: String?}`. `publicKeyPem` is the first
+    `PublicKey` entry's; `url` is chosen as for the object.
+  - **Callers at `8a78008`:**
+    - `PostHandler/main.swift:264-265`: the quote path's status fetch becomes
+      `fetchRemoteObject(uri: quotedId, signer:, deadline:)` and reads `.attributedTo` instead of
+      `["attributedTo"] as? String`. An `attributedTo` given as an object or an array now
+      resolves where today only a bare string did.
+    - `PostHandler/main.swift:272-273`: the actor fetch becomes `fetchRemoteActor(...)` and reads
+      `.inbox`.
+    - `InboxHandler/main.swift:1598-1599`: the QuoteRequest actor lookup becomes
+      `fetchRemoteActor(...)` and reads `.inbox`.
+    - `KeyManager.swift:68-118`: `fetchActorDocument` calls `fetchRemoteActor` and builds the
+      `RemoteActor` record from `.publicKeyPem`, `.inbox`, `.sharedInbox` and
+      `.preferredUsername`. The hand parser at `:89-105` is deleted. `KeyManagerError.missingPublicKey`
+      stays, for an actor without `publicKey`. `fetchFailed`, `invalidJSON` and `missingInbox` are
+      no longer thrown, because the fetch errors and the schema's required `inbox` now refuse
+      those documents first, and they are removed.
+    - `InboxHandler/main.swift:125,153,390`: `getPublicKey` and `refreshKey` gain `deadline:`.
+  - The bytes are decoded once, by the generated client.
 - **Content type and status: the middleware checks, the generated layer stands behind.**
   - **Parsing.** `OpenAPIMIMEType` is declared `@_spi(Generated) public struct`
     (`Base/OpenAPIMIMEType.swift:22`, runtime 1.11.0), so the middleware imports it with
@@ -597,28 +714,42 @@ maintainer's, and everything here is this spec's.
   transport and middleware failures it puts the original error in `underlyingError`
   (`Errors/RuntimeError.swift:77-83`), and for a non-runtime error thrown while decoding, such as
   the body wrapper's size or deadline error, the error itself (`UniversalClient.swift:119-126`;
-  `Errors/ClientError.swift:71`). `fetchRemoteObject` unwraps `ClientError.underlyingError` before
-  mapping to its own error cases, and the Step 0 tests assert on the unwrapped case. A failure in
+  `Errors/ClientError.swift:71`). `fetchRemoteObject` and `fetchRemoteActor` unwrap
+  `ClientError.underlyingError` before mapping to their own error cases, and the Step 0 tests assert on the unwrapped case. A failure in
   the generated decode step is a `ClientError` with `response` set whose underlying error is not
   one of FAP's, and its two causes can be told apart:
-  - **Invalid JSON.** The runtime's JSON body decode, `getResponseBodyAsJSON`
+  - **An invalid document.** The runtime's JSON body decode, `getResponseBodyAsJSON`
     (`Conversion/Converter+Client.swift:315-327`), ends in `convertJSONToBodyCodable`, which calls
     `decoder.decode(T.self, from: data)` (`Conversion/CurrencyExtensions.swift:140-143`) and so
-    throws Swift's `DecodingError`. That is not a `RuntimeError`, so `makeError` puts it in
-    `underlyingError` unchanged (`UniversalClient.swift:123-126`).
+    throws Swift's `DecodingError`, both for bytes that are not JSON and for JSON that does not
+    match the schema: a missing required field, a declared field of the wrong type, or a `oneOf`
+    no case matches (`DecodingError.valueNotFound`, above). That is not a `RuntimeError`, so
+    `makeError` puts it in `underlyingError` unchanged (`UniversalClient.swift:123-126`).
   - **A content type the runtime refuses.** `RuntimeError.unexpectedContentTypeHeader`
     (`Errors/RuntimeError.swift:46`) has a `nil` `underlyingError` (`:77-83`), so `makeError`
     puts the `RuntimeError` itself there (`UniversalClient.swift:120-122`). `RuntimeError` is
     `internal` (`:23`), so FAP can't match its case.
 
-  `fetchRemoteObject` tests `underlyingError is DecodingError`: if it is, it throws its
-  `invalidJSON` error; any other non-FAP decode-step error becomes its `decodeFailed` error. With
+  Both functions test `underlyingError is DecodingError`: if it is, they throw the
+  `invalidDocument` error, carrying the `DecodingError`; any other non-FAP decode-step error
+  becomes the `decodeFailed` error. With
   the middleware's content-type check in place, a refused content type never reaches the runtime's
   match; with that check switched off, it surfaces as `decodeFailed` (Testing).
 - **The generated client is `internal`** (`accessModifier: internal` in
-  `openapi-generator-config.yaml`). It is generated inside `ActivityPubCore`, beside
-  `fetchRemoteObject`, `HTTPSignature` and `FetchSigningKey`; a separate target would need those
-  types and would make the dependency circular. Only `fetchRemoteObject` is public.
+  `openapi-generator-config.yaml`). Only `fetchRemoteObject`, `fetchRemoteActor` and the two
+  document structs are public.
+- **Where it lives, and what that costs.** The client is generated inside `ActivityPubCore`,
+  beside `fetchRemoteObject`, `KeyManager`, `HTTPSignature` and `FetchSigningKey`. A separate
+  target is possible only if those move out of `ActivityPubCore` with it, because `KeyManager`
+  calls the client and the middleware calls `HTTPSignature`; left where they are, a separate
+  target and `ActivityPubCore` would each need the other. This spec keeps them in
+  `ActivityPubCore`, and accepts the cost: every target that links `ActivityPubCore` links AHC,
+  and every build of `ActivityPubCore` runs the generator plugin. At `8a78008` that is 17 of the
+  19 deployed handlers (all but `NodeInfoHandler` and `InstanceHandler`, whose dependencies
+  don't include it, `Package.swift`), plus `ActivityProvisioner`, and phase 2's `SearchHandler`
+  makes 18 of 20. Only four handlers fetch: `PostHandler` and `InboxHandler` from step 0,
+  `SearchHandler` and `DeliverHandler` from phase 3a. The other fourteen carry AHC and never
+  call it.
 
 ### 0.2 The `HTTPClient` configuration
 
@@ -627,7 +758,8 @@ findings.
 
 **Versions behind the line references.** Third-party file:line references in this spec are to
 the versions one maintainer host resolved locally as of 2026-10-20: `async-http-client` 1.33.1,
-`swift-openapi-runtime` 1.11.0, `swift-openapi-generator` 1.11.1 and `swift-nio-ssl` 2.36.1.
+`swift-openapi-runtime` 1.11.0, `swift-openapi-generator` 1.11.1 and `swift-nio-ssl` 2.36.1; the
+same host resolved `swift-nio` 2.97.1 and `swift-nio-http2` 1.42.0.
 `Package.resolved` is gitignored (`.gitignore:3`), so FAP commits no lockfile and CI resolves the
 `from:` ranges in `Package.swift` fresh; it may build later versions. The step 0 PR records, in
 its description, the versions CI resolved for its build, and re-checks each cited line against
@@ -642,7 +774,7 @@ them.
 | `proxy = nil` | Through a proxy, `remoteAddress` is the proxy's | Set explicitly; the spike's clients set it (`config.proxy = nil`) |
 | `redirectConfiguration = .disallow` (`HTTPClient.swift:1351`) | Redirects come back to the middleware, which validates and re-signs each hop | C3 [measured+negative-control]: T2, `.disallow`, the caller gets the 302 and the target gets 0 connections; T2-control, `.follow(max: 3, allowCycles: false)`, the target is contacted |
 | `maximumUsesPerConnection = 1` (`HTTPClient.swift:895`; default `nil`, no limit) | No connection outlives the request it was opened for, so no idle connection sits in the pool across a Lambda freeze, and every fetch opens a new connection that the address hook checks afresh ("No connection reuse", below) | Source, AHC 1.33.1: leasing a connection decrements its remaining uses (`ConnectionPool/State Machine/HTTPConnectionPool+HTTP1Connections.swift:142-143`); a connection returned idle with none left reports `idleAndNoRemainingUses` (`:72-83`), which becomes the idle context's `shouldBeClosed` (`:773-774`); the pool then closes it instead of parking it (`ConnectionPool/State Machine/HTTPConnectionPool+HTTP1StateMachine.swift:446-447,564-593`), and opens a replacement only for queued requests or pre-warming, which defaults to 0 (`HTTPClient.swift:1407`). [inferred from source]; the step 0 "No connection reuse" test measures it |
-| `timeout.connect = .seconds(5)` and `timeout.read = .seconds(10)` (`HTTPClient.swift:1249,1251`) | `connect` bounds connection setup; AHC's default is 10 s (`connectionCreationTimeout`, `HTTPClient.swift:1256-1258`). `read` is an idle timeout: AHC passes it as the request's `idleReadTimeout` (`ConnectionPool/RequestOptions.swift:44`) and restarts it on every response part read (`ConnectionPool/HTTP1/HTTP1ClientChannelHandler.swift:148`); it has no default, so without it a fully stalled body is never ended. Both values are Mastodon's `connect_timeout: 5` and `read_timeout: 10` (`app/lib/request.rb:86`). With the longest caller deadline of 10 s, the worst case for a stalled body is 10 s + 10 s = 20 s, under the 29 s API Gateway limit | The values are a choice. That `read` ends a stalled body is [unverified] until the stall test runs |
+| `timeout.connect = .seconds(5)` and `timeout.read = .seconds(10)` (`HTTPClient.swift:1249,1251`) | `connect` bounds connection setup; AHC's default is 10 s (`connectionCreationTimeout`, `HTTPClient.swift:1256-1258`). `read` is an idle timeout: AHC passes it as the request's `idleReadTimeout` (`ConnectionPool/RequestOptions.swift:44`) and restarts it on every response part read (`ConnectionPool/HTTP1/HTTP1ClientChannelHandler.swift:148`); it has no default, so without it a fully stalled body is never ended. Both values are Mastodon's `connect_timeout: 5` and `read_timeout: 10` (`app/lib/request.rb:86`). Per invocation, the worst case is the shared 10 s fetch deadline plus one `timeout.read`, 20 s, under the 29 s API Gateway limit ("Fetch deadline per invocation", below) | The values are a choice. That `read` ends a stalled body is [unverified] until the stall test runs |
 
 **No connection reuse.** With `maximumUsesPerConnection = 1`, the long-lived client never keeps
 an idle connection, so the risk that a pooled keep-alive connection survives a Lambda freeze and
@@ -700,18 +832,54 @@ every chunk, which stops a slow drip. A body that stalls completely sends no chu
 it is bounded by `timeout.read`; whether cancelling the task also ends a pending body read is
 [unverified], and the stall test measures it.
 
-**Dependencies.** One new package entry, `swift-server/swift-openapi-async-http-client`
-(product `OpenAPIAsyncHTTPClient`), declared `from: "1.5.0"`, its latest release tag
-(github.com/swift-server/swift-openapi-async-http-client/releases/tag/1.5.0, read 2026-10-20).
-It is a new third-party dependency, and the maintainer approved it on 2026-10-20
-(decision 15). It follows from the transport choice in decision
-14's implementation, which is this spec's design, not the maintainer's words. `swift-server/async-http-client`
-becomes a direct dependency; it is already resolved through `smithy-swift`, and the spike's
-`Package.swift` change left the resolved pins unchanged (#283). `swift-openapi-runtime` and the
-generator are already declared (`Package.swift:36-38`). Nothing imports `APIClient` today (only
-`Package.swift:240` names it), so `OpenAPIRuntime`, `AsyncHTTPClient` and the generator plugin
-reach the deployed Lambdas, and the plugin runs in the Lambda archive build, for the first time.
-Every handler links `ActivityPubCore`, so every handler links AHC.
+**Fetch deadline per invocation.** Each invocation that fetches computes one deadline,
+`ContinuousClock.now` plus 10 s, when its handler body starts, and passes that same instant to
+every fetch it makes; each fetch carries it in its `RemoteFetchContext` (§0.1). The middleware
+checks it before every hop, the first included, and throws its deadline error without
+connecting once it has passed. So all the fetches in one invocation share 10 s, however many
+there are, as search's already do (§3.3). Only a fetch whose body stalls as the deadline passes
+can run past it, and only until `timeout.read` fires, at most 10 s after its last byte
+(Deadline, above). Every later fetch then fails at its first hop check. The worst case for an
+invocation's fetches is therefore 10 s + 10 s = 20 s from the start of the handler body,
+whatever the number of fetches.
+
+| Call site | Fetches that share the deadline | Deadline | Worst case for the fetches | Limit |
+|---|---|---|---|---|
+| `PostHandler`, quote path (`PostHandler/main.swift:264,272`) | The quoted status, then its actor on a `REMOTE_ACTOR#` miss | 10 s from the start of the request (`:62`) | 20 s | `ClientApi`, a REST API with no timeout override (`functions/template.yaml:111-120`; the route at `:142-144`), so 29 s; function timeout 60 s (`:127`) |
+| `InboxHandler` (`InboxHandler/main.swift:125,153,390,1598`) | The key fetch on a cache miss, the refresh after a failed verification, the Follow path's refresh on a cache miss, and the QuoteRequest actor lookup | 10 s from the start of the delivery (`:52`) | 20 s | The implicit `ServerlessRestApi`: `PostInbox` is `Type: Api` with no `RestApiId` (`functions/template.yaml:434-439`), and the stack outputs it as `ServerlessRestApiId` (`:538-540`), so it is a REST API and 29 s applies; function timeout 30 s (Globals, `:76-77`) |
+| `SearchHandler`, phase 3a (§3.3) | The object, the re-fetch of a non-canonical `id`, and the actor | 10 s from the start of the request | 20 s | `ClientApi`, 29 s |
+| `DeliverHandler`, phase 3a (§3.5) | *R*'s actor, once per job | 10 s from the start of the job (`DeliverHandler/main.swift:41`); `BatchSize: 1` (`functions/template.yaml:464`) makes the job the invocation | 20 s | Not behind API Gateway. Function timeout 60 s (`:446`). The POST that follows has its own 30 s idle timeout (`DeliverHandler/main.swift:89`) and is outside this spec (FederatedActivityPublisher#277) |
+
+Behind API Gateway, each handler has at least 9 s of its 29 s for its own work after the
+fetches. The transport's 10 s `timeout` backstop (§0.1) applies per hop, inside the shared
+deadline, and doesn't raise the worst case.
+
+**Dependencies.**
+- **`swift-server/swift-openapi-async-http-client`** (product `OpenAPIAsyncHTTPClient`), a new
+  package entry declared `from: "1.5.0"`, its latest release tag
+  (github.com/swift-server/swift-openapi-async-http-client/releases/tag/1.5.0, read 2026-10-20).
+  It is a new third-party dependency, and the maintainer approved it on 2026-10-20 (decision
+  15). It follows from the transport choice in decision 14's implementation, which is this
+  spec's design, not the maintainer's words.
+- **`swift-server/async-http-client`** becomes a direct dependency of `ActivityPubCore`,
+  declared `from: "1.33.1"`. The maintainer approved this on 2026-10-21 (decision 16). It is
+  already resolved through `smithy-swift`, and the spike's `Package.swift` change left the
+  resolved pins unchanged (#283).
+- **`apple/swift-nio`** (`from: "2.97.1"`), **`apple/swift-nio-ssl`** (`from: "2.36.1"`) and
+  **`apple/swift-nio-http2`** (`from: "1.42.0"`) get package entries so that the test target can
+  depend on `NIOCore`, `NIOPosix`, `NIOSSL` and `NIOHTTP2` directly (Testing). No production
+  target names them. The maintainer approved these as direct test-target dependencies on
+  2026-10-21 (decision 16). All three are already resolved through `async-http-client`.
+- **Floors.** The step 0 PR raises `swift-openapi-generator` from `from: "1.6.0"` to
+  `from: "1.11.1"`, and `swift-openapi-runtime` from `from: "1.7.0"` to `from: "1.11.0"`
+  (`Package.swift:36-37`), the versions behind this spec's line references. Each new entry above
+  is declared at the version cited for it. A lower floor would let a fresh resolution build
+  against code the cited lines were never read in.
+- **First use in the deployed build.** Nothing imports `APIClient` today (only
+  `Package.swift:240` names it), so `OpenAPIRuntime`, `AsyncHTTPClient` and the generator plugin
+  reach the deployed Lambdas, and the plugin runs in the Lambda archive build, for the first
+  time. Seventeen of the 19 deployed handlers link `ActivityPubCore`, and so AHC (§0.1, "Where
+  it lives, and what that costs").
 
 **Deployed build (C4, not yet measured).** The deploy build is
 `swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3`
@@ -748,17 +916,17 @@ used by hand, and a broken archive build is fixed forward. The step 0 PR's CI is
   QuoteRequest actor lookup in `InboxHandler` (`InboxHandler/main.swift:1598`) is signed as the
   inbox owner, with the key #279 already loads.
 - **Inbound key fetch.** Verifying an inbound signature now fetches the key through
-  `fetchRemoteObject`: only status 200 and the two ActivityStreams content types are accepted,
-  with at most 3 redirects, a 1 MB cap and the address check. The deadline is an absolute
-  10 seconds. Today's 10 seconds (`KeyManager.swift:75`) is an idle timeout, so a slow response
-  that keeps sending bytes now fails where it used to succeed. A remote server whose actor
-  document fails these checks can no longer deliver to FAP.
-- **No connection retries.** `retryConnectionEstablishment = false` (§0.2) applies to every
-  fetch, not only refused addresses. A key fetch whose first connection attempt fails for an
-  ordinary reason, such as a refused or reset connect, now fails at once where AHC's default would
-  have retried it. `keyManager.getPublicKey` then throws and the inbound delivery fails
-  (`InboxHandler/main.swift:125`). Only keys not already cached in `REMOTE_ACTOR#` (24 h TTL) are
-  fetched, and the remote server's own delivery retry is then the only retry.
+  `fetchRemoteActor`: only status 200 and the two ActivityStreams content types are accepted,
+  with at most 3 redirects, a 1 MB cap and the address check. Its deadline is the delivery's
+  shared 10 s fetch deadline (§0.2), an absolute bound that every fetch in the delivery counts
+  against. Today's 10 seconds (`KeyManager.swift:75`) is an idle timeout per fetch, so a slow
+  response that keeps sending bytes now fails where it used to succeed. A remote server whose
+  actor document fails these checks can no longer deliver to FAP.
+- **Typed documents** (decision 16). A fetched actor without a string `id` or `inbox`, an object
+  without a string `id` or a `type`, or either one with a declared field of the wrong JSON type
+  (for example a numeric `inbox`, or `sensitive` as a string) is refused with `invalidDocument`.
+  Today any JSON object is accepted and fields of the wrong type are silently skipped. Unknown
+  fields are still ignored.
 - **One connection per fetch.** `maximumUsesPerConnection = 1` (§0.2): every fetch, and every
   redirect hop, opens a new connection and closes it after the response.
 - **No connection retries.** `retryConnectionEstablishment = false` (§0.2) applies to every
@@ -1099,8 +1267,8 @@ mention `href` (§2.5, §3.5) and the "In reply to" link (§1.8, §3.7).
 
 ### 3.2 Signed fetch
 
-Signing itself ships in step 0: `fetchRemoteObject` takes a `FetchSigningKey` and the middleware
-re-signs every hop with FederatedActivityPublisher#279's
+Signing itself ships in step 0: `fetchRemoteObject` and `fetchRemoteActor` take a
+`FetchSigningKey`, and the middleware re-signs every hop with FederatedActivityPublisher#279's
 `HTTPSignature.signGet(privateKeyPem:keyId:path:host:date:)`. That helper signs
 `(request-target) host date`, with the query string in the request target, which is what
 `signed_request.rb:54-57,113` requires. Phase 3a only adds signers:
@@ -1108,8 +1276,9 @@ re-signs every hop with FederatedActivityPublisher#279's
   Mastodon accepts any verifying account key (`signature_verification.rb:45` onward).
 - **`DeliverHandler`** signs its actor fetch (§3.5) as the job's `actorUsername`, with the key it
   already reads (`DeliverHandler/main.swift:52-58`).
-- **Keys** come from `{SSM_KEY_PREFIX}/{u}`, cached per container in a dictionary keyed by
-  username.
+- **Keys** come from `{SSM_KEY_PREFIX}/{u}`, through each handler's `ActorKeyCache` (§0.1),
+  which owns the cache, makes it safe under Swift 6 concurrency and states what a key rotation
+  does.
 - **IAM.** `SearchHandler`'s grant widens to the actor keys. If FederatedActivityPublisher#282 has
   landed, that is `activity/${Stage}/keys/actors/*`. If not, it is `activity/${Stage}/keys/*`
   with #279's pattern: an explicit `Deny` on `jwt-signing-key` and on `ssm:GetParametersByPath`
@@ -1117,22 +1286,24 @@ re-signs every hop with FederatedActivityPublisher#279's
 
 ### 3.3 Remote resolution in search
 
-`resolve=true` with a non-local `https://` `q` runs under a **10 s overall deadline**, well under
-the 29 s API Gateway limit. On overrun or any failure, it returns empty `statuses` and writes
+`resolve=true` with a non-local `https://` `q` runs under a **10 s overall deadline**, the
+invocation's shared fetch deadline (§0.2), well under the 29 s API Gateway limit. On overrun or any failure, it returns empty `statuses` and writes
 nothing.
 
-1. **Fetch** the object signed as the caller.
+1. **Fetch** the object signed as the caller, with `fetchRemoteObject`.
 2. **Canonicalize.** If `json['id']` ≠ `q`, re-fetch `id` and require equality
    (`JsonLdHelper#fetch_resource`). A pasted web URL resolves this way.
 3. **Validate.**
    - `type` must be in Mastodon's supported or converted set (`activity.rb:9-10`).
-   - `attributedTo` is read via `first_of_value`/`value_or_id`.
+   - `attributedTo` must be present. The document maps it through `first_of_value`/`value_or_id`
+     (§0.1).
    - The host of `attributedTo` must equal the host of `id` (`fetch_remote_status_service.rb:61-66`).
 4. **Fetch the actor** signed.
    - Require `json['id'] == attributedTo` (Mastodon: `JsonLdHelper#fetch_resource`, called from
      `fetch_remote_actor_service.rb:18`).
-   - Parse it with the parser extracted from `KeyManager.fetchActorDocument` (`KeyManager.swift:89-105`),
-     extended to return `followers` and `url`.
+   - It is fetched with `fetchRemoteActor`, so it arrives as step 0's typed
+     `RemoteActorDocument`, which already carries `followers`, `url` and `preferredUsername`
+     (§0.1). There is no separate parser.
    - It writes nothing to `REMOTE_ACTOR#`. The record is the inbound-signature trust anchor and
      already has two writers (Current FAP behaviour). Nothing in this spec would read a
      search-time copy: `DeliverHandler` fetches *R*'s actor at delivery (§3.5).
@@ -1216,7 +1387,7 @@ quote-accept Update reaches *R* without SSM access.
 | `SearchHandler` SSM widening | Actor keys added to its grant (§3.2) |
 | `DeliveryJob.targetActorUri` | An extension of the job and of `DeliverHandler` |
 | `REF#` invalidation | An extension of `handleDelete` / `handleUpdate` |
-| Shared actor-document parser | Extracted from `KeyManager` |
+| Actor and object documents | None new: step 0's `RemoteActorDocument` and `RemoteObjectDocument` (§0.1) |
 
 **Invariants:**
 - **Smallest mechanism.** Remote ids are deterministic, so there is no by-URI index. The cache
@@ -1378,20 +1549,32 @@ Tests (control in brackets):
   full.]
 - **Content type:** `text/html`, `text/html; charset=utf-8`, bare `application/ld+json`, and an
   `application/ld+json` whose `profile` lists the AS profile beside another one, each fail with the
-  middleware's content-type error, on a body that is a valid JSON object, so the content type is the
-  only thing that can refuse it. `application/activity+json; charset=utf-8` and
+  middleware's content-type error, on a valid document, so the content type is the
+  only thing that can refuse it. (Here and below, "a valid document" means a body that decodes
+  under the operation's schema.) `application/activity+json; charset=utf-8` and
   `application/ld+json; profile="https://www.w3.org/ns/activitystreams"` (the exact profile string,
   since values compare case-sensitively) pass. [The production client with the content-type check
   switched off: the four refused values now fail in the runtime's match instead, with
   `decodeFailed`, whose underlying error is not a `DecodingError` (§0.1).]
-- **Non-concrete or unparsable content type:** a 200 with a valid JSON object body and no
+- **Non-concrete or unparsable content type:** a 200 with a valid document and no
   `Content-Type`, an empty one, `*/*`, `text/*`, `html` or `*/html` each fails with the
   middleware's content-type error. [The production client with only the content-type check switched
   off, every other middleware check still on, accepts all six and decodes the body, the runtime
   behaviour §0.1 names.]
-- **Invalid JSON:** a 200 with `Content-Type: application/activity+json` and the body `{"a":`
-  fails with `invalidJSON`. [The same response with a valid JSON object body returns it.]
-- **Status:** a 404 with a valid JSON object body and a 204, each sent with
+- **Invalid document:** a 200 with `Content-Type: application/activity+json` fails with
+  `invalidDocument` for each of: the body `{"a":`; an actor that is a valid JSON object without
+  `inbox`; an actor whose `inbox` is a number; an object whose `attributedTo` is a number, which
+  no `oneOf` case decodes. [The same response with a valid document returns it.]
+- **Unknown fields are tolerated:** an actor document with Mastodon's full set of fields, plus
+  40 invented ones holding strings, numbers, nested objects and arrays, decodes, and every
+  declared field reads back. [The same document without `inbox` fails with `invalidDocument`,
+  which shows the decode checks the declared fields and isn't passing everything.]
+- **Value or array:** `attributedTo` as a string, as `{"id": …}`, and as an array whose first
+  entry is `{"id": …}` all give the same `attributedTo`; `to` as a string and as a one-element
+  array give the same `to`; `url` as a string, as a `Link` and as an array of `Link`s gives the
+  same `url`; `publicKey` as an object and as a one-element array gives the same `publicKeyPem`.
+  [Each field given a JSON number fails with `invalidDocument`.]
+- **Status:** a 404 with a valid document and a 204, each sent with
   `Content-Type: application/activity+json` so that the content-type check passes, fail with the
   middleware's status error. [The production client with
   the status check switched off: both come back from the generated client as `.undocumented`, and
@@ -1399,13 +1582,19 @@ Tests (control in brackets):
 - **Deadline, slow drip:** with a 2 s deadline, a body that sends one byte every 100 ms for 5 s
   fails with the deadline error between 2 s and 2.5 s. [With the deadline check off, it
   completes after about 5 s; `timeout.read` never fires, because bytes keep arriving.]
+- **Shared deadline:** with one 2 s deadline passed to two sequential fetches, where the first
+  server answers after 1.5 s, the second fetch, to a server that would answer after 1 s, fails
+  with the deadline error by 2.5 s, and a third fetch with the same deadline then fails before
+  any connection (its server records 0 connections). [With a fresh 2 s deadline per fetch, the
+  second fetch succeeds and the third connects.]
 - **Deadline, stall:** with a 2 s deadline and a test client built with `timeout.read =
   .seconds(3)`, a server that sends the response head and then nothing fails by 2 s + 3 s = 5 s,
   plus 0.5 s of scheduling margin. The test records whether it ended at the deadline (cancellation
   ended the body read) or at `timeout.read`, which settles the §0.2 [unverified] item. [A client
   with no `timeout.read` and the deadline check off is still waiting at 10 s, when the test cancels
   it.]
-- **Key fetch:** `fetchActorDocument(actorUri:signingKey:client:)`, through
+- **Key fetch:** `KeyManager(client:)` with the test client, then
+  `fetchActorDocument(actorUri:signingKey:deadline:)`, both through
   `@testable import ActivityPubCore`, fetches a valid key document from the test server; a
   4-redirect chain ending at a valid document fails with the redirect error; a valid document
   padded past 1 MB fails with the size error. [On the parent commit (with #279, before step 0),
@@ -1661,7 +1850,9 @@ code" means the defect was seen in FAP's source, not in production.
 | Middleware throws with no target bound | §0.1 | None |
 | Missing, empty, unparsable or non-concrete `Content-Type` refused | §0.1 | None. Closes a gap read in the runtime |
 | 10 s search deadline | §3.3 | None. Rests on the documented 29 s API Gateway limit |
+| One 10 s fetch deadline per invocation, shared by every fetch in it | §0.2 | None. Rests on the documented 29 s API Gateway limit. It changes the step 0 deadline control and extends the 10 s search deadline's rule to every fetching handler; added after decision 15, and not itself in decision 15's list |
 | `maximumUsesPerConnection = 1` | §0.2 | None. Removes a lifetime risk read in source (an idle pooled connection across a Lambda freeze). Added after decision 15, and not in its list |
+| Typed schemas refuse a document missing a required field or with a declared field of the wrong JSON type | §0.1 | None. Decision 16 |
 | `repliesCount` failure logged and swallowed | §1.6 | None |
 | Safe-link scheme check and fallback | §2.7 | None. Security control |
 | Remote validation (`id`, `attributedTo` host, actor `id`) | §3.3 | None. Matches Mastodon |
@@ -1674,10 +1865,10 @@ code" means the defect was seen in FAP's source, not in production.
 | Delete/Update invalidation only from the object's origin | §3.1 | None. Security control |
 | Unsigned delivery when LD signing fails | §3.8 | None |
 
-## Decisions (2026-10-20)
+## Decisions (2026-10-20 and 2026-10-21)
 
-The maintainer decided the following on 2026-10-20. Each item states his decision; where his
-own words are known they are quoted. Section references, function and type names, and anything
+The maintainer decided items 1–15 on 2026-10-20 and item 16 on 2026-10-21. Each item states
+his decision; where his own words are known they are quoted. Section references, function and type names, and anything
 labelled as this spec's are the spec's implementation of the decision, not his words.
 
 1. **Scope: all replies.** Self, other local actors and remote statuses, each shippable on its own.
@@ -1759,20 +1950,26 @@ labelled as this spec's are the spec's implementation of the decision, not his w
       FAP's middleware.
     - **Residual weakness.** The TCP connect, and for `https` the TLS handshake, reach the address
       before the hook rejects it; only the HTTP request is blocked (§0.2).
-    - **What the generated layer contributes and costs.** It contributes JSON decoding into
-      `OpenAPIObjectContainer`, and a second status check (the `.undocumented` case) and concrete
-      content-type match behind the middleware's. It costs an OpenAPI document that describes no
-      real API (a placeholder `.invalid` origin, rewritten per hop), a `@TaskLocal` side channel
-      because the operation has no real input, the middleware's own status and content-type
-      checks (the runtime lets missing, unparsable and wildcard types through, and its checks have
-      no switch for a negative control), `@_spi(Generated)` use of `OpenAPIMIMEType`, and the
-      generator plugin in every Lambda build.
+    - **What the generated layer contributes and costs.** With decision 16's typed schemas it
+      contributes the validation of the two documents FAP reads: typed decoding of the actor and
+      object fields FAP uses, refusal of a document missing a required field or carrying a
+      declared field of the wrong JSON type, JSON-LD's value-or-array forms through `oneOf`, and
+      tolerance of every undeclared field (§0.1). That replaces the hand parser in `KeyManager`
+      and the `as? String` reads at each call site. It also contributes a second status check (the
+      `.undocumented` case) and a concrete content-type match behind the middleware's. It costs an
+      OpenAPI document whose origin and paths are placeholders, rewritten per hop; a `@TaskLocal`
+      side channel, because the operations have no real input; the middleware's own status and
+      content-type checks (the runtime lets missing, unparsable and wildcard types through, and
+      its checks have no switch for a negative control); `@_spi(Generated)` use of
+      `OpenAPIMIMEType`; and AHC linked, and the generator plugin run, in every build of the 17
+      deployed handlers that link `ActivityPubCore`, though only four of them fetch (§0.1).
     - **Structure** (§0.1, §0.2). One client per container; one `@TaskLocal`
       `RemoteFetchContext` carrying target, signer, deadline and scheme policy; the address policy
-      and trust roots set when the client is built; the client injected into `fetchRemoteObject`
-      with `.shared` as the default; one middleware that does the URL rewrite and every per-hop
-      control; the generated client `internal` to `ActivityPubCore`; the placeholder origin
-      `https://remote-fetch.invalid`.
+      and trust roots set when the client is built; the client injected through `internal`
+      overloads of `fetchRemoteObject` and `fetchRemoteActor`, with `.shared` as the default; one
+      middleware that does the URL rewrite and every per-hop control; the generated client
+      `internal` to `ActivityPubCore`; the placeholder origin `https://remote-fetch.invalid`, in
+      the document's `servers:`.
 
 15. **Guards, step 0 and the new dependency.** Decided 2026-10-20, from the options the spec put
     to the maintainer (former Open questions 1–3):
@@ -1789,6 +1986,31 @@ labelled as this spec's are the spec's implementation of the decision, not his w
     - **Step 0:** kept folded. The controls are built once, in the AsyncHTTPClient middleware.
     - **`swift-server/swift-openapi-async-http-client`** (`from: "1.5.0"`): approved.
 
+16. **Typed schemas and two dependencies.** Decided 2026-10-21, through a structured question
+    that followed the advisory review of FederatedActivityPublisher#271:
+    - **Typed schemas.** The remote-fetch OpenAPI document gets real schemas for the two
+      documents FAP reads: the actor (`id`, `inbox`, `endpoints.sharedInbox`, `publicKey`,
+      `followers`, `url`), and the Note fields that §3.3 validates. JSON-LD value-or-array fields
+      use `oneOf`. The generated layer then does real validation work.
+    - **`swift-server/async-http-client` as a direct dependency:** approved.
+    - **`NIOCore`, `NIOPosix`, `NIOSSL` and `NIOHTTP2` as direct dependencies of the test target
+      only:** approved.
+    - **Not adopted:** the review's other option, a generated `Client` built per call. There
+      stays exactly one long-lived client (decision 14: "A client being built per request?! No.").
+
+    **Implementation (this spec's design, not the maintainer's words):**
+    - The document is `Sources/ActivityPubCore/openapi.yaml`, with operations `getObject` and
+      `getActor` and schemas `RemoteObject` and `RemoteActor` (§0.1).
+    - The schemas also declare the fields the spec stores or reads beyond the decision's list:
+      `preferredUsername` on the actor, and `content`, `summary`, `sensitive`, `published`,
+      `url` and `contentMap` on the object, because the generated decoder drops any undeclared
+      field (§0.1).
+    - No schema sets `additionalProperties`, so unknown fields are tolerated (§0.1).
+    - Two public FAP structs, `RemoteObjectDocument` and `RemoteActorDocument`, carry the typed
+      results to callers, who no longer read `[String: Any]` (§0.1 names each call site).
+    - Package entries and floors: §0.2, Dependencies.
+
 ## Open questions
 
-None. The three questions this revision raised were decided on 2026-10-20 (decision 15).
+None. The three questions the previous revision raised were decided on 2026-10-20 (decision 15),
+and the typed-schema and dependency questions on 2026-10-21 (decision 16).
