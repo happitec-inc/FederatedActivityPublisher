@@ -43,29 +43,6 @@ jobs:
           HANDLE_DOMAIN="${{ vars.HANDLE_DOMAIN }}" \
           bash scripts/substitute-variables.sh
 
-      - name: Install Swift dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y binutils gcc g++ libc6-dev libcurl4-openssl-dev libssl-dev libxml2-dev pkg-config
-
-      - name: Install Swift
-        run: |
-          if swift --version 2>/dev/null | grep -q "6.3"; then
-            echo "Swift 6.3 already installed"
-          else
-            ARCH=$(uname -m)
-            if [ "$ARCH" = "aarch64" ]; then
-              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404-aarch64/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04-aarch64.tar.gz"
-            else
-              SWIFT_URL="https://download.swift.org/swift-6.3-release/ubuntu2404/swift-6.3-RELEASE/swift-6.3-RELEASE-ubuntu24.04.tar.gz"
-            fi
-            curl -fsSL "$SWIFT_URL" | sudo tar xz --strip-components=2 -C /usr/local
-          fi
-          swift --version
-
-      - name: Install zip
-        run: which zip || sudo apt-get install -y zip
-
       - name: Install Docker
         run: |
           if command -v docker &>/dev/null; then
@@ -93,36 +70,39 @@ jobs:
             docker save swift-al2023:6.3 > /tmp/docker-image.tar
           fi
 
-      # Keyed on tracked Package.swift — the old '**/Package.resolved' glob
-      # matched only root-owned files inside .build/, making hashFiles() throw.
+      # The build cache is keyed on the committed Package.resolved plus the
+      # build image's Dockerfile: a restored .build only helps when both the
+      # pinned dependencies and the toolchain match. The key is computed once,
+      # before the build, so restore and save use the same one.
+      - name: Compute Swift build cache key
+        id: swift-cache
+        run: |
+          HASH=$(cat Package.resolved docker/Dockerfile.al2023-swift | sha256sum | cut -c1-16)
+          echo "prefix=swift-al2023-$HASH" >> "$GITHUB_OUTPUT"
+
       - name: Restore Swift build cache
         uses: happitec-inc/public-actions/swift-build-cache-restore@main
         with:
-          key-prefix: swift-docker-build
+          key-prefix: ${{ steps.swift-cache.outputs.prefix }}
 
-      - name: Build Lambda zip
-        run: swift package --allow-network-connections docker archive --base-docker-image swift-al2023:6.3 --disable-docker-image-update
+      # One container: resolve once against Package.resolved, one swift build
+      # for every product, then zip the template's handlers with the OpenSSL
+      # libs. Runs as the runner uid so .build is never root-owned.
+      - name: Build Lambda zips
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/home \
+            -v "$(pwd):/workspace" \
+            -w /workspace \
+            swift-al2023:6.3 \
+            bash scripts/build-all-lambdas.sh
 
       - name: Save Swift build cache
         if: always()
         uses: happitec-inc/public-actions/swift-build-cache-save@main
         with:
-          key-prefix: swift-docker-build
-
-      - name: Bundle OpenSSL libs from build image
-        run: |
-          mkdir -p /tmp/ssl-libs
-          docker run --rm -v /tmp/ssl-libs:/out swift-al2023:6.3 \
-            bash -c 'cp /lib64/libcrypto.so.3 /lib64/libssl.so.3 /out/'
-
-          OUTPUT_BASE=".build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager"
-          for zip_file in "$OUTPUT_BASE"/*/*.zip; do
-            handler_dir=$(dirname "$zip_file")
-            mkdir -p "$handler_dir/lib"
-            cp /tmp/ssl-libs/* "$handler_dir/lib/"
-            (cd "$handler_dir" && zip -u "$(basename "$zip_file")" lib/*)
-          done
-          echo "Bundled OpenSSL libs into $(ls "$OUTPUT_BASE"/*/*.zip | wc -l) zips"
+          key-prefix: ${{ steps.swift-cache.outputs.prefix }}
 
       - name: Install SAM CLI
         uses: ./.github/actions/setup-sam-portable
