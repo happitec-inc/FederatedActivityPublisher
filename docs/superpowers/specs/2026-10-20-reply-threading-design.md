@@ -498,7 +498,11 @@ the maintainer's, and everything here is this spec's.
     `Translator/TypesTranslator/translateServers.swift:119-160`, generator 1.11.1), and one
     middleware, `RemoteFetchMiddleware`. That entry is the placeholder origin
     `https://remote-fetch.invalid` (RFC 6761 §6.4: `.invalid` never resolves), so the origin is
-    written once, in the document, and never as a literal in Swift.
+    written once, in the document, and never as a literal in Swift. `url()` is a generated
+    `throws` function, and a `static let` initializer can't throw, so `RemoteFetchClient.shared`
+    calls it with `try!`. The URL is a constant in the bundled document, so a bad one is a build
+    defect, not a runtime condition; the step 0 "Client construction" test builds the client in
+    CI, so a broken document fails the PR rather than a cold start.
 
   The shared `HTTPClient` lives for the life of the Lambda container and is never shut down or
   deinitialized; it is built on the shared singleton event-loop group
@@ -559,9 +563,9 @@ the maintainer's, and everything here is this spec's.
   `@Sendable` loader that reads `{SSM_KEY_PREFIX}/{username}`. `Mutex` is declared
   `public struct Mutex<Value: ~Copyable>: ~Copyable`, conforms `@unchecked Sendable` where
   `Value: ~Copyable`, and offers `withLock(_:)`, whose closure is synchronous
-  (swiftlang/swift `main`, `stdlib/public/Synchronization/Mutex/Mutex.swift`, read 2026-10-21).
-  It is `@available(SwiftStdlib 6.0, *)`, which is macOS 15.0 (`utils/availability-macros.def`
-  in the same repository), and FAP's platform floor is `.macOS(.v15)` (`Package.swift:7`).
+  (swiftlang/swift at tag `swift-6.0-RELEASE`, `stdlib/public/Synchronization/Mutex/Mutex.swift`,
+  read 2026-10-21). It is `@available(SwiftStdlib 6.0, *)`, which is macOS 15.0
+  (`utils/availability-macros.def` in the same repository at the same tag), and FAP's platform floor is `.macOS(.v15)` (`Package.swift:7`).
   - **Owner.** Each handler that signs builds one, as a top-level `let`, once per container:
     `PostHandler` and `InboxHandler` in step 0 (in `InboxHandler` it replaces #279's
     `nonisolated(unsafe) var cachedActorKeys`), and `SearchHandler` and `DeliverHandler` in
@@ -1153,8 +1157,15 @@ FAP id is its ULID, whoever owns it.
 - **Item.** `PK=REF#{id}`, with an `SK` of `META` for a shared entry. It is a new item type in the
   existing table, like `MEDIA#`. There is no new table or index.
 - **Local pointer.** `id` is the status's ULID, and the item is `{kind: "local", owner, uri}`.
-- **When it is written.** Search writes it on resolution, with an idempotent conditional put. It
-  has no TTL. A future delete-status feature must delete it.
+- **When it is written.** Search writes it on resolution, with an unconditional `PutItem`. It has
+  no TTL. A future delete-status feature must delete it.
+- **Why unconditional, for every `REF#` write.** A local pointer's content is deterministic: for a
+  given ULID it is always `{kind: "local", owner, uri}`, so rewriting it is idempotent without a
+  condition. A remote entry (§3.1) is meant to be overwritten: a re-search refreshes it. A
+  conditional write (`attribute_not_exists`) would be refused for an entry whose `ttl` has passed
+  but that DynamoDB has not deleted yet, because TTL deletion is lazy (§3.1); the client would be
+  told to search again and still get 404. So every `REF#` write, local and remote, is a plain
+  `PutItem`, and nothing can refuse it.
 - **How a client meets an id.** Local ULIDs are visible in public status URLs and on the web, so a
   client can have another actor's ULID without having searched. Such an id gets a 404 from
   `POST /api/v1/statuses` until a search writes its pointer. That avoids a backfill or an index.
@@ -1371,16 +1382,16 @@ search passes to each of its fetches (§0.2). Its worst case is 20 s, the deadli
 any failure, it returns empty `statuses` and writes nothing.
 
 1. **Fetch** the object signed as the caller, with `fetchRemoteObject`.
-2. **Canonicalize.** If `json['id']` ≠ `q`, re-fetch `id` and require equality
-   (`JsonLdHelper#fetch_resource`). A pasted web URL resolves this way.
+2. **Canonicalize.** If the document's `.id` ≠ `q`, re-fetch `.id` and require equality
+   (Mastodon's `json['id'] == uri`, `JsonLdHelper#fetch_resource`). A pasted web URL resolves this way.
 3. **Validate.**
    - `type` must be in Mastodon's supported or converted set (`activity.rb:9-10`).
    - `attributedTo` must be present. The document maps it through `first_of_value`/`value_or_id`
      (§0.1).
    - The host of `attributedTo` must equal the host of `id` (`fetch_remote_status_service.rb:61-66`).
 4. **Fetch the actor** signed.
-   - Require `json['id'] == attributedTo` (Mastodon: `JsonLdHelper#fetch_resource`, called from
-     `fetch_remote_actor_service.rb:18`).
+   - Require the actor document's `.id == attributedTo` (Mastodon: `json['id'] == uri` in
+     `JsonLdHelper#fetch_resource`, called from `fetch_remote_actor_service.rb:18`).
    - It is fetched with `fetchRemoteActor`, so it arrives as step 0's typed
      `RemoteActorDocument`, which already carries `followers`, `url` and `preferredUsername`
      (§0.1). There is no separate parser.
@@ -1392,7 +1403,11 @@ any failure, it returns empty `statuses` and writes nothing.
    - All three public spellings count (`tag_manager.rb:14-15`).
    - The comparison uses the actor's `followers`.
    - A `direct` parent is left out of the results (`PostHandler/main.swift:194`).
-6. **Write** the entry (§3.1), shared or per-viewer, and return the `Status`.
+6. **Write** the entry (§3.1), shared or per-viewer, with an unconditional `PutItem` that
+   overwrites any earlier entry, expired or not (§2.3), and return the `Status`. When the
+   derived visibility is `private`, search also deletes `META` (§3.1), with an unconditional
+   `DeleteItem`; since neither write can be refused, a re-derived `private` always leaves no
+   `META` entry behind.
 
 ### 3.4 Resolving a remote `in_reply_to_id`
 
@@ -1625,6 +1640,14 @@ The harness uses real sockets, not a stub transport, because a stub skips the la
 Tests (control in brackets):
 - **Redirects:** 3 pass, and a 4th fails with the redirect error. [With the redirect limit off,
   the 4th is followed.]
+- **Unparsable `Location`:** a 302 whose `Location` does not resolve to an absolute URL fails
+  with `invalidURI`. [The same server with a valid `Location` is followed and returns the
+  document.]
+- **Client construction:** the production construction function, the one `RemoteFetchClient.shared`
+  uses, builds a client inside `withTestClient`, and its `serverURL` is
+  `https://remote-fetch.invalid`. This runs the `try!` on `Servers.Server1.url()` in CI. [Before
+  the test counts, it is seen red once on a branch whose document's `servers:` URL the generated
+  `url()` throws on.]
 - **Scheme:** an `http://` initial URI fails under the default policy. With a policy admitting
   port A only, a redirect from A to B fails. An `https`→`http` hop fails. [Same calls with a
   policy admitting A and B, or `http`, succeed.]
@@ -1940,7 +1963,7 @@ code" means the defect was seen in FAP's source, not in production.
 | Hook closes the rejected channel itself | §0.2 | Yes, in the spike: without the close the connection stayed open, `closes=0` (FederatedActivityPublisher#283, T1 vs T1c) |
 | `retryConnectionEstablishment = false` | §0.2 | Yes, in the spike: with retries on, a refused host got 7 connections in 2 s on macOS and 9 on Linux (FederatedActivityPublisher#283, T1b) |
 | `httpVersion = .http1Only` | §0.2 | Not observed. Covered by decision 15's address check: decision 14's Settings make `.http1Only` a precondition of the hook, which runs only for HTTP/1.1 connections. FederatedActivityPublisher#283 notes that as a source reading (its finding 3), every spike client was `.http1Only`, and the step 0 "HTTP/1.1 only" test is the first observation |
-| `timeout.connect` / `timeout.read`, and the transport's 10 s `timeout` backstop | §0.1, §0.2 | None. Bounds on stalls the deadline race can't interrupt |
+| `timeout.connect` / `timeout.read`, and the transport's 10 s `timeout` backstop | §0.1, §0.2 | None. `timeout.read` bounds a stalled body, which the deadline race can't interrupt. The transport's `timeout` covers only the head, so it bounds the head if the middleware's race is wrong or missing |
 | Middleware throws with no target bound | §0.1 | None |
 | Missing, empty, unparsable or non-concrete `Content-Type` refused | §0.1 | None. Closes a gap read in the runtime |
 | 10 s search deadline | §3.3 | None. Rests on the documented 29 s API Gateway limit |
