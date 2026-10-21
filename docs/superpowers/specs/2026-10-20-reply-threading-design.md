@@ -1413,8 +1413,8 @@ seeded pointer (Phase 2, below).
 - **The `REF#` local pointer** resolves another actor's unlisted status.
   - Negative controls: another actor's private status gives `notFound` in both search and the
     resolver, and a ULID with no pointer gives `notFound`.
-  - Capability-removed control: the phase 1 resolver, given the same seeded pointer, returns
-    `notFound`, because it resolves only the caller's own statuses (§1.2).
+  - Capability-removed control: the resolver with its `REF#` lookup (§2.4 step 2) switched off,
+    given the same seeded pointer, returns `notFound`.
 - **Carry-over** yields *R*.
   - Negative control: a reply to someone else's reply yields that someone.
 - **Followers union** is *P*'s followers.
