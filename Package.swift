@@ -40,6 +40,9 @@ let package = Package(
         .package(url: "https://github.com/swiftlang/swift-markdown", from: "0.5.0"),
         .package(url: "https://github.com/swiftlang/swift-docc-plugin.git", from: "1.0.0"),
         .package(url: "https://github.com/vapor/multipart-kit.git", from: "4.0.0"),
+        // SPIKE (do not merge): test-only, already in the resolved graph via smithy-swift.
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.33.1"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
     ],
     targets: [
         // Shared library
@@ -255,6 +258,16 @@ let package = Package(
                 .product(name: "AWSDynamoDB", package: "aws-sdk-swift"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "_CryptoExtras", package: "swift-crypto"),
+            ]
+        ),
+
+        // SPIKE (do not merge): AsyncHTTPClient connection-level address check.
+        .testTarget(
+            name: "SpikeTests",
+            dependencies: [
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),
 
