@@ -1,55 +1,147 @@
 # Reply Threading Step 0 (Fetch Hardening) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Goal:** Every remote `GET` goes through one long-lived, generated OpenAPI client on `AsyncHTTPClientTransport`. FAP's per-hop controls live in one `ClientMiddleware`, Mastodon's private-address check runs on every connection, actor and object documents are typed, fetches are signed, and signing keys come from an `ActorKeyCache`.
 
-**Goal:** Route every remote `GET` through one long-lived, generated OpenAPI client on `AsyncHTTPClientTransport`, with FAP's per-hop controls in one `ClientMiddleware`, Mastodon's private-address check on every connection, typed actor and object documents, signed fetches, and an `ActorKeyCache`.
+**Architecture:** A FAP-authored OpenAPI document inside `ActivityPubCore` generates an `internal` client. Each Lambda container has one `RemoteFetchClient.shared`. It holds that client, an `HTTPClient` configured as in §0.2 of the spec, and `RemoteFetchMiddleware`. The `HTTPClient` settings are:
+- the connection hook;
+- no connection retries;
+- HTTP/1.1 only;
+- no proxy;
+- no redirects;
+- connect and read timeouts.
 
-**Architecture:** A FAP-authored OpenAPI document inside `ActivityPubCore` generates an `internal` client. One `RemoteFetchClient.shared` per Lambda container holds that client, an `HTTPClient` configured as in §0.2 of the spec (connection hook, no retries, HTTP/1.1 only, no proxy, no redirects, connect/read timeouts) and `RemoteFetchMiddleware`, which rewrites the placeholder origin to each hop and applies scheme, redirect, signing, deadline, status, content-type and body-size controls. `fetchRemoteObject` and `fetchRemoteActor` bind a `@TaskLocal` context per call and map generated types to two public structs.
+The middleware rewrites the placeholder origin to each hop and applies these controls:
+- scheme;
+- redirect limit;
+- signing;
+- deadline;
+- status;
+- content type;
+- body size.
 
-**Tech Stack:** Swift 6.3, swift-openapi-generator/runtime, swift-openapi-async-http-client, async-http-client, SwiftNIO (test target only), Swift Testing.
+`fetchRemoteObject` and `fetchRemoteActor` bind a `@TaskLocal` context for each call and map the generated types to two public structs.
 
-**Spec:** `docs/superpowers/specs/2026-10-20-reply-threading-design.md`, "Step 0 — Fetch hardening (security)" (§0.1–§0.3), "Testing → Unit → Step 0", "Build gate", "Unverified", "Guards and fallbacks" and decisions 14–17. Decisions 1–17 in the spec are settled; this plan does not reopen them. Where the spec and this plan differ, the section "Changes since the spec" below says why.
+**Tech Stack:** Swift 6.3, swift-openapi-generator and swift-openapi-runtime, swift-openapi-async-http-client, async-http-client, SwiftNIO (test target), Swift Testing.
+
+**Spec:** `docs/superpowers/specs/2026-10-20-reply-threading-design.md`. The relevant parts are:
+- "Step 0 — Fetch hardening (security)" (§0.1–§0.3);
+- "Testing → Unit → Step 0";
+- "Build gate";
+- "Unverified";
+- "Guards and fallbacks";
+- decisions 14–17.
+
+Decisions 1–17 in the spec are settled, and this plan does not reopen them. Where the plan and the spec differ, "Changes since the spec" explains why. One question is open; it is set out before Task 4.
 
 ## Global Constraints
 
-- Swift tools and toolchain 6.3 (`Package.swift:1`); platform floor `.macOS(.v15)` (`Package.swift:7`).
-- New package entries, exactly: `swift-server/swift-openapi-async-http-client` `from: "1.5.0"`; `swift-server/async-http-client` `from: "1.33.1"`; `apple/swift-nio` `from: "2.97.1"`; `apple/swift-nio-ssl` `from: "2.36.1"`; `apple/swift-nio-http2` `from: "1.42.0"`.
-- Raised floors: `swift-openapi-generator` `from: "1.11.1"`, `swift-openapi-runtime` `from: "1.11.0"` (today `1.6.0` and `1.7.0`, `Package.swift:36-37`).
-- `NIOCore`, `NIOPosix`, `NIOSSL`, `NIOHTTP2` are dependencies of `ActivityPubCoreTests` only. No production target names them, and no production source file imports them (decision 16 in the spec).
-- `Package.resolved` is regenerated only by the Resolve Packages workflow (`resolve-packages` label), never by a local toolchain (`AGENTS.md:271`).
-- Placeholder origin `https://remote-fetch.invalid`, written once, in the document's `servers:`; never a literal in Swift.
-- Per-fetch deadline at every non-search call site: `ContinuousClock.now + .seconds(10)`, computed at that fetch's call.
-- Transport `timeout`: 10 s. `HTTPClient` `timeout.connect = .seconds(5)`, `timeout.read = .seconds(10)`.
-- Redirects: at most 3 hops. Body cap: 1 MB, `1_048_576` bytes (Mastodon's `body_with_limit(limit = 1.megabyte)`, `app/lib/request.rb` at `2c540e4`); a body of exactly 1_048_576 bytes passes, one more byte fails.
-- Declared content types, exactly: `application/activity+json` and `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`.
-- Only status 200 succeeds.
-- The generated client is `internal` (`accessModifier: internal`). Public surface added: `fetchRemoteObject(uri:signer:deadline:)`, `fetchRemoteActor(uri:signer:deadline:)`, `RemoteObjectDocument`, `RemoteActorDocument`, `RemoteFetchError`, `ActorKeyCache`.
-- Every `HTTPClient` and `RemoteFetchClient` a test builds runs inside `withTestClient(_:body:)`.
-- Every test names its negative control; a test counts only after its control has been seen red. Record each control's observed output in the implementation PR description.
-- Commit messages: short, code-focused, ending with the `Co-Authored-By:` trailer the repository's other commits use.
+- **Toolchain.** Swift tools and toolchain 6.3 (`Package.swift:1`). The platform floor is `.macOS(.v15)` (`Package.swift:7`).
+- **New package entries.**
+  - `swift-server/swift-openapi-async-http-client` `from: "1.5.0"`
+  - `swift-server/async-http-client` `from: "1.33.1"`
+  - `apple/swift-nio` `from: "2.97.1"`
+  - `apple/swift-nio-ssl` `from: "2.36.1"`
+  - `apple/swift-nio-http2` `from: "1.42.0"`
+  - Open question 1 may add `apple/swift-http-types`. Its answer decides that, not this plan.
+- **Raised floors.** `swift-openapi-generator` `from: "1.11.1"` and `swift-openapi-runtime` `from: "1.11.0"`. Today they are `1.6.0` and `1.7.0` (`Package.swift:36-37`).
+- **NIO products.** `NIOCore`, `NIOPosix`, `NIOSSL` and `NIOHTTP2` are test-target products (decision 16 in the spec). Whether `ActivityPubCore` declares `NIOCore` is open question 1.
+- **Pins.** `Package.resolved` is regenerated only by the Resolve Packages workflow (the `resolve-packages` label), never with a local toolchain (`AGENTS.md:271`).
+- **Placeholder origin.** `https://remote-fetch.invalid` is written once, in the document's `servers:`. It never appears as a literal in Swift.
+- **Deadlines.** Each fetch at a non-search call site gets `.now + .seconds(10)` (a `ContinuousClock.Instant`), computed when that fetch is called.
+- **Timeouts.** The transport `timeout` is 10 s. `HTTPClient` uses `timeout.connect = .seconds(5)` and `timeout.read = .seconds(10)`.
+- **Redirects.** At most 3 hops.
+- **Body cap.** 1 MB, which is `1_048_576` bytes. This is Mastodon's `body_with_limit(limit = 1.megabyte)` (`app/lib/request.rb` at `2c540e4`). A body of exactly 1_048_576 bytes passes, and one byte more fails.
+- **Declared content types.** Exactly `application/activity+json` and `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`.
+- **Status.** Only 200 succeeds.
+- **Request target.** The request target reaches the server byte for byte, a path that starts with `//` included. The Task 9 tests measure this; it is not assumed.
+- **Access.** The generated client is `internal`. The public surface this step adds is:
+  - `fetchRemoteObject(uri:signer:deadline:)`
+  - `fetchRemoteActor(uri:signer:deadline:)`
+  - `RemoteObjectDocument`
+  - `RemoteActorDocument`
+  - `RemoteFetchError`
+  - `ActorKeyCache`
+- **Test clients.** Every `HTTPClient` and `RemoteFetchClient` a test builds runs inside `withTestClient(_:body:)`. Tests stop their servers before they return. A server left open by a failed assertion only holds a loopback port until the test process exits.
+- **Negative controls.** Each test names its negative control, and counts only after that control has been seen red. The implementation PR description records what each control showed.
+- **Commit messages.** Short and about the code, ending with the `Co-Authored-By:` trailer the repository's other commits use.
 
 ## Changes since the spec
 
-These follow from the repository at `6d02908` (current `main`) and are not design changes.
+These changes follow from the repository at `6d02908` (current `main`). None of them is a design change.
 
-1. **Pinned dependencies.** The spec says `Package.resolved` is gitignored (§0.2, "Versions behind the line references"). Since FederatedActivityPublisher#289 it is committed (`.gitignore` no longer lists it; `AGENTS.md:271`), every build resolves with `--force-resolved-versions` (`scripts/build-all-lambdas.sh:37`), and the file is regenerated only by `.github/workflows/resolve-packages.yml`. So the implementation PR commits a regenerated `Package.resolved` (Task 1), and the spec's "record the versions CI resolved" becomes "record the versions the committed file pins". At `6d02908` the file already pins versions newer than the spec's line references: `async-http-client` 1.36.2, `swift-openapi-runtime` 1.13.3, `swift-openapi-generator` 1.14.2, `swift-nio` 2.104.0, `swift-nio-ssl` 2.37.5, `swift-nio-http2` 1.46.0, `swift-http-types` 1.8.0. Spot checks at those tags: AHC 1.36.2 `HTTPClient.swift` still declares `http1_1ConnectionDebugInitializer`, `connectionPool.retryConnectionEstablishment` (default `true`), `httpVersion`, `.http1Only`, `proxy`, `redirectConfiguration`, `.disallow`, `timeout.connect`/`timeout.read`, `HTTPClientError.readTimeout` and the debug `deinit` precondition; runtime 1.13.3 `Base/OpenAPIMIMEType.swift` still declares `@_spi(Generated) public struct OpenAPIMIMEType`, `Kind.concrete`, `public var parameters` and an `internal` `static func evaluate(`. Task 1 re-checks every remaining cited line.
-2. **The Lambda build.** The spec's C4 text names `swift package … docker archive` (`deploy-stage.yml:326` at the time). The build is now `scripts/build-all-lambdas.sh`, run in the AL2023 image by `scripts/in-build-image.sh`, and the `lambda-build` label runs it on a PR (`.github/workflows/lambda-build.yml:58-65`). So C4's build half moves before merge (Task 15). Its runtime half stays on stage after merge. The build links with `-Xlinker -s` (`scripts/build-all-lambdas.sh:106`), so the deployed binaries carry no symbol table and FederatedActivityPublisher#283's `nm` count cannot be repeated on them; Task 15's control is a deliberate compile break instead.
-3. **TLS fixtures.** The spec commits the test CA and leaf as fixtures. `.gitignore:25-26` ignores `*.pem` and `*.key`, and no FAP target uses SwiftPM resources (spec, "Current FAP behaviour"). The fixtures are therefore committed as string literals in a test source file (Task 3).
-4. **No NIO type names in production code.** The connection hook works on NIO's `Channel` and `SocketAddress`, which `ActivityPubCore` may not import (Global Constraints). The hook is a closure literal assigned to `HTTPClient.Configuration.http1_1ConnectionDebugInitializer`, so its parameter type is inferred, and it reads `channel.remoteAddress?.ipAddress` and `?.port` by member access. A member of a type from a transitively imported module is in scope unless the `MemberImportVisibility` upcoming feature is on (SE-0444, "Implemented (Swift 6.1)", opt-in); `Package.swift` sets no `swiftSettings`. The address classifier therefore takes the address as a `String`. Task 4 has a stop condition if this does not compile on Linux CI.
-5. **`HTTPTypes`.** The middleware's `intercept` names `HTTPRequest`/`HTTPResponse`. Generated code imports `HTTPTypes` itself (generator `Translator/CommonTypes/Constants.swift:27`), and the existing `APIClient` target compiles generated code without declaring a `swift-http-types` product (`Package.swift:240-249`). Step 0 follows that and adds no `swift-http-types` entry.
-6. **Line numbers.** The spec's FAP line references are at `8a78008`. This plan cites `6d02908`: for example `KeyManager` is `Sources/ActivityPubCore/Crypto/KeyManager.swift:27`, InboxHandler's `let keyManager = KeyManager()` is `Sources/InboxHandler/main.swift:62`, and the QuoteRequest actor lookup is `:1734`.
-7. **`actorDocumentRequest`.** FederatedActivityPublisher#279's `KeyManager.actorDocumentRequest(url:signingKey:date:)` (`KeyManager.swift:85-117`) builds a `URLRequest`; after step 0 nothing sends one. Its path-and-query and `host[:port]` derivation moves to `HTTPSignature.signedGetHeaders(url:signer:date:)`, which the middleware calls, and `SignedFetchTests` move to it (Task 9). `KeyManagerError.invalidActorUri`, which the spec does not mention, is kept.
-8. **`contentMap`.** "No schema sets `additionalProperties`" (§0.1) concerns the object schemas, so that unknown fields are tolerated. `contentMap`, "an object whose values are strings", is expressed as `additionalProperties: {type: string}`, the OpenAPI form for a string map. No schema uses `additionalProperties: false`.
+1. **Pinned dependencies.**
+   - **What the spec says.** `Package.resolved` is gitignored (§0.2, "Versions behind the line references").
+   - **What changed.** Since FederatedActivityPublisher#289 the file is committed. Every build resolves with `--force-resolved-versions` (`scripts/build-all-lambdas.sh:37`). `scripts/resolve-packages.sh` regenerates the file from scratch (`rm -f Package.resolved`, then `swift package resolve`), so any pin can move.
+   - **What it means for the PR.** The implementation PR commits a regenerated file and lists every pin that changed (Task 1).
+   - **Pins at `6d02908`.** They are already newer than the versions the spec's line references were read at:
+     - `async-http-client` 1.36.2
+     - `swift-openapi-runtime` 1.13.3
+     - `swift-openapi-generator` 1.14.2
+     - `swift-nio` 2.104.0
+     - `swift-nio-ssl` 2.37.5
+     - `swift-nio-http2` 1.46.0
+     - `swift-http-types` 1.8.0
+   - **AHC 1.36.2 `HTTPClient.swift` still declares:**
+     - `http1_1ConnectionDebugInitializer`
+     - `connectionPool.retryConnectionEstablishment` (default `true`)
+     - `httpVersion` and `.http1Only`
+     - `proxy`
+     - `redirectConfiguration` and `.disallow`
+     - `timeout.connect` and `timeout.read`
+     - `HTTPClientError.readTimeout`
+     - the debug `deinit` precondition
+   - **Runtime 1.13.3 `Base/OpenAPIMIMEType.swift` still declares:**
+     - `@_spi(Generated) public struct OpenAPIMIMEType`
+     - `Kind.concrete`
+     - `public var parameters`
+     - an `internal` `static func evaluate(`
+   - **The rest.** Task 1 re-checks every other cited line.
+2. **The Lambda build.**
+   - **What the spec says.** C4 names `swift package … docker archive`.
+   - **What changed.** The build is now `scripts/build-all-lambdas.sh`, and the `lambda-build` label runs it on a PR (`.github/workflows/lambda-build.yml:58-65`).
+   - **What it means for the PR.** C4's build half moves before merge (Task 15). Its runtime half stays on stage after merge.
+   - **The control.** The build links with `-Xlinker -s` (`scripts/build-all-lambdas.sh:106`), so FederatedActivityPublisher#283's `nm` count cannot be repeated. Task 15's control is a deliberate compile break instead.
+3. **TLS fixtures.**
+   - **Why they are Swift literals.** `.gitignore:25-26` ignores `*.pem` and `*.key`, and no FAP target uses SwiftPM resources. So the CA certificate, the leaf certificate and the leaf private key are string literals in `TestOnlyTLS.swift`.
+   - **The keys.** The CA's private key is deleted as soon as it has signed the leaf, so nothing else can ever be issued under the test CA. The leaf is limited to `IP:127.0.0.1, DNS:localhost`. Its key constant is named `loopbackLeafPrivateKeyPEM_testOnly`.
+4. **NIOCore and HTTPTypes in `ActivityPubCore`.** Open question 1 (before Task 4).
+5. **Line numbers.** The spec's FAP line references are at `8a78008`. This plan cites `6d02908`. For example:
+   - `KeyManager` is at `Sources/ActivityPubCore/Crypto/KeyManager.swift:27`.
+   - `let keyManager = KeyManager()` is at `Sources/InboxHandler/main.swift:62`.
+   - The QuoteRequest actor lookup is at `:1734`.
+6. **`actorDocumentRequest`.**
+   - **What happens to it.** FederatedActivityPublisher#279's `KeyManager.actorDocumentRequest(url:signingKey:date:)` (`KeyManager.swift:85-117`) builds a `URLRequest`, and nothing sends one after step 0. Its path and query and its `host[:port]` derivation move to `HTTPSignature.signedGetHeaders(url:signer:date:)`. `SignedFetchTests` move to that function (Task 9).
+   - **What kept the `Accept` header.** The deleted code also set `Accept: application/activity+json`. The generated client now sends `Accept` from the declared response types, and Task 4 asserts it.
+   - **`KeyManagerError.invalidActorUri`.** The spec doesn't mention it, and it is kept.
+7. **`contentMap`.** "No schema sets `additionalProperties`" (§0.1) is about the object schemas, so that unknown fields are tolerated. `contentMap` is "an object whose values are strings", which is written `additionalProperties: {type: string}`. No schema uses `additionalProperties: false`.
+8. **The request target and the transport.**
+   - **The transport code.** `AsyncHTTPClientTransport.convertRequest` (swift-openapi-async-http-client 1.5.0, `Sources/OpenAPIAsyncHTTPClient/AsyncHTTPClientTransport.swift`) does this:
+     - `guard var baseUrlComponents = URLComponents(string: baseURL.absoluteString),`
+     - `let requestUrlComponents = URLComponents(string: request.path ?? "")`
+     - `baseUrlComponents.percentEncodedPath += requestUrlComponents.percentEncodedPath`
+     - `baseUrlComponents.percentEncodedQuery = requestUrlComponents.percentEncodedQuery`
+   - **The problem.** A request path of `//other/x` would parse as authority `other` and path `/x`.
+   - **The fix.** The middleware puts the hop's origin and path in `baseURL`, where `//other/x` follows an authority and stays a path. It passes only `?query`, or `""`, as `request.path`.
+   - **What AHC does next.** It derives the target from the URL as `percentEncodedPath` plus `"?" + query` (`HTTPHandler.swift:861-877` and `DeconstructedURL.swift:45-69`, AHC 1.33.1).
+   - **How it is checked.** Task 1 re-checks both files at the pinned versions, and the Task 9 tests measure the byte-for-byte result.
+   - **Receipts.** The quoted lines come from a read of the file at tag 1.5.0. That package is not in any local checkout until Task 1 resolves it, so no line numbers are given.
+9. **`withoutActuallyEscaping`.** `ClientMiddleware.intercept` receives `next` as a non-escaping `@Sendable` closure (`Interface/ClientTransport.swift:224-230`, runtime 1.11.0). The deadline race runs `next` in a task group, so it uses `withoutActuallyEscaping(next)`. The group finishes before `intercept` returns, so the closure never outlives the call.
+
+## Known limitations
+
+- **TLS handshake detection.** The test server recognises a completed handshake from the event's description (`handshakeCompleted…`). `TLSUserEvent` is in `NIOTLS`, which `NIOSSL` imports without re-exporting. Adding the `NIOTLS` product needs a dependency decision this plan does not take.
+- **The h2 test server.** For the same reason, the h2 test server sets up HTTP/2 after TLS whatever ALPN negotiated. It does not follow the negotiated protocol. This doesn't matter for its two tests: in the refusal test no HTTP bytes arrive, and in the control the client negotiates `h2`.
+- **The PostHandler key prefix.** `PostHandler` falls back to the stage `SSM_KEY_PREFIX` when the variable is unset (`PostHandler/main.swift:33`). After Task 14 that prefix is also where quote-fetch signing keys come from. This is tracked in FederatedActivityPublisher#295 and is not changed here.
 
 ## Review Focus
 
-Inputs the spec implies that no spec-listed test exercises, most likely first. Each has a test in the owning task.
+These inputs follow from the spec, but no test the spec lists exercises them. The most likely to occur comes first. Each one has a test in the task that owns the code.
 
-1. **A 3xx without `Location`** (a `304`, or a `302` with the header missing). Expected: not followed; fails with the status error. Test: Task 5, `redirectWithoutLocationFailsWithStatus`.
-2. **A body of exactly 1 MB.** Expected: 1_048_576 bytes decode; 1_048_577 fail with the size error. Test: Task 7, `bodyAtExactlyOneMegabytePasses`.
-3. **Mixed-case content type** (`Application/Activity+JSON`). Expected: accepted (type and subtype compare case-insensitively). Test: Task 6, `contentTypeTypeAndSubtypeAreCaseInsensitive`.
-4. **A deadline already past when the fetch is called.** Expected: deadline error, 0 connections. Test: Task 7, `expiredDeadlineFailsBeforeConnecting`.
-5. **A URI whose path begins with `//`** (`https://host:A//other/x`). The transport parses the request path with `URLComponents(string:)` before appending it to the base URL (`AsyncHTTPClientTransport.convertRequest`, swift-openapi-async-http-client 1.5.0), so `//other` could be read as an authority. Expected: the request goes to `host:A`, never to `other`. Test: Task 9, `pathStartingWithDoubleSlashStaysOnTheURIHost`.
+1. **A 3xx without `Location`.** Expected: it is not followed, and the fetch fails with the status error. Test: Task 5, `redirectWithoutLocationFailsWithStatus`.
+2. **A body of exactly 1 MB.** Expected: it decodes, and one byte more fails with the size error. Test: Task 7, `bodyAtExactlyOneMegabytePasses`.
+3. **A mixed-case content type.** Expected: it is accepted. Test: Task 6, `contentTypeTypeAndSubtypeAreCaseInsensitive`.
+4. **A deadline that has already passed.** Expected: the deadline error, with 0 connections. Test: Task 7, `expiredDeadlineFailsBeforeConnecting`.
+5. **A path that starts with `//`.** Expected: the server named in the URI receives the target `//other/x`, and no other host is contacted. Test: Task 9, `pathStartingWithDoubleSlashIsSentVerbatim`.
 
 ---
 
@@ -57,27 +149,22 @@ Inputs the spec implies that no spec-listed test exercises, most likely first. E
 
 | File | Responsibility |
 |---|---|
-| `Package.swift` | Dependencies, floors, target products, generator plugin on `ActivityPubCore` |
-| `Package.resolved` | Regenerated by the Resolve Packages workflow |
-| `Sources/ActivityPubCore/openapi.yaml` | Remote-fetch document: placeholder server, `getObject`, `getActor`, schemas |
-| `Sources/ActivityPubCore/openapi-generator-config.yaml` | `types`, `client`, `accessModifier: internal` |
-| `Sources/ActivityPubCore/RemoteFetch/RemoteFetchError.swift` | `RemoteFetchError`, `UndocumentedStatusError`, the error-mapping order |
+| `Package.swift`, `Package.resolved` | Dependencies, floors, products, generator plugin, the open question 1 switch |
+| `Sources/ActivityPubCore/openapi.yaml`, `openapi-generator-config.yaml` | Remote-fetch document and generator config |
+| `Sources/ActivityPubCore/RemoteFetch/RemoteFetchError.swift` | `RemoteFetchError`, `UndocumentedStatusError`, the mapping order |
 | `Sources/ActivityPubCore/RemoteFetch/RemoteFetchContext.swift` | `RemoteFetchContext` (`@TaskLocal`), `SchemePolicy` |
 | `Sources/ActivityPubCore/RemoteFetch/PrivateAddressCheck.swift` | Address classifier, `AddressPolicy` |
-| `Sources/ActivityPubCore/RemoteFetch/RemoteFetchMiddleware.swift` | `RemoteFetchChecks`, `RemoteFetchMiddleware`, the capped body sequence |
+| `Sources/ActivityPubCore/RemoteFetch/RemoteFetchMiddleware.swift` | `RemoteFetchChecks`, `RemoteFetchMiddleware`, `CappedBody` |
 | `Sources/ActivityPubCore/RemoteFetch/RemoteFetchClient.swift` | Client construction, `shared`, `shutdown()` |
-| `Sources/ActivityPubCore/RemoteFetch/RemoteDocuments.swift` | `RemoteObjectDocument`, `RemoteActorDocument`, mapping from generated types |
-| `Sources/ActivityPubCore/FetchRemoteObject.swift` | `fetchRemoteObject`, `fetchRemoteActor` (public + internal overloads) |
-| `Sources/ActivityPubCore/Crypto/ActorKeyCache.swift` | Per-container private-key cache |
-| `Sources/ActivityPubCore/Crypto/KeyManager.swift` | Stored client, `fetchActorDocument` on `fetchRemoteActor`, deadlines |
-| `Sources/ActivityPubCore/Crypto/HTTPSignature.swift` | `signedGetHeaders(url:signer:date:)` |
-| `Sources/InboxHandler/main.swift` | `ActorKeyCache`, deadlines, signed QuoteRequest actor lookup |
-| `Sources/PostHandler/main.swift` | `ActorKeyCache`, signed quote-path fetches |
-| `Sources/ActivityPubCore/Documentation.docc/ActivityPubCore.md`, `AuthenticationOverview.md` | New public symbols |
-| `Tests/ActivityPubCoreTests/RemoteFetch/TestServer.swift` | NIO HTTP/1.1 and TLS test servers that record connections, bytes, closes, handshakes, requests |
-| `Tests/ActivityPubCoreTests/RemoteFetch/TestCertificates.swift` | Test CA and leaf as string literals |
-| `Tests/ActivityPubCoreTests/RemoteFetch/TestSupport.swift` | `withTestClient`, `makeTestClient`, `bareFetch`, `expectFetchError`, fixtures |
-| `Tests/ActivityPubCoreTests/RemoteFetch/*Tests.swift` | One file per task below |
+| `Sources/ActivityPubCore/RemoteFetch/RemoteDocuments.swift` | `RemoteObjectDocument`, `RemoteActorDocument`, mapping |
+| `Sources/ActivityPubCore/FetchRemoteObject.swift` | `fetchRemoteObject`, `fetchRemoteActor` |
+| `Sources/ActivityPubCore/Crypto/ActorKeyCache.swift` | Private-key cache for each container |
+| `Sources/ActivityPubCore/Crypto/KeyManager.swift`, `HTTPSignature.swift` | Stored client, `fetchActorDocument` on `fetchRemoteActor`, `signedGetHeaders` |
+| `Sources/InboxHandler/main.swift`, `Sources/PostHandler/main.swift` | Call sites |
+| `Tests/ActivityPubCoreTests/RemoteFetch/TestServer.swift` | NIO test servers and `TestBarrier` |
+| `Tests/ActivityPubCoreTests/RemoteFetch/TestOnlyTLS.swift` | CA and leaf certificates, and the leaf key, as literals |
+| `Tests/ActivityPubCoreTests/RemoteFetch/TestSupport.swift` | Clients, fetch helpers, error helpers, fixtures |
+| `Tests/ActivityPubCoreTests/RemoteFetch/*Tests.swift` | One file for each task below |
 
 ---
 
@@ -85,28 +172,35 @@ Inputs the spec implies that no spec-listed test exercises, most likely first. E
 
 **Files:**
 - Modify: `Package.swift:30-43` (package entries), `:46-57` (`ActivityPubCore`), `:252-260` (`ActivityPubCoreTests`)
-- Modify: `Package.resolved` (from the workflow artifact)
+- Modify: `Package.resolved` (taken from the workflow artifact)
 
 **Interfaces:**
-- Produces: products available to later tasks. `ActivityPubCore`: `AsyncHTTPClient`, `OpenAPIRuntime`, `OpenAPIAsyncHTTPClient`. `ActivityPubCoreTests`: `AsyncHTTPClient`, `OpenAPIRuntime`, `NIOCore`, `NIOPosix`, `NIOSSL`, `NIOHTTP2`.
+- Produces these products:
+  - **`ActivityPubCore`:** `AsyncHTTPClient`, `OpenAPIRuntime`, `OpenAPIAsyncHTTPClient`.
+  - **`ActivityPubCoreTests`:** `AsyncHTTPClient`, `OpenAPIRuntime`, `NIOCore`, `NIOPosix`, `NIOSSL`, `NIOHTTP2`.
 
-- [ ] **Step 1: Branch from main.** `git switch -c feat/fetch-hardening origin/main`.
+- [ ] **Step 1: Branch.** Run `git switch -c feat/fetch-hardening origin/main`.
 
-- [ ] **Step 2: Edit `Package.swift`.** Raise the two floors (Global Constraints). Add the five package entries. Add to `ActivityPubCore.dependencies`: `.product(name: "AsyncHTTPClient", package: "async-http-client")`, `.product(name: "OpenAPIRuntime", package: "swift-openapi-runtime")`, `.product(name: "OpenAPIAsyncHTTPClient", package: "swift-openapi-async-http-client")`. Add to `ActivityPubCoreTests.dependencies`: `AsyncHTTPClient`, `OpenAPIRuntime`, `NIOCore`, `NIOPosix` (package `swift-nio`), `NIOSSL` (`swift-nio-ssl`), `NIOHTTP2` (`swift-nio-http2`). Do not add the generator plugin yet (it fails without the document; Task 4).
+- [ ] **Step 2: Edit `Package.swift`.**
+  - Raise the two floors and add the five package entries (Global Constraints).
+  - Add the products listed under Interfaces.
+  - Leave the generator plugin out for now: it fails while the target has no document (Task 4).
 
-- [ ] **Step 3: Open a draft PR and regenerate the pins.** Push, open the implementation PR as a draft, add the `resolve-packages` label. When the Resolve Packages run finishes: `gh run download <run-id> -n Package.resolved`, then review `git diff Package.resolved`.
-  Expected: one new pin, `swift-openapi-async-http-client` at `1.5.0` or later; every pin for `async-http-client`, `swift-nio`, `swift-nio-ssl`, `swift-nio-http2`, `swift-openapi-generator`, `swift-openapi-runtime` at or above its floor; no pin removed.
+- [ ] **Step 3: Regenerate the pins.**
+  1. Push, open the implementation PR as a draft, and add the `resolve-packages` label.
+  2. When the run finishes, run `gh run download <run-id> -n Package.resolved`.
+  3. Commit the file.
+  4. Run `git diff origin/main -- Package.resolved` and write a table with one row per pin: identity, old version, new version.
+  - **Expected:** one new pin, `swift-openapi-async-http-client` at `1.5.0` or later. Each new entry's pin is at or above its floor, and no pin is removed.
+  - **Other pins can move,** because the script resolves from scratch. List every moved pin in the PR description. A moved pin is not a reason to stop, but every one is listed.
 
-- [ ] **Step 4: Re-check every cited third-party line at the pinned versions.** For each third-party file:line the spec's §0.1, §0.2 and Testing cite (AHC, runtime, generator, transport, NIOSSL), read the file at the pinned tag (read-only, e.g. `https://raw.githubusercontent.com/<org>/<repo>/<tag>/<path>`) and confirm the cited behaviour. Record a table `cited | pinned tag | still holds (yes/no, new line)` in the PR description. If any cited behaviour no longer holds, stop and report it; do not adapt the design.
+- [ ] **Step 4: Re-check the cited lines.** For each third-party file:line cited in §0.1, §0.2 or the Testing section of the spec, or in "Changes since the spec" items 8 and 9 above, read the file at the pinned tag. Read it read-only, from `https://raw.githubusercontent.com/<org>/<repo>/<tag>/<path>`.
+  - Add a table to the PR description: `cited | pinned tag | holds (yes/no, new line)`.
+  - If any cited behaviour no longer holds, stop and report it.
 
-- [ ] **Step 5: Run tests.** CI's Test job on the pushed commit. Expected: green; nothing uses the new products yet.
+- [ ] **Step 5: CI.** The Test job on the pushed commit. **Expected:** green.
 
-- [ ] **Step 6: Commit.**
-
-```bash
-git add Package.swift Package.resolved
-git commit -m "build: add AsyncHTTPClient transport and NIO test dependencies"
-```
+- [ ] **Step 6: Commit.** Run `git add Package.swift Package.resolved && git commit -m "build: add AsyncHTTPClient transport and NIO test dependencies"`.
 
 ---
 
@@ -118,12 +212,15 @@ git commit -m "build: add AsyncHTTPClient transport and NIO test dependencies"
 
 **Interfaces:**
 - Produces:
-  - `enum PrivateAddressCheck` with `struct Checks: OptionSet, Sendable { static let unwrapEmbeddedIPv4, cidrList, namedRanges; static let all }` and `static func isPrivate(_ ipAddress: String, checks: Checks = .all) -> Bool`.
-  - `enum AddressPolicy: Sendable { case mastodonPrivateAddressCheck; case loopbackPorts(Set<Int>); case allowAll }` with `func refuses(ipAddress: String?, port: Int?) -> Bool`.
+  - `enum PrivateAddressCheck`, with `struct Checks: OptionSet, Sendable { static let unwrapEmbeddedIPv4, cidrList, namedRanges; static let all }` and `static func isPrivate(_ ipAddress: String, checks: Checks = .all) -> Bool`.
+  - `enum AddressPolicy: Sendable { case mastodonPrivateAddressCheck; case loopbackPorts(Set<Int>); case allowAll }`, with `func refuses(ipAddress: String?, port: Int?) -> Bool`.
 
 - [ ] **Step 1: Write the failing tests.**
 
 ```swift
+import Testing
+@testable import ActivityPubCore
+
 @Suite("Private address classifier") struct PrivateAddressCheckTests {
     static let cidrList = ["0.1.2.3", "100.64.0.1", "172.16.0.1", "192.0.0.1", "192.0.2.1",
         "192.88.99.1", "198.18.0.1", "198.51.100.1", "203.0.113.1", "224.0.0.1", "240.0.0.1",
@@ -151,7 +248,7 @@ git commit -m "build: add AsyncHTTPClient transport and NIO test dependencies"
     }
     @Test func withoutUnwrappingIPv4CompatibleMetadataIsAdmitted() {
         #expect(!PrivateAddressCheck.isPrivate("::169.254.169.254",
-            checks: .all.subtracting(.unwrapEmbeddedIPv4)))
+                                               checks: .all.subtracting(.unwrapEmbeddedIPv4)))
     }
     @Test func withoutCIDRListNAT64MetadataIsAdmitted() {
         #expect(!PrivateAddressCheck.isPrivate("64:ff9b::a9fe:a9fe", checks: .all.subtracting(.cidrList)))
@@ -164,11 +261,22 @@ git commit -m "build: add AsyncHTTPClient transport and NIO test dependencies"
 }
 ```
 
-- [ ] **Step 2: Run.** `swift test --filter PrivateAddressCheckTests`. Expected: fails to compile (`PrivateAddressCheck` undefined).
+- [ ] **Step 2: Run.** `swift test --filter PrivateAddressCheckTests`. **Expected:** it fails to compile, because `PrivateAddressCheck` is undefined.
 
-- [ ] **Step 3: Implement `PrivateAddressCheck.swift`.** Parse with `inet_pton` (`AF_INET`, then `AF_INET6`; Foundation provides it on Darwin and Glibc); a string that parses as neither is private (fail closed). Order, per §0.2: `::` and `::1` checked first as IPv6; then, with `.unwrapEmbeddedIPv4`, an IPv4-mapped (`::ffff:0:0/96`) or IPv4-compatible (`::/96`) address is checked as its embedded IPv4 address; then `.namedRanges` (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`, `127.0.0.0/8`, `::1`, `169.254.0.0/16`, `fe80::/10`); then `.cidrList`, the 24 entries of §0.2 verbatim, as a `static let` array of `(bytes, prefixLength)`. `AddressPolicy.mastodonPrivateAddressCheck` refuses `nil` and every private address; `.loopbackPorts(p)` admits only `127.0.0.1` with a port in `p`; `.allowAll` admits everything (tests only). Doc comment cites `app/lib/private_address_check.rb` at commit `467c933`.
+- [ ] **Step 3: Implement.**
+  - **Parsing.** Parse with `inet_pton`, trying `AF_INET` first and then `AF_INET6`. A string that parses as neither is private.
+  - **Order** (§0.2):
+    1. Check `::` and `::1` as IPv6.
+    2. With `.unwrapEmbeddedIPv4`, check an IPv4-mapped (`::ffff:0:0/96`) or IPv4-compatible (`::/96`) address as the IPv4 address it embeds.
+    3. With `.namedRanges`, refuse `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`, `127.0.0.0/8`, `::1`, `169.254.0.0/16` and `fe80::/10`.
+    4. With `.cidrList`, refuse the 24 entries of §0.2, copied verbatim into a `static let` of `(bytes, prefixLength)`.
+  - **Policies.**
+    - `.mastodonPrivateAddressCheck` refuses `nil` and every private address.
+    - `.loopbackPorts(p)` admits only `127.0.0.1` on a port in `p`.
+    - `.allowAll` admits everything.
+  - **Doc comment.** Cite `app/lib/private_address_check.rb` at commit `467c933`.
 
-- [ ] **Step 4: Run.** Same command. Expected: all pass. Then remove `cidrList` handling locally and confirm `withoutCIDRList…` alone stays green while `refused("64:ff9b::a9fe:a9fe")` goes red; restore. Record the output.
+- [ ] **Step 4: Run.** **Expected:** PASS.
 
 - [ ] **Step 5: Commit.** `git commit -m "feat: private-address classifier with Mastodon's CIDR list"`
 
@@ -177,71 +285,501 @@ git commit -m "build: add AsyncHTTPClient transport and NIO test dependencies"
 ### Task 3: Test servers, TLS fixtures and the legacy key-fetch control
 
 **Files:**
-- Create: `Tests/ActivityPubCoreTests/RemoteFetch/TestServer.swift`, `TestCertificates.swift`, `TestSupport.swift`, `LegacyFetchControlTests.swift`
+- Create: `Tests/ActivityPubCoreTests/RemoteFetch/TestServer.swift`, `TestOnlyTLS.swift`, `TestSupport.swift`, `LegacyFetchControlTests.swift`
 
 **Interfaces:**
-- Produces (test target only):
-  - `final class TestServer: Sendable` with `static func start(tls: TestTLS? = nil, respond: @escaping @Sendable (RecordedRequest) -> TestResponse) async throws -> TestServer`, `var port: Int`, `func url(_ pathAndQuery: String, scheme: String = "http") -> String`, `var stats: ServerStats`, `func stop() async throws`.
-  - `ServerStats`: `connections`, `bytes` (HTTP bytes after TLS), `closes`, `tlsHandshakes`, `requests: [RecordedRequest]`.
-  - `struct RecordedRequest: Sendable { let method: String; let target: String; let headers: [String: String] }` (header names lowercased).
-  - `enum TestResponse: Sendable { case document(contentType: String?, body: String, status: Int = 200); case redirect(status: Int = 302, location: String?); case drip(contentType: String, every: Duration, totalBytes: Int); case stallAfterHead(contentType: String); case holdUntil(TestBarrier, then: TestResponse) }`.
-  - `struct TestTLS { var alpn: [String] = ["http/1.1"]; var http2: Bool = false }`.
-  - `enum TestCertificates { static let caPEM, leafPEM, leafKeyPEM: String }`.
-  - `func bareFetch(_ url: String) async throws -> (status: Int, headers: [(String, String)], bodyBytes: Int)` (AHC defaults, `execute`, no middleware, inside `withTestClient`).
-  - `enum Fixtures { static func actor(id: String, inbox: String, publicKeyPem: String, extra: String = "") -> String; static func note(id: String, attributedTo: String) -> String; static func padded(_ json: String, toAtLeast bytes: Int) -> String }`.
+- Produces (test target only). Each of these is defined in a step below:
+  - `TestServer`, `ServerStats`, `RecordedRequest`, `TestResponse`, `TestTLS`, `TestBarrier`
+  - `TestOnlyTLS`
+  - `withTestClient(_: HTTPClient, body:)`, `testTLSClientConfiguration()`, `bareFetch(_:readTimeout:)`, `settle()`
+  - `Fixtures`, `redirectChain(_:to:)`, `stopAll(_:)`
 
-- [ ] **Step 1: Generate the TLS fixtures once.** With `openssl`: a test CA (`CN=FAP Test CA`, 100-year validity) and a leaf signed by it with `subjectAltName = IP:127.0.0.1, DNS:localhost`, 100-year validity. Paste the three PEM blocks into `TestCertificates.swift` as raw string literals, with a header comment: test-only, not secrets, regenerated by the commands in the comment. Do not commit `.pem`/`.key` files (`.gitignore:25-26`).
+- [ ] **Step 1: Generate the TLS fixtures once.** Run these in a new empty temporary directory:
 
-- [ ] **Step 2: Write `TestServer`.** Model it on FederatedActivityPublisher#283's `RecordingHandler` (`ServerBootstrap` on `MultiThreadedEventLoopGroup.singleton`, bind `127.0.0.1:0`, counters in a `Mutex`). It parses the request head, records it, and writes the `TestResponse`. With `tls`, the child pipeline starts with `NIOSSLServerHandler(context:)` built from `TLSConfiguration.makeServerConfiguration(certificateChain:privateKey:)` and `applicationProtocols = tls.alpn`; a handshake is counted when a user inbound event whose `String(describing:)` begins with `handshakeCompleted` arrives (this avoids naming `TLSUserEvent`, which lives in `NIOTLS`, not a declared test dependency). With `tls.http2`, the pipeline after TLS is `configureHTTP2Pipeline(mode: .server, inboundStreamInitializer:)` with `HTTP2FramePayloadToHTTP1ServerCodec()` and the same responder. `.drip` writes a head with `Content-Length: totalBytes`, then one `a` byte every `every`. `.stallAfterHead` writes a head with `Content-Length: 10` and nothing else. `.holdUntil` waits on the barrier before responding.
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 36500 \
+  -subj "/CN=FAP test-only CA" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
+openssl req -newkey rsa:2048 -nodes -keyout leaf.key -out leaf.csr -subj "/CN=localhost"
+printf '%s\n' "subjectAltName=IP:127.0.0.1,DNS:localhost" "basicConstraints=critical,CA:FALSE" \
+  "keyUsage=critical,digitalSignature,keyEncipherment" "extendedKeyUsage=serverAuth" > leaf.ext
+openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 36500 \
+  -extfile leaf.ext -out leaf.pem
+rm ca.key ca.srl leaf.csr leaf.ext   # the CA key is never kept
+```
 
-- [ ] **Step 3: Write `withTestClient` for `HTTPClient` and `bareFetch`.** `func withTestClient<T>(_ client: HTTPClient, body: (HTTPClient) async throws -> T) async throws -> T` awaits `client.shutdown()` on the returning and the throwing path. (The `RemoteFetchClient` overload comes in Task 4.)
-
-- [ ] **Step 4: Fixture checks.**
+  Paste `ca.pem`, `leaf.pem` and `leaf.key` into `TestOnlyTLS.swift`, then delete the directory:
 
 ```swift
-@Test func fixtureRedirectChainServesFourRedirects() async throws {
-    // servers R1→R2→R3→R4→D; bareFetch with AHC defaults follows them
-    let r = try await bareFetch(r1.url("/start"))
-    #expect(r.status == 200)
-    #expect(d.stats.requests.count == 1)
-}
-@Test func fixtureOversizeServesMoreThanOneMegabyte() async throws {
-    let r = try await bareFetch(big.url("/actor"))
-    #expect(r.bodyBytes > 1_048_576)
+/// TLS material for the remote-fetch tests only. Not secrets: the CA's private key was deleted
+/// after it signed the leaf, so the CA can issue nothing else, and the leaf is valid only for
+/// IP:127.0.0.1 and DNS:localhost. Regenerate with the commands in the implementation plan,
+/// docs/superpowers/plans/2026-10-22-reply-threading-step0.md, Task 3.
+enum TestOnlyTLS {
+    static let caCertificatePEM = """
+        -----BEGIN CERTIFICATE-----
+        …
+        """
+    static let leafCertificatePEM = """
+        …
+        """
+    static let loopbackLeafPrivateKeyPEM_testOnly = """
+        …
+        """
 }
 ```
 
-- [ ] **Step 5: The legacy control for the key-fetch test (spec, "Key fetch").** In `LegacyFetchControlTests.swift`, against the parent code: `KeyManager().fetchActorDocument(actorUri: r1.url("/start"), signingKey: nil)` through a 4-redirect chain ending at `Fixtures.actor`, and against a valid actor padded past 1 MB. Assert both return a `RemoteActor` with the fixture's `publicKeyPem`.
+- [ ] **Step 2: Write `TestServer.swift`.**
 
-- [ ] **Step 6: Run.** `swift test --filter "fixture|LegacyFetchControl"`. Expected: PASS; the legacy fetch has no redirect or size cap. Record the output in the PR description: it is the key-fetch control's red (capability absent).
+```swift
+import Foundation
+import NIOCore
+import NIOHTTP2
+import NIOPosix
+import NIOSSL
+import Synchronization
+
+struct RecordedRequest: Sendable {
+    let method: String
+    let target: String
+    let headers: [String: String]   // names lowercased
+}
+
+indirect enum TestResponse: Sendable {
+    case document(contentType: String?, body: String, status: Int = 200)
+    case redirect(status: Int = 302, location: String?)
+    case drip(contentType: String, body: String, chunks: Int, every: TimeAmount)
+    case stallAfterHead(contentType: String)
+    case holdUntil(TestBarrier, then: TestResponse)
+    case never
+}
+
+struct TestTLS: Sendable {
+    var alpn: [String] = ["http/1.1"]
+    var http2 = false
+}
+
+/// Opens once; every waiter, earlier or later, then proceeds.
+actor TestBarrier {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func open() {
+        isOpen = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
+    }
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
+final class ServerStats: Sendable {
+    struct Snapshot: Sendable {
+        var connections = 0, bytes = 0, closes = 0, tlsHandshakes = 0, h2Streams = 0
+        var requests: [RecordedRequest] = []
+    }
+    private let state = Mutex(Snapshot())
+    func update(_ change: (inout Snapshot) -> Void) { state.withLock { change(&$0) } }
+    var snapshot: Snapshot { state.withLock { $0 } }
+    var connections: Int { snapshot.connections }
+    var bytes: Int { snapshot.bytes }            // HTTP bytes, after TLS
+    var closes: Int { snapshot.closes }
+    var tlsHandshakes: Int { snapshot.tlsHandshakes }
+    var h2Streams: Int { snapshot.h2Streams }
+    var requests: [RecordedRequest] { snapshot.requests }
+}
+
+/// After TLS (or first): counts connections, closes, handshakes and HTTP bytes; passes reads on.
+final class ConnectionCounter: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+    let stats: ServerStats
+    init(stats: ServerStats) { self.stats = stats }
+    func channelActive(context: ChannelHandlerContext) {
+        stats.update { $0.connections += 1 }
+        context.fireChannelActive()
+    }
+    func channelInactive(context: ChannelHandlerContext) {
+        stats.update { $0.closes += 1 }
+        context.fireChannelInactive()
+    }
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let count = Self.unwrapInboundIn(data).readableBytes
+        stats.update { $0.bytes += count }
+        context.fireChannelRead(data)
+    }
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        // Known limitation: TLSUserEvent is in NIOTLS, not a declared test dependency.
+        if String(describing: event).hasPrefix("handshakeCompleted") {
+            stats.update { $0.tlsHandshakes += 1 }
+        }
+        context.fireUserInboundEventTriggered(event)
+    }
+}
+
+final class Responder: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+    let stats: ServerStats
+    let respond: @Sendable (RecordedRequest) -> TestResponse
+    private var received = ByteBuffer()
+    private var answered = false
+    init(stats: ServerStats, respond: @escaping @Sendable (RecordedRequest) -> TestResponse) {
+        self.stats = stats
+        self.respond = respond
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var chunk = Self.unwrapInboundIn(data)
+        received.writeBuffer(&chunk)
+        guard !answered, let request = Self.parseHead(String(buffer: received)) else { return }
+        answered = true
+        stats.update { $0.requests.append(request) }
+        send(respond(request), context: context)
+    }
+
+    static func parseHead(_ text: String) -> RecordedRequest? {
+        guard let end = text.range(of: "\r\n\r\n") else { return nil }
+        let lines = text[..<end.lowerBound].components(separatedBy: "\r\n")
+        let parts = lines[0].split(separator: " ", maxSplits: 2).map(String.init)
+        guard parts.count == 3 else { return nil }
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            headers[line[..<colon].lowercased()] =
+                line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+        }
+        return RecordedRequest(method: parts[0], target: parts[1], headers: headers)
+    }
+
+    static func head(_ status: Int, contentType: String?, length: Int, location: String? = nil) -> String {
+        var head = "HTTP/1.1 \(status) Test\r\nContent-Length: \(length)\r\nConnection: close\r\n"
+        if let contentType { head += "Content-Type: \(contentType)\r\n" }
+        if let location { head += "Location: \(location)\r\n" }
+        return head + "\r\n"
+    }
+
+    func send(_ response: TestResponse, context: ChannelHandlerContext) {
+        switch response {
+        case .document(let contentType, let body, let status):
+            write(Self.head(status, contentType: contentType, length: body.utf8.count) + body, context)
+        case .redirect(let status, let location):
+            write(Self.head(status, contentType: nil, length: 0, location: location), context)
+        case .drip(let contentType, let body, let chunks, let every):
+            let bytes = Array(body.utf8)
+            write(Self.head(200, contentType: contentType, length: bytes.count), context)
+            drip(bytes[...], size: max(1, (bytes.count + chunks - 1) / chunks), every: every, context: context)
+        case .stallAfterHead(let contentType):
+            write(Self.head(200, contentType: contentType, length: 10), context)
+        case .holdUntil(let barrier, let then):
+            let bound = NIOLoopBound((self, context), eventLoop: context.eventLoop)
+            let loop = context.eventLoop
+            Task {
+                await barrier.wait()
+                loop.execute { let (handler, ctx) = bound.value; handler.send(then, context: ctx) }
+            }
+        case .never:
+            break
+        }
+    }
+
+    private func drip(_ rest: ArraySlice<UInt8>, size: Int, every: TimeAmount, context: ChannelHandlerContext) {
+        guard !rest.isEmpty else { return }
+        context.eventLoop.assumeIsolated().scheduleTask(in: every) {
+            context.writeAndFlush(Self.wrapOutboundOut(ByteBuffer(bytes: rest.prefix(size))), promise: nil)
+            self.drip(rest.dropFirst(size), size: size, every: every, context: context)
+        }
+    }
+
+    private func write(_ text: String, _ context: ChannelHandlerContext) {
+        context.writeAndFlush(Self.wrapOutboundOut(ByteBuffer(string: text)), promise: nil)
+    }
+}
+
+final class TestServer: Sendable {
+    let channel: any Channel
+    let stats: ServerStats
+    let scheme: String
+    init(channel: any Channel, stats: ServerStats, scheme: String) {
+        self.channel = channel; self.stats = stats; self.scheme = scheme
+    }
+    var port: Int { channel.localAddress!.port! }
+    func url(_ pathAndQuery: String) -> String { "\(scheme)://127.0.0.1:\(port)\(pathAndQuery)" }
+    func stop() async throws { try await channel.close() }
+
+    static func start(
+        tls: TestTLS? = nil,
+        respond: @escaping @Sendable (RecordedRequest) -> TestResponse = { _ in .never }
+    ) async throws -> TestServer {
+        let stats = ServerStats()
+        let sslContext: NIOSSLContext? = try tls.map { tls in
+            var config = TLSConfiguration.makeServerConfiguration(
+                certificateChain: [.certificate(try NIOSSLCertificate(
+                    bytes: Array(TestOnlyTLS.leafCertificatePEM.utf8), format: .pem))],
+                privateKey: .privateKey(try NIOSSLPrivateKey(
+                    bytes: Array(TestOnlyTLS.loopbackLeafPrivateKeyPEM_testOnly.utf8), format: .pem)))
+            config.applicationProtocols = tls.alpn
+            return try NIOSSLContext(configuration: config)
+        }
+        let http2 = tls?.http2 ?? false
+        let channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    let ops = channel.pipeline.syncOperations
+                    if let sslContext { try ops.addHandler(NIOSSLServerHandler(context: sslContext)) }
+                    try ops.addHandler(ConnectionCounter(stats: stats))
+                    if !http2 { try ops.addHandler(Responder(stats: stats, respond: respond)) }
+                }.flatMap {
+                    guard http2 else { return channel.eventLoop.makeSucceededVoidFuture() }
+                    // A new inbound stream means the client sent a request's HEADERS.
+                    return channel.configureHTTP2Pipeline(mode: .server, inboundStreamInitializer: { stream in
+                        stats.update { $0.h2Streams += 1 }
+                        return stream.eventLoop.makeSucceededVoidFuture()
+                    }).map { _ in }
+                }
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        return TestServer(channel: channel, stats: stats, scheme: tls == nil ? "http" : "https")
+    }
+}
+```
+
+  The construction follows FederatedActivityPublisher#283's `TestServer`. The NIO symbols it uses are:
+  - `ServerBootstrap`, `childChannelInitializer`, `syncOperations`, `.socketOption(.so_reuseaddr)`
+  - `NIOLoopBound(_:eventLoop:)` (`NIOCore/NIOLoopBound.swift:41`)
+  - `assumeIsolated().scheduleTask(in:_:)` (`NIOCore/EventLoopFuture+AssumeIsolated.swift:84-87`)
+  - `TLSConfiguration.makeServerConfiguration(certificateChain:privateKey:)` (`NIOSSL/TLSConfiguration.swift:623`)
+  - `NIOSSLCertificate(bytes:format:)` and `NIOSSLPrivateKey(bytes:format:)`
+  - `NIOSSLServerHandler(context:)`
+  - `configureHTTP2Pipeline(mode:…:inboundStreamInitializer:)` (`NIOHTTP2/HTTP2PipelineHelpers.swift:205-211`, swift-nio-http2 1.42.0)
+
+- [ ] **Step 3: Write `TestSupport.swift` (part 1).**
+
+```swift
+import AsyncHTTPClient
+import Crypto
+import _CryptoExtras
+import Foundation
+import NIOCore
+import NIOSSL
+import Testing
+@testable import ActivityPubCore
+
+let activityJSON = "application/activity+json"
+
+func testTLSClientConfiguration() -> TLSConfiguration {
+    var tls = TLSConfiguration.makeClientConfiguration()
+    tls.trustRoots = .certificates([try! NIOSSLCertificate(
+        bytes: Array(TestOnlyTLS.caCertificatePEM.utf8), format: .pem)])
+    return tls
+}
+
+/// Runs `body`, then awaits `shutdown()` on the returning and the throwing path. A body may shut
+/// the client down itself (Task 7's stall control); the second shutdown's `alreadyShutdown` is ignored.
+func withTestClient<T>(_ client: HTTPClient, body: (HTTPClient) async throws -> T) async throws -> T {
+    func shutdown() async throws {
+        do { try await client.shutdown() } catch let error as HTTPClientError where error == .alreadyShutdown {}
+    }
+    do {
+        let result = try await body(client)
+        try await shutdown()
+        return result
+    } catch {
+        try? await shutdown()
+        throw error
+    }
+}
+
+/// AHC defaults (follows up to 5 redirects, AHC 1.33.1 HTTPClient.swift:1334-1343), no middleware,
+/// no generated layer: shows what a test server serves.
+func bareFetch(_ url: String, readTimeout: TimeAmount? = nil)
+    async throws -> (status: Int, headers: [(String, String)], bodyBytes: Int)
+{
+    var config = HTTPClient.Configuration()
+    config.tlsConfiguration = testTLSClientConfiguration()
+    config.timeout.read = readTimeout
+    return try await withTestClient(HTTPClient(eventLoopGroupProvider: .singleton, configuration: config)) {
+        let response = try await $0.execute(HTTPClientRequest(url: url), timeout: .seconds(30))
+        let body = try await response.body.collect(upTo: 16 * 1_048_576)
+        return (Int(response.status.code), response.headers.map { ($0.name, $0.value) }, body.readableBytes)
+    }
+}
+
+/// Lets in-flight bytes and closes land on a server before counting.
+func settle() async throws { try await Task.sleep(for: .milliseconds(300)) }
+
+func stopAll(_ servers: TestServer...) async { for server in servers { try? await server.stop() } }
+
+/// `hops` servers, each answering 302 to the next; the last redirects to `final`.
+func redirectChain(_ hops: Int, to final: String) async throws -> [TestServer] {
+    var next = final
+    var servers: [TestServer] = []
+    for _ in 0..<hops {
+        let location = next
+        let server = try await TestServer.start { _ in .redirect(location: location) }
+        servers.insert(server, at: 0)
+        next = server.url("/hop")
+    }
+    return servers
+}
+
+enum Fixtures {
+    static let signingKey = try! _RSA.Signing.PrivateKey(keySize: .bits2048)
+    static var publicKeyPem: String { signingKey.publicKey.pemRepresentation }
+
+    /// The URL the request was made to, from its Host header and target.
+    static func selfURL(_ request: RecordedRequest) -> String {
+        "http://\(request.headers["host"] ?? "")\(request.target)"
+    }
+    static func note(id: String, attributedTo: String) -> String {
+        #"{"@context":"https://www.w3.org/ns/activitystreams","id":"\#(id)","type":"Note","attributedTo":"\#(attributedTo)","to":["https://www.w3.org/ns/activitystreams#Public"],"cc":[],"content":"<p>hi</p>"}"#
+    }
+    static func actor(id: String, publicKeyPem: String = Fixtures.publicKeyPem, extra: String = "") -> String {
+        let pem = publicKeyPem.replacingOccurrences(of: "\n", with: "\\n")
+        return #"{"@context":["https://www.w3.org/ns/activitystreams","https://w3id.org/security/v1"],"id":"\#(id)","type":"Person","preferredUsername":"alice","inbox":"\#(id)/inbox","endpoints":{"sharedInbox":"\#(id)/shared"},"publicKey":{"id":"\#(id)#main-key","owner":"\#(id)","publicKeyPem":"\#(pem)"}\#(extra)}"#
+    }
+    /// `json` with a "padding" member added so the result is exactly `bytes` UTF-8 bytes.
+    static func padded(_ json: String, to bytes: Int) -> String {
+        let open = String(json.dropLast()) + #","padding":""#
+        let close = #""}"#
+        return open + String(repeating: "x", count: bytes - open.utf8.count - close.utf8.count) + close
+    }
+}
+```
+
+- [ ] **Step 4: Fixture checks** (they go in `LegacyFetchControlTests.swift`).
+
+```swift
+@Test func fixtureFourRedirectsAreServed() async throws {
+    let d = try await TestServer.start { .document(contentType: activityJSON,
+                                                   body: Fixtures.actor(id: Fixtures.selfURL($0))) }
+    let chain = try await redirectChain(4, to: d.url("/a"))
+    let result = try await bareFetch(chain[0].url("/hop"))
+    #expect(result.status == 200)
+    #expect(d.stats.requests.count == 1)
+    await stopAll(d); for s in chain { await stopAll(s) }
+}
+@Test func fixtureOversizeBodyIsServed() async throws {
+    let big = try await TestServer.start { .document(contentType: activityJSON,
+        body: Fixtures.padded(Fixtures.actor(id: Fixtures.selfURL($0)), to: 1_048_577)) }
+    #expect(try await bareFetch(big.url("/a")).bodyBytes == 1_048_577)
+    await stopAll(big)
+}
+```
+
+- [ ] **Step 5: The key-fetch test's legacy control** (spec, "Key fetch"). These run against the code before step 0 changes it.
+
+```swift
+@Test func legacyKeyFetchFollowsFourRedirects() async throws {
+    let d = try await TestServer.start { .document(contentType: activityJSON,
+                                                   body: Fixtures.actor(id: Fixtures.selfURL($0))) }
+    let chain = try await redirectChain(4, to: d.url("/a"))
+    let actor = try await KeyManager().fetchActorDocument(actorUri: chain[0].url("/hop"), signingKey: nil)
+    #expect(actor.publicKeyPem == Fixtures.publicKeyPem)
+    await stopAll(d); for s in chain { await stopAll(s) }
+}
+@Test func legacyKeyFetchReadsPastOneMegabyte() async throws {
+    let big = try await TestServer.start { .document(contentType: activityJSON,
+        body: Fixtures.padded(Fixtures.actor(id: Fixtures.selfURL($0)), to: 1_048_577)) }
+    let actor = try await KeyManager().fetchActorDocument(actorUri: big.url("/a"), signingKey: nil)
+    #expect(actor.publicKeyPem == Fixtures.publicKeyPem)
+    await stopAll(big)
+}
+```
+
+- [ ] **Step 6: Run.** `swift test --filter LegacyFetchControlTests`. **Expected:** PASS. The code before step 0 has no redirect limit and no size cap. Record the output: it is the key-fetch control's red, with the capability absent.
 
 - [ ] **Step 7: Commit.** `git commit -m "test: NIO test servers, TLS fixtures, legacy key-fetch control"`
+
+---
+
+### Open question 1 (answer before Task 4): how `ActivityPubCore` reaches NIOCore and HTTPTypes
+
+**The question.**
+- **NIOCore.** The connection hook uses this NIOCore API: `Channel.remoteAddress`, `SocketAddress.ipAddress`, `SocketAddress.port`, `Channel.close(promise:)`, `EventLoop.makeFailedFuture(_:)` and `makeSucceededVoidFuture()`.
+- **HTTPTypes.** `RemoteFetchMiddleware` names `HTTPRequest`, `HTTPResponse` and `HTTPField`, so its file needs `import HTTPTypes`.
+- **Today.** `ActivityPubCore` declares neither product. Both modules are already resolved and linked: NIOCore through `async-http-client`, HTTPTypes through `swift-openapi-runtime` and the transport.
+
+**(a) Declare both. Recommended.**
+- **What it adds:**
+  - `.product(name: "NIOCore", package: "swift-nio")` and `.product(name: "HTTPTypes", package: "swift-http-types")` on `ActivityPubCore`;
+  - a package entry `apple/swift-http-types` `from: "1.8.0"`, the version pinned at `6d02908`.
+- **Pros:**
+  - `Package.swift` states every module that production code uses.
+  - The code keeps compiling if `MemberImportVisibility` (SE-0444, opt-in today) is turned on, or becomes the default in a future language mode.
+  - Both modules are handled the same way.
+  - No new package is resolved.
+- **Cons:**
+  - It widens decision 16 in the spec, which approved the NIO products for the test target only.
+  - It adds one package entry.
+  - A production target names NIOCore.
+
+**(b) Reach both implicitly.**
+- **What it does.** No declaration. The middleware's `import HTTPTypes` is undeclared, as generated code's is: the existing `APIClient` target compiles generated code that imports `HTTPTypes` without the product (`Package.swift:240-249`; generator `Translator/CommonTypes/Constants.swift:27`). The hook uses NIOCore by member access, with no import. A member of a type from a module imported only transitively is in scope while `MemberImportVisibility` is off (SE-0444, "Implemented (Swift 6.1)", opt-in), and `Package.swift` sets no `swiftSettings`.
+- **Pros:**
+  - It keeps to the letter of decision 16.
+  - `Package.swift` doesn't change.
+- **Cons:**
+  - It hides a dependency on NIOCore's API.
+  - It breaks when `MemberImportVisibility` is enabled or becomes the default.
+  - It relies on SwiftPM accepting undeclared transitive imports.
+
+**How the answer lands.**
+- **The switch.** The answer is one line, the value of `declareTransitiveModules` (Task 4, Step 1). The Swift sources are the same under both answers: the middleware imports `HTTPTypes`, and the hook uses NIOCore by member access.
+- **If the answer is (a).** It adds a package entry, which changes `Package.resolved`'s origin hash. So under (a), Task 4 Step 1 also re-runs the resolve (Task 1, Step 3).
 
 ---
 
 ### Task 4: Document, generated client, client construction and the fetch pipe
 
 **Files:**
-- Create: `Sources/ActivityPubCore/openapi.yaml`, `Sources/ActivityPubCore/openapi-generator-config.yaml`, `RemoteFetch/RemoteFetchError.swift`, `RemoteFetch/RemoteFetchContext.swift`, `RemoteFetch/RemoteFetchClient.swift`, `RemoteFetch/RemoteFetchMiddleware.swift`, `RemoteFetch/RemoteDocuments.swift`
-- Modify: `Package.swift` (`ActivityPubCore` gains `plugins: [.plugin(name: "OpenAPIGenerator", package: "swift-openapi-generator")]`), `Sources/ActivityPubCore/FetchRemoteObject.swift` (add the new functions beside the legacy one, which Task 14 deletes)
-- Test: `Tests/ActivityPubCoreTests/RemoteFetch/RemoteFetchClientTests.swift`, `TestSupport.swift`
+- Create:
+  - `Sources/ActivityPubCore/openapi.yaml` and `openapi-generator-config.yaml`
+  - `RemoteFetch/RemoteFetchError.swift`, `RemoteFetchContext.swift`, `RemoteFetchClient.swift`, `RemoteFetchMiddleware.swift`, `RemoteDocuments.swift`
+- Modify:
+  - `Package.swift`: the open question 1 switch; `plugins: [.plugin(name: "OpenAPIGenerator", package: "swift-openapi-generator")]` on `ActivityPubCore`.
+  - `Sources/ActivityPubCore/FetchRemoteObject.swift`: add the new functions beside the legacy one, which Task 14 deletes.
+- Test: `Tests/ActivityPubCoreTests/RemoteFetch/RemoteFetchClientTests.swift`, and `TestSupport.swift` (part 2)
 
 **Interfaces:**
 - Produces:
-  - `public enum RemoteFetchError: Error` with exactly the cases of §0.1 "The error type": `invalidURI(String)`, `noContext`, `schemeRefused(URL)`, `tooManyRedirects(URL)`, `deadlineExceeded`, `status(Int)`, `contentType(String?)`, `bodyTooLarge`, `addressRefused(String)`, `invalidDocument(DecodingError)`, `generatedLayerRefused(underlying: any Error)`, `transportFailed(underlying: any Error)`.
-  - `struct UndocumentedStatusError: Error { let statusCode: Int }`.
-  - `extension RemoteFetchError { static func from(_ error: any Error) -> RemoteFetchError }`: unwrap `ClientError.underlyingError`, then the spec's order 1–5 (§0.1, "Telling the generated layer from the transport"), using `ClientError.response != nil` for rule 4.
-  - `struct RemoteFetchContext: Sendable { let target: URL; let signer: FetchSigningKey?; let deadline: ContinuousClock.Instant; let schemePolicy: SchemePolicy; @TaskLocal static var current: RemoteFetchContext? }`.
-  - `enum SchemePolicy: Sendable { case httpsOnly; case allowingHTTP(ports: Set<Int>); func admits(_ url: URL) -> Bool }` (`allowingHTTP` admits `https` everywhere and `http` only on the listed ports; scheme compared case-insensitively).
-  - `struct RemoteFetchClient: Sendable { let client: Client; let httpClient: HTTPClient; static let shared: RemoteFetchClient; static func make(addressPolicy: AddressPolicy = .mastodonPrivateAddressCheck, checks: RemoteFetchChecks = .all, closesRefusedChannel: Bool = true, middleware: (any ClientMiddleware)? = nil, adjust: (inout HTTPClient.Configuration) -> Void = { _ in }) -> RemoteFetchClient; func shutdown() async throws }`.
-  - `struct RemoteFetchChecks: OptionSet, Sendable` with `scheme`, `redirectLimit`, `bodyCap`, `contentType`, `status`, `deadline`, `verbatimRequestTarget`, `resignEachHop`, and `static let all`. (This task implements only the no-context throw and the single-hop rewrite; Tasks 5–9 add the rest.)
-  - `struct RemoteFetchMiddleware: ClientMiddleware { init(checks: RemoteFetchChecks = .all) }`.
-  - `public struct RemoteObjectDocument: Sendable { public let id: String; public let types: [String]; public let attributedTo: String?; public let to: [String]; public let cc: [String]; public let url: String?; public let content: String?; public let summary: String?; public let sensitive: Bool?; public let published: String?; public let language: String? }`.
-  - `public struct RemoteActorDocument: Sendable { public let id: String; public let inbox: String; public let sharedInbox: String?; public let publicKeyPem: String?; public let followers: String?; public let url: String?; public let preferredUsername: String? }`.
-  - `public func fetchRemoteObject(uri: String, signer: FetchSigningKey? = nil, deadline: ContinuousClock.Instant) async throws -> RemoteObjectDocument` and the internal overload `fetchRemoteObject(uri:signer:deadline:schemePolicy:client:)`; the same pair for `fetchRemoteActor` returning `RemoteActorDocument`.
-  - Test support: `func withTestClient<T>(_ client: RemoteFetchClient, body: (RemoteFetchClient) async throws -> T) async throws -> T`; `func makeTestClient(admitting ports: Set<Int>, checks: RemoteFetchChecks = .all, closesRefusedChannel: Bool = true, middleware: (any ClientMiddleware)? = nil, adjust: @escaping (inout HTTPClient.Configuration) -> Void = { _ in }) -> RemoteFetchClient` (calls `RemoteFetchClient.make` with `.loopbackPorts(ports)` and an `adjust` that first sets `tlsConfiguration` with `trustRoots = .certificates([try! NIOSSLCertificate(bytes: Array(TestCertificates.caPEM.utf8), format: .pem)])`, then applies the caller's); `func expectFetchError(_ matches: (RemoteFetchError) -> Bool, _ body: () async throws -> some Any) async`.
+  - **`public enum RemoteFetchError: Error`.** Exactly the cases in §0.1, "The error type": `invalidURI(String)`, `noContext`, `schemeRefused(URL)`, `tooManyRedirects(URL)`, `deadlineExceeded`, `status(Int)`, `contentType(String?)`, `bodyTooLarge`, `addressRefused(String)`, `invalidDocument(DecodingError)`, `generatedLayerRefused(underlying: any Error)`, `transportFailed(underlying: any Error)`.
+  - **`struct UndocumentedStatusError: Error { let statusCode: Int }`.**
+  - **`extension RemoteFetchError { static func from(_ error: any Error) -> RemoteFetchError }`.** It unwraps `ClientError.underlyingError`, then applies the order in §0.1, "Telling the generated layer from the transport", rules 1–5. Rule 4 tests `ClientError.response != nil`.
+  - **`RemoteFetchContext`.** `struct RemoteFetchContext: Sendable { let target: URL; let signer: FetchSigningKey?; let deadline: ContinuousClock.Instant; let schemePolicy: SchemePolicy; @TaskLocal static var current: RemoteFetchContext? }`.
+  - **`SchemePolicy`.** `enum SchemePolicy: Sendable { case httpsOnly; case allowingHTTP(ports: Set<Int>); func admits(_ url: URL) -> Bool }`. `allowingHTTP` admits `https` on any port and `http` only on the listed ports. The scheme compares case-insensitively.
+  - **`RemoteFetchChecks`.** `struct RemoteFetchChecks: OptionSet, Sendable`, with `scheme`, `redirectLimit`, `bodyCap`, `contentType`, `status`, `deadline`, `verbatimRequestTarget`, `resignEachHop` and `static let all`.
+  - **`RemoteFetchMiddleware`.** `struct RemoteFetchMiddleware: ClientMiddleware { init(checks: RemoteFetchChecks = .all) }`. Its constants are `static let maxRedirects = 3` and `static let maxBodyBytes = 1_048_576`.
+  - **`RemoteFetchClient`.** `struct RemoteFetchClient: Sendable { let client: Client; let httpClient: HTTPClient; static let shared: RemoteFetchClient; static func make(addressPolicy: AddressPolicy = .mastodonPrivateAddressCheck, checks: RemoteFetchChecks = .all, closesRefusedChannel: Bool = true, middleware: (any ClientMiddleware)? = nil, adjust: (inout HTTPClient.Configuration) -> Void = { _ in }) -> RemoteFetchClient; func shutdown() async throws }`.
+  - **`RemoteObjectDocument` and `RemoteActorDocument`.** Public structs whose fields are those of §0.1 ("How the typed results are consumed"), as `public let`s.
+  - **The fetch functions:**
+    - `public func fetchRemoteObject(uri: String, signer: FetchSigningKey? = nil, deadline: ContinuousClock.Instant) async throws -> RemoteObjectDocument`
+    - `func fetchRemoteObject(uri: String, signer: FetchSigningKey? = nil, deadline: ContinuousClock.Instant, schemePolicy: SchemePolicy, client: RemoteFetchClient) async throws -> RemoteObjectDocument`
+    - the same pair for `fetchRemoteActor`, returning `RemoteActorDocument`.
+  - **Test support,** defined in Step 2.
 
-- [ ] **Step 1: Write the document.** `Sources/ActivityPubCore/openapi.yaml`:
+- [ ] **Step 1: The open question 1 switch, the document and the config.** In `Package.swift`, above `let package`:
+
+```swift
+/// Open question 1 in docs/superpowers/plans/2026-10-22-reply-threading-step0.md: whether
+/// ActivityPubCore declares NIOCore and HTTPTypes, which it uses through async-http-client and
+/// swift-openapi-runtime. Set to the decided answer: true for (a), false for (b).
+let declareTransitiveModules = <answer>
+let transitiveModulePackages: [Package.Dependency] = declareTransitiveModules
+    ? [.package(url: "https://github.com/apple/swift-http-types", from: "1.8.0")] : []
+let transitiveModuleProducts: [Target.Dependency] = declareTransitiveModules
+    ? [.product(name: "NIOCore", package: "swift-nio"),
+       .product(name: "HTTPTypes", package: "swift-http-types")] : []
+let transitiveTestProducts: [Target.Dependency] = declareTransitiveModules
+    ? [.product(name: "HTTPTypes", package: "swift-http-types")] : []   // NIOCore is already a test product
+```
+
+  - Append `+ transitiveModulePackages` to `dependencies:`, `+ transitiveModuleProducts` to `ActivityPubCore.dependencies`, and `+ transitiveTestProducts` to `ActivityPubCoreTests.dependencies`.
+  - Under (a), re-run the resolve (Task 1, Step 3).
+
+  `Sources/ActivityPubCore/openapi.yaml`:
 
 ```yaml
 openapi: 3.1.0
@@ -349,7 +887,7 @@ components:
               - { $ref: '#/components/schemas/Link' }
 ```
 
-  `openapi-generator-config.yaml`:
+  `Sources/ActivityPubCore/openapi-generator-config.yaml`:
 
 ```yaml
 generate:
@@ -358,50 +896,192 @@ generate:
 accessModifier: internal
 ```
 
-- [ ] **Step 2: Write the failing tests.**
+- [ ] **Step 2: Write `TestSupport.swift` (part 2) and the failing tests.**
 
 ```swift
-@Test func clientConstructionCompletes() async throws {
-    // The production construction, as RemoteFetchClient.shared uses it; runs the try! on Servers.Server1.url()
-    // Passes when construction completes without trapping; there is nothing else to assert.
-    try await withTestClient(RemoteFetchClient.make()) { _ in }
+// TestSupport.swift, part 2
+import OpenAPIRuntime
+
+func withTestClient<T>(_ client: RemoteFetchClient, body: (RemoteFetchClient) async throws -> T) async throws -> T {
+    try await withTestClient(client.httpClient) { _ in try await body(client) }
 }
-@Test func fetchesAValidObjectAndActor() async throws {
-    // server A serves Fixtures.note at /n and Fixtures.actor at /a with application/activity+json
-    try await withTestClient(makeTestClient(admitting: [a.port])) { client in
-        let note = try await fetchRemoteObject(uri: a.url("/n"), deadline: .now + .seconds(10),
-            schemePolicy: .allowingHTTP(ports: [a.port]), client: client)
-        #expect(note.id == a.url("/n")); #expect(note.attributedTo == a.url("/a"))
-        let actor = try await fetchRemoteActor(uri: a.url("/a"), deadline: .now + .seconds(10),
-            schemePolicy: .allowingHTTP(ports: [a.port]), client: client)
-        #expect(actor.inbox == a.url("/a/inbox"))
+
+/// The production construction with a loopback address policy and the test CA.
+func makeTestClient(
+    admitting ports: Set<Int>,
+    checks: RemoteFetchChecks = .all,
+    closesRefusedChannel: Bool = true,
+    middleware: (any ClientMiddleware)? = nil,
+    adjust: @escaping (inout HTTPClient.Configuration) -> Void = { _ in }
+) -> RemoteFetchClient {
+    RemoteFetchClient.make(addressPolicy: .loopbackPorts(ports), checks: checks,
+                           closesRefusedChannel: closesRefusedChannel, middleware: middleware,
+                           adjust: { $0.tlsConfiguration = testTLSClientConfiguration(); adjust(&$0) })
+}
+
+func object(_ uri: String, via client: RemoteFetchClient, http ports: Set<Int> = [],
+            signer: FetchSigningKey? = nil, deadline: ContinuousClock.Instant = .now + .seconds(10))
+    async throws -> RemoteObjectDocument
+{
+    try await fetchRemoteObject(uri: uri, signer: signer, deadline: deadline,
+        schemePolicy: ports.isEmpty ? .httpsOnly : .allowingHTTP(ports: ports), client: client)
+}
+
+func actor(_ uri: String, via client: RemoteFetchClient, http ports: Set<Int> = [],
+           signer: FetchSigningKey? = nil, deadline: ContinuousClock.Instant = .now + .seconds(10))
+    async throws -> RemoteActorDocument
+{
+    try await fetchRemoteActor(uri: uri, signer: signer, deadline: deadline,
+        schemePolicy: ports.isEmpty ? .httpsOnly : .allowingHTTP(ports: ports), client: client)
+}
+
+/// The RemoteFetchError `body` throws; records an issue if it returns or throws something else.
+func fetchError(_ body: () async throws -> Void) async -> RemoteFetchError? {
+    do { try await body(); Issue.record("expected a RemoteFetchError, got success"); return nil }
+    catch let error as RemoteFetchError { return error }
+    catch { Issue.record("expected a RemoteFetchError, got \(error)"); return nil }
+}
+
+/// Calls the generated client directly under a bound context; returns the ClientError it throws.
+func generatedCallError(_ uri: String, via client: RemoteFetchClient, http ports: Set<Int>) async -> ClientError? {
+    let context = RemoteFetchContext(target: URL(string: uri)!, signer: nil, deadline: .now + .seconds(10),
+                                     schemePolicy: .allowingHTTP(ports: ports))
+    do {
+        _ = try await RemoteFetchContext.$current.withValue(context) { try await client.client.getObject() }
+        Issue.record("expected a ClientError"); return nil
+    } catch let error as ClientError { return error }
+    catch { Issue.record("expected a ClientError, got \(error)"); return nil }
+}
+
+extension RemoteFetchError {
+    var name: String {
+        switch self {
+        case .invalidURI: "invalidURI"
+        case .noContext: "noContext"
+        case .schemeRefused: "schemeRefused"
+        case .tooManyRedirects: "tooManyRedirects"
+        case .deadlineExceeded: "deadlineExceeded"
+        case .status: "status"
+        case .contentType: "contentType"
+        case .bodyTooLarge: "bodyTooLarge"
+        case .addressRefused: "addressRefused"
+        case .invalidDocument: "invalidDocument"
+        case .generatedLayerRefused: "generatedLayerRefused"
+        case .transportFailed: "transportFailed"
+        }
     }
 }
-@Test func unboundCallThrowsNoContextBeforeConnecting() async throws {
-    try await withTestClient(makeTestClient(admitting: [a.port])) { client in
-        var caught: (any Error)?
-        do { _ = try await client.client.getObject() } catch { caught = error }
-        let error = try #require(caught)
-        guard case .noContext = RemoteFetchError.from(error) else { Issue.record("\(error)"); return }
-        #expect(a.stats.connections == 0)
+
+/// A server that answers every request with a note whose id is the request's own URL.
+func noteServer(contentType: String? = activityJSON, status: Int = 200) async throws -> TestServer {
+    try await TestServer.start {
+        .document(contentType: contentType,
+                  body: Fixtures.note(id: Fixtures.selfURL($0), attributedTo: "https://remote.example/users/a"),
+                  status: status)
     }
 }
-@Test func invalidURIFails() async { await expectFetchError({ if case .invalidURI = $0 { true } else { false } }) {
-    try await fetchRemoteObject(uri: "not a url", deadline: .now + .seconds(10)) } }
 ```
 
-- [ ] **Step 3: Run.** `swift test --filter RemoteFetchClientTests`. Expected: compile failure.
+```swift
+// RemoteFetchClientTests.swift
+@Suite("Remote fetch client") struct RemoteFetchClientTests {
+    @Test func clientConstructionCompletes() async throws {
+        // The construction RemoteFetchClient.shared uses; it runs the try! on Servers.Server1.url().
+        try await withTestClient(RemoteFetchClient.make()) { _ in }
+    }
+
+    @Test func fetchesObjectAndActorAndSendsAccept() async throws {
+        let a = try await TestServer.start {
+            $0.target == "/a"
+                ? .document(contentType: activityJSON, body: Fixtures.actor(id: Fixtures.selfURL($0)))
+                : .document(contentType: activityJSON,
+                            body: Fixtures.note(id: Fixtures.selfURL($0), attributedTo: "x"))
+        }
+        try await withTestClient(makeTestClient(admitting: [a.port])) { client in
+            let note = try await object(a.url("/n"), via: client, http: [a.port])
+            #expect(note.id == a.url("/n"))
+            let person = try await actor(a.url("/a"), via: client, http: [a.port])
+            #expect(person.inbox == a.url("/a") + "/inbox")
+            #expect(person.publicKeyPem == Fixtures.publicKeyPem)
+            #expect(a.stats.requests[0].headers["accept"]?.contains("application/activity+json") == true)
+        }
+        await stopAll(a)
+    }
+
+    @Test func unboundCallThrowsNoContextBeforeConnecting() async throws {
+        let a = try await noteServer()
+        try await withTestClient(makeTestClient(admitting: [a.port])) { client in
+            var caught: (any Error)?
+            do { _ = try await client.client.getObject() } catch { caught = error }
+            let error = try #require(caught)
+            #expect(RemoteFetchError.from(error).name == "noContext")
+            #expect(a.stats.connections == 0)
+        }
+        await stopAll(a)
+    }
+
+    @Test func unparsableURIFailsWithInvalidURI() async throws {
+        try await withTestClient(makeTestClient(admitting: [])) { client in
+            #expect(await fetchError { _ = try await object("not a url", via: client) }?.name == "invalidURI")
+        }
+    }
+}
+```
+
+- [ ] **Step 3: Run.** `swift test --filter RemoteFetchClientTests`. **Expected:** it fails to compile.
 
 - [ ] **Step 4: Implement.**
-  - `RemoteFetchClient.make`: `var config = HTTPClient.Configuration(redirectConfiguration: .disallow, timeout: .init(connect: .seconds(5), read: .seconds(10)))`; `config.httpVersion = .http1Only`; `config.proxy = nil`; `config.connectionPool.retryConnectionEstablishment = false`; `config.http1_1ConnectionDebugInitializer = { channel in … }`: read `channel.remoteAddress?.ipAddress` and `?.port`; if `addressPolicy.refuses(...)`, call `channel.close(promise: nil)` when `closesRefusedChannel`, and return `channel.eventLoop.makeFailedFuture(RemoteFetchError.addressRefused(<address description>))`; else `channel.eventLoop.makeSucceededVoidFuture()`. Then `adjust(&config)`. `HTTPClient(eventLoopGroupProvider: .singleton, configuration: config)`. Transport: `AsyncHTTPClientTransport(configuration: .init(client: httpClient, timeout: .seconds(10)))`. Client: `Client(serverURL: try! Servers.Server1.url(), transport: transport, middlewares: [middleware ?? RemoteFetchMiddleware(checks: checks)])`. `static let shared = RemoteFetchClient.make()`. `shutdown()` awaits `httpClient.shutdown()`. Write no NIO type name in this file.
-  - `RemoteFetchMiddleware.intercept`: throw `.noContext` when `RemoteFetchContext.current` is `nil`; otherwise set the base URL to the target's origin (scheme, host, port; IPv6 hosts bracketed) and `request.path` to the target's `percentEncodedPath` (`/` when empty) plus `?` + `percentEncodedQuery`, then call `next`.
-  - `fetchRemoteObject`/`fetchRemoteActor`: parse `uri` with `URL(string:)` and require a scheme and a host, else `invalidURI(uri)`; bind `RemoteFetchContext` with `$current.withValue`; call `getObject()`/`getActor()`; on `.ok`, switch over both body cases (read the two case names from the generated `Types.swift` under `.build/plugins/outputs/`) and map with `RemoteDocuments.swift`; on `.undocumented(statusCode:_:)` throw `.generatedLayerRefused(underlying: UndocumentedStatusError(statusCode:))`; catch every other error and throw `RemoteFetchError.from(error)`.
-  - `RemoteDocuments.swift`: mapping per §0.1 "How the typed results are consumed": `attributedTo` = first entry, as its string or its `id`; `to`/`cc` = every entry the same way (absent → `[]`); `types` = the string or the array; `url` = the string, or the `Link`'s `href`, or for an array the first `Link`'s `href`, else the first string; `language` = `contentMap`'s key when it has exactly one; actor `publicKeyPem` = the object's, or the first array entry's; actor `sharedInbox` = `endpoints.sharedInbox`.
-  - **Stop condition:** if `RemoteFetchClient.swift` does not compile on Linux CI without importing a NIO module (Changes since the spec, item 4), stop and report; do not add an import or a product dependency.
+  - **`RemoteFetchClient.make`.**
+    - Configuration:
 
-- [ ] **Step 5: Run.** Same filter, locally and in CI. Expected: PASS.
+      ```swift
+      var config = HTTPClient.Configuration()
+      config.redirectConfiguration = .disallow
+      config.timeout.connect = .seconds(5)
+      config.timeout.read = .seconds(10)
+      config.httpVersion = .http1Only
+      config.proxy = nil
+      config.connectionPool.retryConnectionEstablishment = false
+      config.http1_1ConnectionDebugInitializer = { channel in … }
+      ```
 
-- [ ] **Step 6: Construction control.** On a throwaway branch (never merged), change `servers: url:` to `https://[remote-fetch.invalid` and run `swift test --filter clientConstructionCompletes` in CI. Expected: red, the test process trapping at the `try!` with `invalidServerURL` in the log. Record the run URL. If the failure is anything else (for example the generator rejecting the document), the control is not discharged: report it.
+    - The hook reads `channel.remoteAddress?.ipAddress` and `?.port`. If `addressPolicy.refuses(...)`, it calls `channel.close(promise: nil)` when `closesRefusedChannel` is set, and returns `channel.eventLoop.makeFailedFuture(RemoteFetchError.addressRefused("\(address)"))`. Otherwise it returns `channel.eventLoop.makeSucceededVoidFuture()`.
+    - Then call `adjust(&config)`, and build `HTTPClient(eventLoopGroupProvider: .singleton, configuration: config)`.
+    - The transport is `AsyncHTTPClientTransport(configuration: .init(client: httpClient, timeout: .seconds(10)))`.
+    - The client is `Client(serverURL: try! Servers.Server1.url(), transport: transport, middlewares: [middleware ?? RemoteFetchMiddleware(checks: checks)])`.
+    - `static let shared = RemoteFetchClient.make()`.
+    - `shutdown()` awaits `httpClient.shutdown()`.
+    - This file names no NIO type under either answer to open question 1.
+  - **`RemoteFetchMiddleware.intercept`** (only this much in this task).
+    - With no context bound, throw `.noContext`.
+    - Otherwise build the hop's request as "Changes since the spec", item 8 describes:
+      - `var parts = URLComponents(url: hop, resolvingAgainstBaseURL: false)!`
+      - keep `let query = parts.percentEncodedQuery`
+      - set `parts.percentEncodedQuery = nil` and `parts.fragment = nil`
+      - set the path to `"/"` when it is empty
+      - pass `parts.url!` as the base URL to `next`, and set `request.path = query.map { "?" + $0 } ?? ""`
+  - **`fetchRemoteObject` and `fetchRemoteActor`.**
+    - Parse `uri` with `URL(string:)` and require a scheme and a host, or throw `invalidURI(uri)`.
+    - Bind the context with `RemoteFetchContext.$current.withValue`, then call `getObject()` or `getActor()`.
+    - On `.ok`, switch over both body cases and map the document. The two case names are in the generated `Types.swift` under `.build/plugins/outputs/`.
+    - On `.undocumented(statusCode:_:)`, throw `.generatedLayerRefused(underlying: UndocumentedStatusError(statusCode:))`.
+    - Catch any other error and throw `RemoteFetchError.from(error)`.
+  - **`RemoteDocuments.swift`** maps as §0.1 says:
+    - `attributedTo` is the first entry, as its string or its `id`.
+    - `to` and `cc` map every entry the same way; an absent field is `[]`.
+    - `types` is the string, or the array.
+    - `url` is the string, or the `Link`'s `href`. For an array it is the first `Link`'s `href`, and if there is none, the first string.
+    - `language` is `contentMap`'s key when it has exactly one.
+    - The actor's `publicKeyPem` comes from the object, or from the array's first entry.
+    - The actor's `sharedInbox` is `endpoints.sharedInbox`.
+  - **Stop condition.** Under answer (b), if `RemoteFetchClient.swift` or `RemoteFetchMiddleware.swift` doesn't compile on Linux CI, stop and report. Do not change the answer yourself.
+
+- [ ] **Step 5: Run.** The same filter, locally and in CI. **Expected:** PASS.
+
+- [ ] **Step 6: The construction control.** On a throwaway branch that is never merged, set `servers: - url:` to `https://[remote-fetch.invalid` and run `swift test --filter clientConstructionCompletes` in CI.
+  - **Expected:** red. The test process traps at the `try!`, and the log contains `invalidServerURL`.
+  - **If the build fails before the test runs** (the generator or OpenAPIKit rejects the URL), use the fallback document instead: `servers: [{url: "https://{host}", variables: {host: {default: "["}}}]`. The generated `url()` substitutes the variable at runtime (`Conversion/ServerVariable.swift:29-43`, runtime 1.11.0). `URL(validatingOpenAPIServerURL:)` then throws `invalidServerURL` for `https://[` (`Conversion/URLExtensions.swift:33-36`).
+  - Record the run URL of whichever form discharged the control.
 
 - [ ] **Step 7: Commit.** `git commit -m "feat: generated remote-fetch client on AsyncHTTPClientTransport"`
 
@@ -414,38 +1094,142 @@ accessModifier: internal
 - Test: `Tests/ActivityPubCoreTests/RemoteFetch/RedirectAndSchemeTests.swift`
 
 **Interfaces:**
-- Consumes: Task 4's middleware, context, `makeTestClient`, `expectFetchError`.
-- Produces: the hop loop. Later tasks add per-hop signing (Task 9), deadline (Task 7) and response checks (Tasks 6, 7) inside it.
+- Consumes: Task 4.
+- Produces: the hop loop. Tasks 6, 7 and 9 add to it.
 
-- [ ] **Step 1: Write the failing tests** (each with its bracketed control as its own `@Test`):
+- [ ] **Step 1: Write the failing tests.**
 
 ```swift
-@Test func threeRedirectsPass() async throws { /* R1→R2→R3→D: document returned; D got 1 request */ }
-@Test func fourthRedirectFails() async {      /* R1→R2→R3→R4→D */
-    await expectFetchError({ if case .tooManyRedirects = $0 { true } else { false } }) { … }
-    #expect(d.stats.connections == 0) }
-@Test func fourthRedirectFollowedWithLimitOff() async throws {   // control
-    // makeTestClient(…, checks: .all.subtracting(.redirectLimit)): document returned, D got 1 request
-}
-@Test func unparsableLocationFailsWithInvalidURI() async { /* 302, Location: "http://[" → .invalidURI */ }
-@Test func validLocationIsFollowed() async throws { /* control: same server, Location: D's URL → document */ }
-@Test func relativeLocationResolvesAgainstTheHop() async throws { /* Location: "/doc" on R1 → R1 serves /doc */ }
-@Test func redirectWithoutLocationFailsWithStatus() async { /* 302 no Location → .status(302); 304 → .status(304) */ }
-@Test func httpInitialURIFailsUnderDefaultPolicy() async { /* schemePolicy .httpsOnly, http URI → .schemeRefused, 0 connections */ }
-@Test func redirectToUnadmittedHTTPPortFails() async { /* policy .allowingHTTP([A]); A→B → .schemeRefused(B url), B 0 connections */ }
-@Test func httpsToHTTPHopFails() async { /* TLS server T redirects to http B; .httpsOnly → .schemeRefused */ }
-@Test func schemeControlsSucceedWhenAdmitted() async throws {
-    // control: .allowingHTTP([A, B]) for A→B, and .allowingHTTP([B]) for T→B, both return the document
+@Suite("Redirects and scheme") struct RedirectAndSchemeTests {
+    @Test func threeRedirectsPass() async throws {
+        let d = try await noteServer()
+        let chain = try await redirectChain(3, to: d.url("/n"))
+        let ports = Set(chain.map(\.port) + [d.port])
+        try await withTestClient(makeTestClient(admitting: ports)) { client in
+            #expect(try await object(chain[0].url("/hop"), via: client, http: ports).id == d.url("/n"))
+        }
+        await stopAll(d); for s in chain { await stopAll(s) }
+    }
+
+    @Test func fourthRedirectFails() async throws {
+        let d = try await noteServer()
+        let chain = try await redirectChain(4, to: d.url("/n"))
+        let ports = Set(chain.map(\.port) + [d.port])
+        try await withTestClient(makeTestClient(admitting: ports)) { client in
+            let error = await fetchError { _ = try await object(chain[0].url("/hop"), via: client, http: ports) }
+            #expect(error?.name == "tooManyRedirects")
+            #expect(d.stats.connections == 0)
+        }
+        await stopAll(d); for s in chain { await stopAll(s) }
+    }
+
+    @Test func fourthRedirectFollowedWithLimitOff() async throws {      // control
+        let d = try await noteServer()
+        let chain = try await redirectChain(4, to: d.url("/n"))
+        let ports = Set(chain.map(\.port) + [d.port])
+        try await withTestClient(makeTestClient(admitting: ports, checks: .all.subtracting(.redirectLimit))) {
+            #expect(try await object(chain[0].url("/hop"), via: $0, http: ports).id == d.url("/n"))
+            #expect(d.stats.requests.count == 1)
+        }
+        await stopAll(d); for s in chain { await stopAll(s) }
+    }
+
+    @Test func unparsableLocationFailsWithInvalidURI() async throws {
+        let r = try await TestServer.start { _ in .redirect(location: "http://[") }
+        try await withTestClient(makeTestClient(admitting: [r.port])) { client in
+            #expect(await fetchError { _ = try await object(r.url("/x"), via: client, http: [r.port]) }?
+                .name == "invalidURI")
+        }
+        await stopAll(r)
+    }
+
+    @Test func validLocationIsFollowed() async throws {                  // control
+        let d = try await noteServer()
+        let r = try await TestServer.start { _ in .redirect(location: d.url("/n")) }
+        try await withTestClient(makeTestClient(admitting: [r.port, d.port])) {
+            #expect(try await object(r.url("/x"), via: $0, http: [r.port, d.port]).id == d.url("/n"))
+        }
+        await stopAll(r, d)
+    }
+
+    @Test func relativeLocationResolvesAgainstTheHop() async throws {
+        let r = try await TestServer.start {
+            $0.target == "/start" ? .redirect(location: "/doc")
+                : .document(contentType: activityJSON, body: Fixtures.note(id: Fixtures.selfURL($0), attributedTo: "x"))
+        }
+        try await withTestClient(makeTestClient(admitting: [r.port])) {
+            #expect(try await object(r.url("/start"), via: $0, http: [r.port]).id == r.url("/doc"))
+        }
+        await stopAll(r)
+    }
+
+    @Test(arguments: [302, 304]) func redirectWithoutLocationFailsWithStatus(_ code: Int) async throws {
+        let r = try await TestServer.start { _ in .redirect(status: code, location: nil) }
+        try await withTestClient(makeTestClient(admitting: [r.port])) { client in
+            let error = await fetchError { _ = try await object(r.url("/x"), via: client, http: [r.port]) }
+            guard case .status(let got)? = error else { Issue.record("\(String(describing: error))"); return }
+            #expect(got == code)
+        }
+        await stopAll(r)
+    }
+
+    @Test func httpInitialURIFailsUnderDefaultPolicy() async throws {
+        let a = try await noteServer()
+        try await withTestClient(makeTestClient(admitting: [a.port])) { client in
+            #expect(await fetchError { _ = try await object(a.url("/n"), via: client) }?.name == "schemeRefused")
+            #expect(a.stats.connections == 0)
+        }
+        await stopAll(a)
+    }
+
+    @Test func redirectToUnadmittedHTTPPortFails() async throws {
+        let b = try await noteServer()
+        let a = try await TestServer.start { _ in .redirect(location: b.url("/n")) }
+        try await withTestClient(makeTestClient(admitting: [a.port, b.port])) { client in
+            #expect(await fetchError { _ = try await object(a.url("/x"), via: client, http: [a.port]) }?
+                .name == "schemeRefused")
+            #expect(b.stats.connections == 0)
+        }
+        await stopAll(a, b)
+    }
+
+    @Test func httpsToHTTPHopFails() async throws {
+        let b = try await noteServer()
+        let t = try await TestServer.start(tls: TestTLS()) { _ in .redirect(location: b.url("/n")) }
+        try await withTestClient(makeTestClient(admitting: [t.port, b.port])) { client in
+            #expect(await fetchError { _ = try await object(t.url("/x"), via: client) }?.name == "schemeRefused")
+            #expect(b.stats.connections == 0)
+        }
+        await stopAll(t, b)
+    }
+
+    @Test func schemeControlsSucceedWhenAdmitted() async throws {        // control for the three above
+        let b = try await noteServer()
+        let a = try await TestServer.start { _ in .redirect(location: b.url("/n")) }
+        let t = try await TestServer.start(tls: TestTLS()) { _ in .redirect(location: b.url("/n")) }
+        try await withTestClient(makeTestClient(admitting: [a.port, b.port, t.port])) { client in
+            #expect(try await object(b.url("/n"), via: client, http: [b.port]).id == b.url("/n"))
+            #expect(try await object(a.url("/x"), via: client, http: [a.port, b.port]).id == b.url("/n"))
+            #expect(try await object(t.url("/x"), via: client, http: [b.port]).id == b.url("/n"))
+        }
+        await stopAll(a, b, t)
+    }
 }
 ```
 
-  Every server-behaviour fixture here is also checked once with `bareFetch` (the 4-redirect chain already in Task 3).
+- [ ] **Step 2: Run.** `swift test --filter RedirectAndSchemeTests`. **Expected:** the refusal tests fail.
 
-- [ ] **Step 2: Run.** `swift test --filter RedirectAndSchemeTests`. Expected: the refusal tests fail (no limit, no scheme check).
+- [ ] **Step 3: Implement the hop loop** (§0.1, "One middleware", steps 2–3). For each hop, from 0 to `maxRedirects`:
+  1. With `.scheme`, check `context.schemePolicy.admits(hop)`, or throw `.schemeRefused(hop)`.
+  2. Build the request as in Task 4, then call `next`.
+  3. On a 3xx with a `Location`:
+     - drain and discard the body, collecting at most `maxBodyBytes` (Task 7 moves this onto `CappedBody`);
+     - resolve `URL(string: location, relativeTo: hop)?.absoluteURL`, and require a scheme and a host, or throw `.invalidURI(location)`;
+     - loop.
+  4. With `.redirectLimit`, a 4th redirect throws `.tooManyRedirects(url)`. With it off, follow up to 16 hops.
+  5. A 3xx without `Location` falls through to the status check (Task 6). Until Task 6 lands, throw `.status(code)` for it.
 
-- [ ] **Step 3: Implement the hop loop** in `intercept`, per §0.1 "One middleware" steps 2–3: for hop 0…3, check the scheme against `context.schemePolicy` (`.scheme`), rewrite base URL and path, call `next`; on a 3xx with a `Location`, drain and discard the body (collect at most 1_048_576 bytes; Task 7 moves this onto `CappedBody`), resolve `URL(string: location, relativeTo: hopURL)?.absoluteURL`, require scheme and host else `.invalidURI(location)`, and loop; a 4th redirect throws `.tooManyRedirects(url)` when `.redirectLimit` is on. With `.redirectLimit` off, follow up to 16 hops.
-
-- [ ] **Step 4: Run.** Expected: PASS, every control green and every refusal red-then-green as above. Record outputs.
+- [ ] **Step 4: Run.** **Expected:** PASS. Record each control's output.
 
 - [ ] **Step 5: Commit.** `git commit -m "feat: per-hop scheme check and redirect limit in the fetch middleware"`
 
@@ -454,51 +1238,122 @@ accessModifier: internal
 ### Task 6: Status and content type
 
 **Files:**
-- Modify: `RemoteFetch/RemoteFetchMiddleware.swift` (add `@_spi(Generated) import OpenAPIRuntime`)
+- Modify: `RemoteFetch/RemoteFetchMiddleware.swift`. It adds `@_spi(Generated) import OpenAPIRuntime`.
 - Test: `Tests/ActivityPubCoreTests/RemoteFetch/StatusAndContentTypeTests.swift`
 
 **Interfaces:**
-- Produces: `static let declaredContentTypes: [OpenAPIMIMEType]` (the two Global Constraints values, parsed with `OpenAPIMIMEType(_:)`); `static func admitsContentType(_ raw: String?) -> Bool`.
+- Produces: `static let declaredContentTypes: [OpenAPIMIMEType]` (the two values in Global Constraints, parsed with `OpenAPIMIMEType(_:)`) and `static func admitsContentType(_ raw: String?) -> Bool`.
 
 - [ ] **Step 1: Write the failing tests.**
 
 ```swift
-static let refusedConcrete = ["text/html", "text/html; charset=utf-8", "application/ld+json",
-    #"application/ld+json; profile="https://www.w3.org/ns/activitystreams https://example.org/p""#]
-static let nonConcrete: [String?] = [nil, "", "*/*", "text/*", "html", "*/html"]
-static let accepted = ["application/activity+json; charset=utf-8",
-    #"application/ld+json; profile="https://www.w3.org/ns/activitystreams""#]
+@Suite("Status and content type") struct StatusAndContentTypeTests {
+    static let refusedConcrete = ["text/html", "text/html; charset=utf-8", "application/ld+json",
+        #"application/ld+json; profile="https://www.w3.org/ns/activitystreams https://example.org/p""#]
+    static let nonConcrete: [String?] = [nil, "", "*/*", "text/*", "html", "*/html"]
+    static let accepted = ["application/activity+json; charset=utf-8",
+        #"application/ld+json; profile="https://www.w3.org/ns/activitystreams""#, "Application/Activity+JSON"]
 
-@Test(arguments: refusedConcrete) func concreteUndeclaredRefusedByMiddleware(_ ct: String) async {
-    // valid document, 200, Content-Type ct → .contentType(ct)
-}
-@Test(arguments: refusedConcrete) func concreteUndeclaredRefusedByGeneratedLayerWhenCheckOff(_ ct: String) async throws {
-    // control: checks .all.subtracting(.contentType); bind RemoteFetchContext and call client.client.getObject()
-    // directly; catch ClientError: #expect(error.response != nil); #expect(!(error.underlyingError is DecodingError))
-    // and #expect(RemoteFetchError.from(error) is .generatedLayerRefused)
-}
-@Test(arguments: nonConcrete) func nonConcreteRefusedByMiddleware(_ ct: String?) async { /* → .contentType(ct) */ }
-@Test(arguments: nonConcrete) func nonConcreteAcceptedWhenCheckOff(_ ct: String?) async throws {
-    // control: checks .all.subtracting(.contentType) → document returned (the runtime picks options[0])
-}
-@Test(arguments: accepted) func declaredTypesPass(_ ct: String) async throws { /* document returned */ }
-@Test func contentTypeTypeAndSubtypeAreCaseInsensitive() async throws { /* "Application/Activity+JSON" → document */ }
-@Test(arguments: [404, 204]) func non200RefusedByMiddleware(_ code: Int) async {
-    // valid document (404) / empty (204), Content-Type application/activity+json → .status(code)
-}
-@Test(arguments: [404, 204]) func non200UndocumentedWhenCheckOff(_ code: Int) async {
-    // control: checks .all.subtracting(.status) → .generatedLayerRefused(underlying: UndocumentedStatusError)
-    // with statusCode == code
+    @Test(arguments: refusedConcrete) func concreteUndeclaredRefusedByMiddleware(_ ct: String) async throws {
+        let s = try await noteServer(contentType: ct)
+        try await withTestClient(makeTestClient(admitting: [s.port])) { client in
+            let error = await fetchError { _ = try await object(s.url("/n"), via: client, http: [s.port]) }
+            guard case .contentType(let got)? = error else { Issue.record("\(String(describing: error))"); return }
+            #expect(got == ct)
+        }
+        await stopAll(s)
+    }
+
+    @Test(arguments: refusedConcrete) func concreteUndeclaredRefusedByGeneratedLayerWhenCheckOff(_ ct: String) async throws {
+        let s = try await noteServer(contentType: ct)                     // control
+        try await withTestClient(makeTestClient(admitting: [s.port], checks: .all.subtracting(.contentType))) { client in
+            let error = try #require(await generatedCallError(s.url("/n"), via: client, http: [s.port]))
+            #expect(error.response != nil)
+            #expect(!(error.underlyingError is DecodingError))
+            #expect(RemoteFetchError.from(error).name == "generatedLayerRefused")
+        }
+        await stopAll(s)
+    }
+
+    @Test(arguments: nonConcrete) func nonConcreteRefusedByMiddleware(_ ct: String?) async throws {
+        let s = try await noteServer(contentType: ct)
+        try await withTestClient(makeTestClient(admitting: [s.port])) { client in
+            #expect(await fetchError { _ = try await object(s.url("/n"), via: client, http: [s.port]) }?
+                .name == "contentType")
+        }
+        await stopAll(s)
+    }
+
+    @Test(arguments: nonConcrete) func nonConcreteAcceptedWhenCheckOff(_ ct: String?) async throws {
+        let s = try await noteServer(contentType: ct)                     // control
+        try await withTestClient(makeTestClient(admitting: [s.port], checks: .all.subtracting(.contentType))) {
+            #expect(try await object(s.url("/n"), via: $0, http: [s.port]).id == s.url("/n"))
+        }
+        await stopAll(s)
+    }
+
+    @Test(arguments: accepted) func declaredTypesPass(_ ct: String) async throws {
+        let s = try await noteServer(contentType: ct)
+        try await withTestClient(makeTestClient(admitting: [s.port])) {
+            #expect(try await object(s.url("/n"), via: $0, http: [s.port]).id == s.url("/n"))
+        }
+        await stopAll(s)
+    }
+
+    @Test func contentTypeTypeAndSubtypeAreCaseInsensitive() async throws {
+        #expect(RemoteFetchMiddleware.admitsContentType("Application/Activity+JSON"))
+        #expect(!RemoteFetchMiddleware.admitsContentType("Application/Activity+XML"))
+    }
+
+    /// 404 with a valid document; 204 with an empty body (a 204 must not carry one).
+    func statusServer(_ code: Int) async throws -> TestServer {
+        code == 204 ? try await TestServer.start { _ in .document(contentType: activityJSON, body: "", status: 204) }
+                    : try await noteServer(status: code)
+    }
+
+    @Test(arguments: [404, 204]) func non200RefusedByMiddleware(_ code: Int) async throws {
+        let s = try await statusServer(code)
+        try await withTestClient(makeTestClient(admitting: [s.port])) { client in
+            let error = await fetchError { _ = try await object(s.url("/n"), via: client, http: [s.port]) }
+            guard case .status(let got)? = error else { Issue.record("\(String(describing: error))"); return }
+            #expect(got == code)
+        }
+        await stopAll(s)
+    }
+
+    @Test(arguments: [404, 204]) func non200UndocumentedWhenCheckOff(_ code: Int) async throws {
+        let s = try await statusServer(code)                              // control
+        try await withTestClient(makeTestClient(admitting: [s.port], checks: .all.subtracting(.status))) { client in
+            let error = await fetchError { _ = try await object(s.url("/n"), via: client, http: [s.port]) }
+            guard case .generatedLayerRefused(let underlying)? = error,
+                  let undocumented = underlying as? UndocumentedStatusError
+            else { Issue.record("\(String(describing: error))"); return }
+            #expect(undocumented.statusCode == code)
+        }
+        await stopAll(s)
+    }
+
+    @Test func fixtureServesTheConfiguredHeader() async throws {
+        let s = try await noteServer(contentType: "text/html")
+        let result = try await bareFetch(s.url("/n"))
+        #expect(result.headers.contains { $0.0.lowercased() == "content-type" && $0.1 == "text/html" })
+        await stopAll(s)
+    }
 }
 ```
 
-  Fixture check: `bareFetch` on one refused and one non-concrete server shows the header as configured.
+- [ ] **Step 2: Run.** **Expected:** the tests that expect the middleware to refuse fail.
 
-- [ ] **Step 2: Run.** Expected: middleware-refusal tests fail.
+- [ ] **Step 3: Implement** step 4 of "One middleware" in §0.1, and "Content type and status".
+  - After the last hop, with `.status`, require 200, or throw `.status(code)`.
+  - With `.contentType`:
+    1. Parse `response.headerFields[.contentType]` with `OpenAPIMIMEType(_:)`, and require `.concrete`.
+    2. Match a declared type. Type and subtype compare case-insensitively.
+    3. Every declared parameter must be present. Its name compares case-insensitively and its value case-sensitively. The runtime keeps the quotes in parameter values, so the `profile` value is compared with its quotes.
+    4. Ignore extra received parameters.
+    - Otherwise throw `.contentType(raw)`.
 
-- [ ] **Step 3: Implement** §0.1 "One middleware" step 4 and "Content type and status": after the last hop, `.status` requires 200 else `.status(code)`; `.contentType` parses `response.headerFields[.contentType]` with `OpenAPIMIMEType(_:)`, requires `.concrete`, and matches a declared type: type and subtype case-insensitive, every declared parameter present with name compared case-insensitively and value case-sensitively (the runtime keeps the quotes in parameter values, so the declared `profile` value is compared with its quotes), extra received parameters ignored. Else `.contentType(raw)`.
-
-- [ ] **Step 4: Run.** Expected: PASS. Record controls.
+- [ ] **Step 4: Run.** **Expected:** PASS. Record the controls.
 
 - [ ] **Step 5: Commit.** `git commit -m "feat: status and content-type checks in the fetch middleware"`
 
@@ -508,50 +1363,154 @@ static let accepted = ["application/activity+json; charset=utf-8",
 
 **Files:**
 - Modify: `RemoteFetch/RemoteFetchMiddleware.swift`
-- Test: `Tests/ActivityPubCoreTests/RemoteFetch/BodyAndDeadlineTests.swift` (`@Suite(.serialized)`: timing windows)
+- Test: `Tests/ActivityPubCoreTests/RemoteFetch/BodyAndDeadlineTests.swift`
 
 **Interfaces:**
-- Produces: `static let maxBodyBytes = 1_048_576`; `struct CappedBody: AsyncSequence, Sendable` over `HTTPBody` chunks (`ArraySlice<UInt8>`), throwing `.bodyTooLarge` past `maxBodyBytes` (when `.bodyCap`) and `.deadlineExceeded` when a chunk arrives at or after the deadline (when `.deadline`); returned as `HTTPBody(capped, length: original.length, iterationBehavior: .single)`.
+- Produces: `struct CappedBody: AsyncSequence, Sendable` over `HTTPBody` chunks (`ArraySlice<UInt8>`).
+  - With `.bodyCap`, it throws `.bodyTooLarge` once the running total passes `maxBodyBytes`.
+  - With `.deadline`, it throws `.deadlineExceeded` for a chunk that arrives at or after the deadline.
+  - It is returned as `HTTPBody(capped, length: original.length, iterationBehavior: .single)`.
 
 - [ ] **Step 1: Write the failing tests.**
 
 ```swift
-@Test func oversizeBodyFails() async { /* Fixtures.padded(note, toAtLeast: 1_048_577) → .bodyTooLarge */ }
-@Test func oversizeBodyReadInFullWithCapOff() async throws { /* control: .all.subtracting(.bodyCap) → document */ }
-@Test func bodyAtExactlyOneMegabytePasses() async throws {
-    // body of exactly 1_048_576 bytes → document; 1_048_577 → .bodyTooLarge
-}
-@Test func slowDripFailsAtDeadline() async {
-    // .drip(every: .milliseconds(100), totalBytes: 50), deadline now+2s → .deadlineExceeded,
-    // elapsed in 2s...2.5s
-}
-@Test func slowDripCompletesWithDeadlineOff() async throws {
-    // control: .all.subtracting(.deadline) → completes (decode error is fine: the body is not JSON;
-    // assert the error is .invalidDocument, not .deadlineExceeded or .transportFailed) after ≈5 s
-}
-@Test func stallFailsWithReadTimeout() async {
-    // makeTestClient(…, adjust: { $0.timeout.read = .seconds(3) }), .stallAfterHead, deadline now+2s
-    // → .transportFailed(underlying:) whose underlying is HTTPClientError.readTimeout, elapsed in 3s...3.5s
-}
-@Test func stallStillWaitingWithoutReadTimeout() async throws {
-    // control: adjust { $0.timeout.read = nil }; start the fetch in a child task; at 10 s it has not
-    // completed; call shutdown() inside withTestClient; assert it had not completed before shutdown
-}
-@Test func expiredDeadlineFailsBeforeConnecting() async {
-    // deadline = .now - .seconds(1) → .deadlineExceeded, server connections == 0
-}
-@Test func slowHeadFailsAtDeadline() async {
-    // .holdUntil(barrier never released) with deadline now+2s → .deadlineExceeded in 2s...2.5s
+@Suite("Body and deadline", .serialized) struct BodyAndDeadlineTests {
+    func sized(_ bytes: Int) async throws -> TestServer {
+        try await TestServer.start { .document(contentType: activityJSON,
+            body: Fixtures.padded(Fixtures.note(id: Fixtures.selfURL($0), attributedTo: "x"), to: bytes)) }
+    }
+
+    @Test func oversizeBodyFails() async throws {
+        let s = try await sized(1_048_577)
+        try await withTestClient(makeTestClient(admitting: [s.port])) { client in
+            #expect(await fetchError { _ = try await object(s.url("/n"), via: client, http: [s.port]) }?
+                .name == "bodyTooLarge")
+        }
+        await stopAll(s)
+    }
+
+    @Test func oversizeBodyReadInFullWithCapOff() async throws {          // control
+        let s = try await sized(1_048_577)
+        try await withTestClient(makeTestClient(admitting: [s.port], checks: .all.subtracting(.bodyCap))) {
+            #expect(try await object(s.url("/n"), via: $0, http: [s.port]).id == s.url("/n"))
+        }
+        await stopAll(s)
+    }
+
+    @Test func bodyAtExactlyOneMegabytePasses() async throws {
+        let s = try await sized(1_048_576)
+        try await withTestClient(makeTestClient(admitting: [s.port])) {
+            #expect(try await object(s.url("/n"), via: $0, http: [s.port]).id == s.url("/n"))
+        }
+        await stopAll(s)
+    }
+
+    func dripServer() async throws -> TestServer {    // 50 chunks, one every 100 ms: ≈ 5 s
+        try await TestServer.start { .drip(contentType: activityJSON,
+            body: Fixtures.note(id: Fixtures.selfURL($0), attributedTo: "x"), chunks: 50, every: .milliseconds(100)) }
+    }
+
+    @Test func slowDripFailsAtDeadline() async throws {
+        let s = try await dripServer()
+        try await withTestClient(makeTestClient(admitting: [s.port])) { client in
+            let start = ContinuousClock.now
+            let error = await fetchError {
+                _ = try await object(s.url("/n"), via: client, http: [s.port], deadline: start + .seconds(2))
+            }
+            let elapsed = ContinuousClock.now - start
+            #expect(error?.name == "deadlineExceeded")
+            #expect(elapsed >= .seconds(2) && elapsed < .milliseconds(2500))
+        }
+        await stopAll(s)
+    }
+
+    @Test func slowDripCompletesWithDeadlineOff() async throws {          // control
+        let s = try await dripServer()
+        try await withTestClient(makeTestClient(admitting: [s.port], checks: .all.subtracting(.deadline))) { client in
+            let start = ContinuousClock.now
+            let note = try await object(s.url("/n"), via: client, http: [s.port], deadline: start + .seconds(2))
+            #expect(note.id == s.url("/n"))
+            #expect(ContinuousClock.now - start >= .milliseconds(4500))
+        }
+        await stopAll(s)
+    }
+
+    @Test func stallFailsWithReadTimeout() async throws {
+        let s = try await TestServer.start { _ in .stallAfterHead(contentType: activityJSON) }
+        try await withTestClient(makeTestClient(admitting: [s.port], adjust: { $0.timeout.read = .seconds(3) })) { client in
+            let start = ContinuousClock.now
+            let error = await fetchError {
+                _ = try await object(s.url("/n"), via: client, http: [s.port], deadline: start + .seconds(2))
+            }
+            let elapsed = ContinuousClock.now - start
+            guard case .transportFailed(let underlying)? = error else { Issue.record("\(String(describing: error))"); return }
+            #expect((underlying as? HTTPClientError) == .readTimeout)
+            #expect(elapsed >= .seconds(3) && elapsed < .milliseconds(3500))
+        }
+        await stopAll(s)
+    }
+
+    @Test func stallStillWaitingWithoutReadTimeout() async throws {      // control
+        let s = try await TestServer.start { _ in .stallAfterHead(contentType: activityJSON) }
+        let done = Mutex(false)
+        try await withTestClient(makeTestClient(admitting: [s.port], adjust: { $0.timeout.read = nil })) { client in
+            let fetch = Task {
+                _ = try? await object(s.url("/n"), via: client, http: [s.port], deadline: .now + .seconds(2))
+                done.withLock { $0 = true }
+            }
+            try await Task.sleep(for: .seconds(10))
+            #expect(done.withLock { $0 } == false)
+            try await client.httpClient.shutdown()   // nothing in the design cancels a pending body read
+            _ = await fetch.result
+        }
+        await stopAll(s)
+    }
+
+    @Test func expiredDeadlineFailsBeforeConnecting() async throws {
+        let s = try await sized(100)
+        try await withTestClient(makeTestClient(admitting: [s.port])) { client in
+            #expect(await fetchError {
+                _ = try await object(s.url("/n"), via: client, http: [s.port], deadline: .now - .seconds(1))
+            }?.name == "deadlineExceeded")
+            #expect(s.stats.connections == 0)
+        }
+        await stopAll(s)
+    }
+
+    @Test func slowHeadFailsAtDeadline() async throws {
+        let barrier = TestBarrier()
+        let s = try await TestServer.start { _ in .holdUntil(barrier, then: .never) }
+        try await withTestClient(makeTestClient(admitting: [s.port])) { client in
+            let start = ContinuousClock.now
+            #expect(await fetchError {
+                _ = try await object(s.url("/n"), via: client, http: [s.port], deadline: start + .seconds(2))
+            }?.name == "deadlineExceeded")
+            #expect(ContinuousClock.now - start < .milliseconds(2500))
+        }
+        await barrier.open()
+        await stopAll(s)
+    }
+
+    @Test func fixturesDripAndStallAsClaimed() async throws {
+        let drip = try await dripServer()
+        let start = ContinuousClock.now
+        _ = try await bareFetch(drip.url("/n"))
+        #expect(ContinuousClock.now - start >= .milliseconds(4500))
+        let stall = try await TestServer.start { _ in .stallAfterHead(contentType: activityJSON) }
+        await #expect(throws: HTTPClientError.readTimeout) { _ = try await bareFetch(stall.url("/n"), readTimeout: .seconds(1)) }
+        await stopAll(drip, stall)
+    }
 }
 ```
 
-  Fixture checks with `bareFetch`: the drip sends 50 bytes over ≈5 s; the stall sends a head and no body bytes (bare call with a 1 s read timeout fails with `readTimeout`).
+- [ ] **Step 2: Run.** **Expected:** the tests that expect a refusal fail.
 
-- [ ] **Step 2: Run.** Expected: refusal tests fail.
+- [ ] **Step 3: Implement.**
+  - **Before each hop.** With `.deadline`, if `ContinuousClock.now >= deadline`, throw `.deadlineExceeded` without calling `next`.
+  - **The race.** Inside `withoutActuallyEscaping(next)`, run `next` in a `withThrowingTaskGroup` against `try await Task.sleep(until: deadline, clock: .continuous)`. The first child to finish wins, and the group cancels the other. If the sleep finishes first, throw `.deadlineExceeded`.
+  - **Bodies.** Wrap the final body in `CappedBody`, and drain 3xx bodies through it as well.
 
-- [ ] **Step 3: Implement.** Before each hop: if `.deadline` and `ContinuousClock.now >= deadline`, throw `.deadlineExceeded` without calling `next`. Run `next` in a `withThrowingTaskGroup` raced against `Task.sleep(until: deadline, clock: .continuous)`; the first to finish wins, the group cancels the other; the sleep winning throws `.deadlineExceeded`. Wrap the final body in `CappedBody`; drain 3xx bodies through the same wrapper.
-
-- [ ] **Step 4: Run.** Expected: PASS. Record the elapsed times.
+- [ ] **Step 4: Run.** **Expected:** PASS. Record the elapsed times.
 
 - [ ] **Step 5: Commit.** `git commit -m "feat: body cap and per-fetch deadline in the fetch middleware"`
 
@@ -564,36 +1523,114 @@ static let accepted = ["application/activity+json; charset=utf-8",
 - Modify (only if a test shows a mapping bug): `RemoteFetch/RemoteDocuments.swift`
 
 **Interfaces:**
-- Consumes: Task 4's mapping and documents.
+- Consumes: Task 4's mapping.
 
 - [ ] **Step 1: Write the tests.**
 
 ```swift
-@Test(arguments: [#"{"a":"#,
-    #"{"id":"https://x/a","type":"Person"}"#,                           // actor without inbox
-    #"{"id":"https://x/a","type":"Person","inbox":5}"#])               // numeric inbox
-func invalidActorDocument(_ body: String) async { /* getActor → .invalidDocument */ }
-@Test func objectWithNumericAttributedToIsInvalid() async { /* → .invalidDocument */ }
-@Test func validDocumentReturned() async throws { /* control: same responses with a valid document */ }
+@Suite("Typed documents") struct DocumentTests {
+    func serving(_ body: String) async throws -> TestServer {
+        try await TestServer.start { _ in .document(contentType: activityJSON, body: body) }
+    }
+    func actorResult(_ body: String) async throws -> Result<RemoteActorDocument, RemoteFetchError> {
+        let s = try await serving(body)
+        defer { Task { await stopAll(s) } }
+        return try await withTestClient(makeTestClient(admitting: [s.port])) { client in
+            do { return .success(try await actor(s.url("/a"), via: client, http: [s.port])) }
+            catch let error as RemoteFetchError { return .failure(error) }
+        }
+    }
+    func objectResult(_ body: String) async throws -> Result<RemoteObjectDocument, RemoteFetchError> {
+        let s = try await serving(body)
+        defer { Task { await stopAll(s) } }
+        return try await withTestClient(makeTestClient(admitting: [s.port])) { client in
+            do { return .success(try await object(s.url("/n"), via: client, http: [s.port])) }
+            catch let error as RemoteFetchError { return .failure(error) }
+        }
+    }
+    static let valid = Fixtures.actor(id: "https://remote.example/users/a")
 
-@Test func unknownFieldsAreTolerated() async throws {
-    // Fixtures.actor with Mastodon's full field set plus 40 invented fields (strings, numbers,
-    // nested objects, arrays): every declared field reads back
-}
-@Test func sameDocumentWithoutInboxFails() async { /* control → .invalidDocument */ }
+    @Test(arguments: [#"{"a":"#,
+                      #"{"id":"https://x/a","type":"Person"}"#,
+                      #"{"id":"https://x/a","type":"Person","inbox":5}"#])
+    func invalidActorDocument(_ body: String) async throws {
+        guard case .failure(.invalidDocument) = try await actorResult(body) else { Issue.record(body); return }
+    }
+    @Test func objectWithNumericAttributedToIsInvalid() async throws {
+        guard case .failure(.invalidDocument) = try await objectResult(#"{"id":"x","type":"Note","attributedTo":5}"#)
+        else { Issue.record("accepted"); return }
+    }
+    @Test func validDocumentReturned() async throws {                     // control
+        #expect(try await actorResult(Self.valid).get().inbox == "https://remote.example/users/a/inbox")
+    }
 
-@Test func valueOrArrayFormsAgree() async throws {
-    // attributedTo: "u", {"id":"u"}, [{"id":"u"}] → "u"
-    // to: "u", ["u"] → ["u"];   url: "w", {"href":"w"}, [{"href":"w"}] → "w"
-    // publicKey: {…pem}, [{…pem}] → same publicKeyPem
+    @Test func unknownFieldsAreTolerated() async throws {
+        let extra = (1...40).map { i in
+            switch i % 4 {
+            case 0: #","x\#(i)":"s""#
+            case 1: #","x\#(i)":\#(i)"#
+            case 2: #","x\#(i)":{"n":{"m":[1,"a",null]}}"#
+            default: #","x\#(i)":[{"a":1},"b",2]"#
+            }
+        }.joined()
+        let mastodon = #","following":"f","followers":"https://remote.example/users/a/followers","featured":"f","manuallyApprovesFollowers":false,"discoverable":true,"published":"2024-01-01T00:00:00Z","url":"https://remote.example/@a","icon":{"type":"Image","url":"i"},"attachment":[],"tag":[]"#
+        let document = try await actorResult(Fixtures.actor(id: "https://remote.example/users/a",
+                                                            extra: mastodon + extra)).get()
+        #expect(document.id == "https://remote.example/users/a")
+        #expect(document.inbox == "https://remote.example/users/a/inbox")
+        #expect(document.sharedInbox == "https://remote.example/users/a/shared")
+        #expect(document.publicKeyPem == Fixtures.publicKeyPem)
+        #expect(document.followers == "https://remote.example/users/a/followers")
+        #expect(document.url == "https://remote.example/@a")
+        #expect(document.preferredUsername == "alice")
+    }
+    @Test func sameDocumentWithoutInboxFails() async throws {             // control
+        let noInbox = Self.valid.replacingOccurrences(of: #""inbox":"https://remote.example/users/a/inbox","#, with: "")
+        guard case .failure(.invalidDocument) = try await actorResult(noInbox) else { Issue.record("accepted"); return }
+    }
+
+    static func note(_ member: String) -> String { #"{"id":"https://x/n","type":"Note",\#(member)}"# }
+
+    @Test(arguments: [#""attributedTo":"u""#, #""attributedTo":{"id":"u"}"#, #""attributedTo":[{"id":"u"},"v"]"#])
+    func attributedToForms(_ member: String) async throws {
+        #expect(try await objectResult(Self.note(member)).get().attributedTo == "u")
+    }
+    @Test(arguments: [#""to":"u""#, #""to":["u"]"#])
+    func toForms(_ member: String) async throws {
+        #expect(try await objectResult(Self.note(member)).get().to == ["u"])
+    }
+    @Test(arguments: [#""url":"w""#, #""url":{"href":"w"}"#, #""url":[{"href":"w"}]"#])
+    func urlForms(_ member: String) async throws {
+        #expect(try await objectResult(Self.note(member)).get().url == "w")
+    }
+    @Test func publicKeyForms() async throws {
+        let object = try await actorResult(Self.valid).get().publicKeyPem
+        let array = try await actorResult(Self.valid
+            .replacingOccurrences(of: #""publicKey":{"#, with: #""publicKey":[{"#)
+            .replacingOccurrences(of: #"}}"#, with: #"}]}"#)).get().publicKeyPem
+        #expect(object == array)
+    }
+    @Test(arguments: [#""attributedTo":5"#, #""to":5"#, #""url":5"#])     // control
+    func numericValueFails(_ member: String) async throws {
+        guard case .failure(.invalidDocument) = try await objectResult(Self.note(member)) else { Issue.record(member); return }
+    }
+    @Test func numericPublicKeyFails() async throws {                     // control
+        guard case .failure(.invalidDocument) = try await actorResult(
+            #"{"id":"https://x/a","type":"Person","inbox":"i","publicKey":5}"#) else { Issue.record("accepted"); return }
+    }
+    @Test func nullOptionalFieldReadsAsAbsent() async throws {
+        #expect(try await objectResult(Self.note(#""summary":null"#)).get().summary == nil)
+    }
+    @Test func singleContentMapKeyIsTheLanguage() async throws {
+        #expect(try await objectResult(Self.note(#""contentMap":{"en":"hi"}"#)).get().language == "en")
+        #expect(try await objectResult(Self.note(#""contentMap":{"en":"hi","de":"hallo"}"#)).get().language == nil)
+    }
 }
-@Test(arguments: ["attributedTo", "to", "url"]) func numericValueFails(_ field: String) async { /* → .invalidDocument */ }
-@Test func numericPublicKeyFails() async { /* actor publicKey: 5 → .invalidDocument */ }
-@Test func nullOptionalFieldReadsAsAbsent() async throws { /* "summary": null → summary == nil */ }
-@Test func singleContentMapKeyIsTheLanguage() async throws { /* {"en":"…"} → "en"; two keys → nil */ }
 ```
 
-- [ ] **Step 2: Run.** `swift test --filter DocumentTests`. Expected: PASS if Task 4's mapping is right; the controls prove the decode checks declared fields. Fix any mapping mismatch in `RemoteDocuments.swift` and re-run.
+  `defer { Task { … } }` stops each server after the helper returns, without blocking it. The helpers return a `Result`, so each assertion can match the error case.
+
+- [ ] **Step 2: Run.** `swift test --filter DocumentTests`. **Expected:** PASS, with every control red where it is marked. If a mapping is wrong, fix `RemoteDocuments.swift` and run again.
 
 - [ ] **Step 3: Commit.** `git commit -m "test: typed remote documents, value-or-array and unknown fields"`
 
@@ -602,97 +1639,262 @@ func invalidActorDocument(_ body: String) async { /* getActor → .invalidDocume
 ### Task 9: Request target and signing
 
 **Files:**
-- Modify: `Sources/ActivityPubCore/Crypto/HTTPSignature.swift` (add `signedGetHeaders`), `RemoteFetch/RemoteFetchMiddleware.swift`, `Sources/ActivityPubCore/Crypto/KeyManager.swift` (delete `actorDocumentRequest`, `:81-117`)
-- Modify: `Tests/ActivityPubCoreTests/SignedFetchTests.swift` (move from `actorDocumentRequest` to `signedGetHeaders`)
+- Modify:
+  - `Sources/ActivityPubCore/Crypto/HTTPSignature.swift`: add `signedGetHeaders`.
+  - `RemoteFetch/RemoteFetchMiddleware.swift`.
+  - `Sources/ActivityPubCore/Crypto/KeyManager.swift`: delete `actorDocumentRequest`, `:81-117`.
+  - `Tests/ActivityPubCoreTests/SignedFetchTests.swift`: `:33-117` move from `actorDocumentRequest` to `signedGetHeaders`.
 - Test: `Tests/ActivityPubCoreTests/RemoteFetch/SigningAndTargetTests.swift`
 
 **Interfaces:**
-- Produces: `extension HTTPSignature { static func signedGetHeaders(url: URL, signer: FetchSigningKey, date: Date = Date()) throws -> [String: String] }`: path = `percentEncodedPath` (`/` if empty) + `?query`, host = `host[:port]`, then `signGet(privateKeyPem:keyId:path:host:date:)` (`HTTPSignature.swift:172-200`); throws `RemoteFetchError.invalidURI` for a URL without a host.
+- Produces: `extension HTTPSignature { static func signedGetHeaders(url: URL, signer: FetchSigningKey, date: Date = Date()) throws -> [String: String] }`.
+  - The path is `percentEncodedPath` (`/` when empty) plus `?` and the query, and the host is `host[:port]`.
+  - It then calls `signGet(privateKeyPem:keyId:path:host:date:)` (`HTTPSignature.swift:172-200`).
+  - A URL without a host throws `RemoteFetchError.invalidURI`.
 
 - [ ] **Step 1: Write the failing tests.**
 
 ```swift
-@Test func requestTargetReachesServerByteForByte() async throws {
-    // uri A + "/users/al%20ice?x=1&y=%2F" → A.stats.requests[0].target == "/users/al%20ice?x=1&y=%2F"
-}
-@Test func plainPathTemplateDoesNotPreserveTarget() async throws {
-    // control: .all.subtracting(.verbatimRequestTarget): the middleware sets the path with
-    // Converter(configuration: .init()).renderedPath(template: "/{}", parameters: [pathAndQuery]),
-    // what a "/{path}" template produces → recorded target != the URI's
-}
-@Test func pathStartingWithDoubleSlashStaysOnTheURIHost() async throws {
-    // uri A + "//other/x" → A records 1 request; nothing else is contacted
-}
-@Test func signedFetchVerifies() async throws {
-    // signer = FetchSigningKey(test RSA key); uri with query; recorded headers: signature params
-    // headers == "(request-target) host date"; HTTPSignature.verify(method: "get",
-    // path: recorded.target, headers: recorded.headers, body: Data(), publicKeyPem:) == true
-}
-@Test func redirectedFetchIsSignedAgainForTheSecondHop() async throws {
-    // A 302 → B "/b?q=1": B's recorded Signature verifies for "/b?q=1" with B's host:port
-}
-@Test func unsignedCallCarriesNoSignature() async throws { /* control: signer nil → no "signature" header */ }
-@Test func signatureFailsForPathWithoutQuery() async throws { /* control: verify with path minus query == false */ }
-@Test func reusedFirstHopHeadersFailOnSecondHop() async throws {
-    // control: .all.subtracting(.resignEachHop) → B's Signature does not verify for B's target
+@Suite("Request target and signing") struct SigningAndTargetTests {
+    static let signer = FetchSigningKey(keyId: "https://activity.example/users/memes#main-key",
+                                        privateKeyPem: Fixtures.signingKey.pemRepresentation)
+
+    func verifies(_ request: RecordedRequest, path: String) throws -> Bool {
+        try HTTPSignature.verify(signatureHeader: request.headers["signature"] ?? "", method: "get", path: path,
+                                 headers: request.headers, body: Data(), publicKeyPem: Fixtures.publicKeyPem)
+    }
+
+    @Test func requestTargetReachesServerByteForByte() async throws {
+        let a = try await noteServer()
+        try await withTestClient(makeTestClient(admitting: [a.port])) {
+            _ = try await object(a.url("/users/al%20ice?x=1&y=%2F"), via: $0, http: [a.port])
+        }
+        #expect(a.stats.requests[0].target == "/users/al%20ice?x=1&y=%2F")
+        await stopAll(a)
+    }
+
+    @Test func plainPathTemplateDoesNotPreserveTarget() async throws {    // control
+        let a = try await noteServer()
+        try await withTestClient(makeTestClient(admitting: [a.port], checks: .all.subtracting(.verbatimRequestTarget))) {
+            _ = try? await object(a.url("/users/al%20ice?x=1&y=%2F"), via: $0, http: [a.port])
+        }
+        #expect(a.stats.requests.first?.target != "/users/al%20ice?x=1&y=%2F")
+        await stopAll(a)
+    }
+
+    @Test func pathStartingWithDoubleSlashIsSentVerbatim() async throws {
+        let a = try await noteServer()
+        try await withTestClient(makeTestClient(admitting: [a.port])) {
+            _ = try? await object(a.url("//other/x"), via: $0, http: [a.port])
+        }
+        #expect(a.stats.requests.count == 1)
+        #expect(a.stats.requests.first?.target == "//other/x")
+        await stopAll(a)
+    }
+
+    @Test func signedFetchVerifies() async throws {
+        let a = try await noteServer()
+        try await withTestClient(makeTestClient(admitting: [a.port])) {
+            _ = try await object(a.url("/users/b?page=1"), via: $0, http: [a.port], signer: Self.signer)
+        }
+        let request = try #require(a.stats.requests.first)
+        let params = HTTPSignature.parseSignatureHeader(try #require(request.headers["signature"]))
+        #expect(params["keyId"] == Self.signer.keyId)
+        #expect(params["headers"] == "(request-target) host date")
+        #expect(request.headers["host"] == "127.0.0.1:\(a.port)")
+        #expect(try verifies(request, path: "/users/b?page=1"))
+        #expect(try !verifies(request, path: "/users/b"))                // control: query is signed
+        await stopAll(a)
+    }
+
+    @Test func redirectedFetchIsSignedAgainForTheSecondHop() async throws {
+        let b = try await noteServer()
+        let a = try await TestServer.start { _ in .redirect(location: b.url("/b?q=1")) }
+        try await withTestClient(makeTestClient(admitting: [a.port, b.port])) {
+            _ = try await object(a.url("/a"), via: $0, http: [a.port, b.port], signer: Self.signer)
+        }
+        #expect(try verifies(try #require(b.stats.requests.first), path: "/b?q=1"))
+        #expect(b.stats.requests.first?.headers["host"] == "127.0.0.1:\(b.port)")
+        await stopAll(a, b)
+    }
+
+    @Test func unsignedCallCarriesNoSignature() async throws {            // control
+        let a = try await noteServer()
+        try await withTestClient(makeTestClient(admitting: [a.port])) {
+            _ = try await object(a.url("/n"), via: $0, http: [a.port])
+        }
+        #expect(a.stats.requests.first?.headers["signature"] == nil)
+        await stopAll(a)
+    }
+
+    @Test func reusedFirstHopHeadersFailOnSecondHop() async throws {      // control
+        let b = try await noteServer()
+        let a = try await TestServer.start { _ in .redirect(location: b.url("/b?q=1")) }
+        try await withTestClient(makeTestClient(admitting: [a.port, b.port], checks: .all.subtracting(.resignEachHop))) {
+            _ = try await object(a.url("/a"), via: $0, http: [a.port, b.port], signer: Self.signer)
+        }
+        #expect(try !verifies(try #require(b.stats.requests.first), path: "/b?q=1"))
+        await stopAll(a, b)
+    }
 }
 ```
 
-- [ ] **Step 2: Run.** Expected: fail (no signing in the middleware).
+  `SignedFetchTests` keep their assertions, with `KeyManager.actorDocumentRequest(url:signingKey:)` replaced by `HTTPSignature.signedGetHeaders(url:signer:)`. `actorFetchWithoutSigningKeyIsUnsigned` moves here as `unsignedCallCarriesNoSignature`.
 
-- [ ] **Step 3: Implement.** In each hop, with `context.signer`, add the `signedGetHeaders` output to `request.headerFields` (`HTTPField.Name("Signature")!`, `"Date"`, `"Host"`), replacing any from the previous hop; AHC keeps a `Host` header already present (`RequestValidation.swift` `addHostIfNeeded`, AHC 1.33.1). With `.resignEachHop` off, reuse hop 0's headers. With `.verbatimRequestTarget` off, use the `renderedPath` form above.
+- [ ] **Step 2: Run.** **Expected:** the signing tests fail.
 
-- [ ] **Step 4: Run** the new tests and `SignedFetchTests`. Expected: PASS.
+- [ ] **Step 3: Implement.**
+  - **Signing.** On each hop with `context.signer`, set the `signedGetHeaders` output on `request.headerFields`, replacing what the previous hop set. The headers are `HTTPField.Name("Signature")!`, `"Date"` and `"Host"`.
+  - **AHC and `Host`.** AHC keeps a `Host` header that is already present (`addHostIfNeeded`, `RequestValidation.swift:166-179`, AHC 1.33.1).
+  - **Switches.** With `.resignEachHop` off, reuse hop 0's headers. With `.verbatimRequestTarget` off, set the base URL to the hop's origin only and `request.path` to `try Converter(configuration: .init()).renderedPath(template: "/{}", parameters: [pathAndQuery])` (`Conversion/Converter+Client.swift:42`, runtime 1.11.0), which is what a `/{path}` template produces.
+  - **If `pathStartingWithDoubleSlashIsSentVerbatim` fails,** the transport or AHC rewrites the target under the item 8 mechanism. Stop and report with the recorded target. Do not weaken the assertion.
 
-- [ ] **Step 5: Commit.** `git commit -m "feat: sign every hop of a remote fetch"`
+- [ ] **Step 4: Run** the new tests and `SignedFetchTests`. **Expected:** PASS.
+
+- [ ] **Step 5: Commit.** `git commit -m "feat: sign every hop of a remote fetch and keep the request target verbatim"`
 
 ---
 
 ### Task 10: Connection-level address check
 
 **Files:**
-- Test: `Tests/ActivityPubCoreTests/RemoteFetch/ConnectionTests.swift` (`@Suite(.serialized)`)
-- Modify (only on a failing test): `RemoteFetch/RemoteFetchClient.swift`
+- Test: `Tests/ActivityPubCoreTests/RemoteFetch/ConnectionTests.swift`
+- Modify (only if a test fails): `RemoteFetch/RemoteFetchClient.swift`
 
 **Interfaces:**
-- Consumes: `RemoteFetchClient.make(…, closesRefusedChannel:, adjust:)`, `TestServer` with `TestTLS`.
+- Consumes: `RemoteFetchClient.make` with its `closesRefusedChannel:` and `adjust:` parameters, and `TestServer` with `TestTLS`.
 
-- [ ] **Step 1: Write the tests.** Every fetch here passes `schemePolicy: .allowingHTTP(ports: [A, C])`, so the scheme check admits the hop and only the address policy (`.loopbackPorts([A])`, or `[A, T]` with a TLS server T) can refuse it.
+- [ ] **Step 1: Write the tests.**
+  - **Scheme policy.** Every fetch admits `http` on the ports it uses, so the address policy is the only thing that can refuse a hop.
+  - **Address policy.** `.loopbackPorts([A])`, or `[A, T]` with a TLS server T.
+  - **Server C.** It is never admitted.
 
 ```swift
-@Test func redirectToRefusedPortFailsWithAddressError() async {
-    // client admits [A]; A 302 → http://127.0.0.1:C → .addressRefused; C: connections == 1, bytes == 0, closes == 1
-}
-@Test func withoutHookRequestReachesRefusedPort() async throws {
-    // control: adjust { $0.http1_1ConnectionDebugInitializer = nil } → C.stats.bytes > 0
-}
-@Test func refusedTLSPeerSeesHandshakeButNoHTTP() async {
-    // C is a TLS server: C.tlsHandshakes == 1, C.bytes == 0, C.closes == 1, fetch → .addressRefused
-}
-@Test func withoutHookTLSRequestReachesRefusedPort() async throws { /* control: C.bytes > 0 */ }
-@Test func hookWithoutCloseLeavesConnectionOpen() async {
-    // control for "closes == 1": closesRefusedChannel: false → after 300 ms settle, C.closes == 0
-}
-@Test func refusedAddressGetsExactlyOneConnection() async { /* C.connections == 1 */ }
-@Test func retriesOnReconnectRefusedAddress() async {
-    // control: adjust { $0.connectionPool.retryConnectionEstablishment = true }, deadline now+2s
-    // → C.connections > 1
-}
-@Test func http2CapableRefusedPeerIsRefused() async {
-    // C: TLS, alpn ["h2", "http/1.1"], http2: true, port not admitted → .addressRefused, C.bytes == 0
-}
-@Test func automaticHTTPVersionNegotiatesH2AndBypassesHook() async throws {
-    // control: adjust { $0.httpVersion = .automatic } → C answered the request over h2 (C.requests.count == 1)
-}
-@Test func testClientTrustsTestCA() async throws { /* TLS server admitted → document */ }
-@Test func systemTrustStoreRefusesTestCA() async throws {
-    // control: adjust { $0.tlsConfiguration = .makeClientConfiguration() } (system roots); bind the context and
-    // call client.client.getObject(); the ClientError has response == nil, and RemoteFetchError.from(error)
-    // is .transportFailed
+@Suite("Connection-level address check", .serialized) struct ConnectionTests {
+    /// A admits; A redirects to C, which the policy refuses.
+    func redirectToC(_ c: TestServer) async throws -> TestServer {
+        try await TestServer.start { _ in .redirect(location: c.url("/x")) }
+    }
+
+    @Test func redirectToRefusedPortFailsWithAddressError() async throws {
+        let c = try await TestServer.start()
+        let a = try await redirectToC(c)
+        try await withTestClient(makeTestClient(admitting: [a.port])) { client in
+            #expect(await fetchError { _ = try await object(a.url("/a"), via: client, http: [a.port, c.port]) }?
+                .name == "addressRefused")
+            try await settle()
+            #expect(c.stats.connections == 1)       // also the "no retries" assertion
+            #expect(c.stats.bytes == 0)
+            #expect(c.stats.closes == 1)            // the hook closed the channel
+        }
+        await stopAll(a, c)
+    }
+
+    @Test func withoutHookRequestReachesRefusedPort() async throws {      // control
+        let c = try await TestServer.start()
+        let a = try await redirectToC(c)
+        try await withTestClient(makeTestClient(admitting: [a.port], adjust: { $0.http1_1ConnectionDebugInitializer = nil })) {
+            _ = try? await object(a.url("/a"), via: $0, http: [a.port, c.port], deadline: .now + .seconds(2))
+            try await settle()
+            #expect(c.stats.bytes > 0)
+        }
+        await stopAll(a, c)
+    }
+
+    @Test func refusedTLSPeerSeesHandshakeButNoHTTP() async throws {
+        let c = try await TestServer.start(tls: TestTLS())
+        let a = try await redirectToC(c)
+        try await withTestClient(makeTestClient(admitting: [a.port])) { client in
+            #expect(await fetchError { _ = try await object(a.url("/a"), via: client, http: [a.port]) }?
+                .name == "addressRefused")
+            try await settle()
+            #expect(c.stats.tlsHandshakes == 1)
+            #expect(c.stats.bytes == 0)
+            #expect(c.stats.closes == 1)
+        }
+        await stopAll(a, c)
+    }
+
+    @Test func withoutHookTLSRequestReachesRefusedPort() async throws {   // control
+        let c = try await TestServer.start(tls: TestTLS())
+        let a = try await redirectToC(c)
+        try await withTestClient(makeTestClient(admitting: [a.port], adjust: { $0.http1_1ConnectionDebugInitializer = nil })) {
+            _ = try? await object(a.url("/a"), via: $0, http: [a.port], deadline: .now + .seconds(2))
+            try await settle()
+            #expect(c.stats.bytes > 0)
+        }
+        await stopAll(a, c)
+    }
+
+    @Test func hookWithoutCloseLeavesConnectionOpen() async throws {      // control for closes == 1
+        let c = try await TestServer.start()
+        let a = try await redirectToC(c)
+        try await withTestClient(makeTestClient(admitting: [a.port], closesRefusedChannel: false)) {
+            _ = try? await object(a.url("/a"), via: $0, http: [a.port, c.port])
+            try await settle()
+            #expect(c.stats.closes == 0)
+        }
+        await stopAll(a, c)
+    }
+
+    @Test func retriesOnReconnectRefusedAddress() async throws {          // control for connections == 1
+        let c = try await TestServer.start()
+        let a = try await redirectToC(c)
+        try await withTestClient(makeTestClient(admitting: [a.port],
+                                                adjust: { $0.connectionPool.retryConnectionEstablishment = true })) {
+            _ = try? await object(a.url("/a"), via: $0, http: [a.port, c.port], deadline: .now + .seconds(2))
+            try await settle()
+            #expect(c.stats.connections > 1)
+            #expect(c.stats.bytes == 0)
+        }
+        await stopAll(a, c)
+    }
+
+    @Test func http2CapableRefusedPeerIsRefused() async throws {
+        let c = try await TestServer.start(tls: TestTLS(alpn: ["h2", "http/1.1"], http2: true))
+        try await withTestClient(makeTestClient(admitting: [])) { client in
+            #expect(await fetchError { _ = try await object(c.url("/x"), via: client) }?.name == "addressRefused")
+            try await settle()
+            #expect(c.stats.h2Streams == 0)
+            #expect(c.stats.bytes == 0)
+        }
+        await stopAll(c)
+    }
+
+    @Test func automaticHTTPVersionNegotiatesH2AndBypassesHook() async throws {   // control
+        let c = try await TestServer.start(tls: TestTLS(alpn: ["h2", "http/1.1"], http2: true))
+        try await withTestClient(makeTestClient(admitting: [], adjust: { $0.httpVersion = .automatic })) { client in
+            let error = await fetchError { _ = try await object(c.url("/x"), via: client, deadline: .now + .seconds(2)) }
+            #expect(error?.name != "addressRefused")   // the server never answers; the deadline ends the fetch
+            #expect(c.stats.h2Streams == 1)            // the request reached the server over h2
+        }
+        await stopAll(c)
+    }
+
+    @Test func testClientTrustsTestCA() async throws {
+        let t = try await TestServer.start(tls: TestTLS()) {
+            .document(contentType: activityJSON, body: Fixtures.note(id: "https://\($0.headers["host"]!)\($0.target)", attributedTo: "x"))
+        }
+        try await withTestClient(makeTestClient(admitting: [t.port])) {
+            #expect(try await object(t.url("/n"), via: $0).id == t.url("/n"))
+        }
+        await stopAll(t)
+    }
+
+    @Test func systemTrustStoreRefusesTestCA() async throws {             // control
+        let t = try await TestServer.start(tls: TestTLS()) { _ in .document(contentType: activityJSON, body: "{}") }
+        try await withTestClient(makeTestClient(admitting: [t.port],
+                                                adjust: { $0.tlsConfiguration = .makeClientConfiguration() })) { client in
+            let error = try #require(await generatedCallError(t.url("/n"), via: client, http: []))
+            #expect(error.response == nil)
+            #expect(RemoteFetchError.from(error).name == "transportFailed")
+        }
+        await stopAll(t)
+    }
 }
 ```
 
-- [ ] **Step 2: Run.** `swift test --filter ConnectionTests`. Expected: PASS with Task 4's hook; each control green showing the setting matters. If a production-side test fails, fix `make` and re-run. Record every server count.
+- [ ] **Step 2: Run.** `swift test --filter ConnectionTests`. **Expected:** PASS with Task 4's hook. Each control should show that its setting matters. If a production-side test fails, fix `make` and run again. Record every server count.
 
 - [ ] **Step 3: Commit.** `git commit -m "test: connection hook, close, retries, HTTP/1.1 and trust"`
 
@@ -704,23 +1906,78 @@ func invalidActorDocument(_ body: String) async { /* getActor → .invalidDocume
 - Test: `Tests/ActivityPubCoreTests/RemoteFetch/ConcurrencyTests.swift`
 
 **Interfaces:**
-- Consumes: `makeTestClient(…, middleware:)`, `TestResponse.holdUntil`.
-- Produces (test target): `final class StoredTargetMiddleware: ClientMiddleware`, which stores `RemoteFetchContext.current` in a `Mutex` property on entry, awaits a `TestBarrier`, then re-binds the stored context and calls `RemoteFetchMiddleware().intercept`.
+- Consumes: the `middleware:` parameter of `makeTestClient`, and `TestBarrier`.
 
 - [ ] **Step 1: Write the tests.**
 
 ```swift
-@Test func concurrentFetchesReachTheirOwnServers() async throws {
-    // A holds its response until B has recorded a request; async let a = fetch(A), b = fetch(B)
-    // → each document's id is its own server's; A and B each recorded 1 request
+import HTTPTypes
+import OpenAPIRuntime
+import Synchronization
+
+/// Control only: keeps the context in a stored property on the one shared middleware, so a
+/// later call's target overwrites an earlier call's.
+final class StoredTargetMiddleware: ClientMiddleware, Sendable {
+    let stored = Mutex<RemoteFetchContext?>(nil)
+    let entered = Mutex(0)
+    let bothEntered = TestBarrier()
+    let inner = RemoteFetchMiddleware()
+
+    func intercept(_ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String,
+                   next: @Sendable (HTTPRequest, HTTPBody?, URL) async throws -> (HTTPResponse, HTTPBody?))
+        async throws -> (HTTPResponse, HTTPBody?)
+    {
+        stored.withLock { $0 = RemoteFetchContext.current }
+        if entered.withLock({ $0 += 1; return $0 }) == 2 { await bothEntered.open() }
+        await bothEntered.wait()
+        let shared = stored.withLock { $0 }
+        return try await RemoteFetchContext.$current.withValue(shared) {
+            try await inner.intercept(request, body: body, baseURL: baseURL, operationID: operationID, next: next)
+        }
+    }
 }
-@Test func storedTargetMiddlewareMisroutes() async throws {
-    // control: StoredTargetMiddleware → one server records 2 requests, the other 0
+
+@Suite("One client, concurrent fetches") struct ConcurrencyTests {
+    @Test func concurrentFetchesReachTheirOwnServers() async throws {
+        let bReceived = TestBarrier()
+        let a = try await TestServer.start {
+            .holdUntil(bReceived, then: .document(contentType: activityJSON,
+                                                   body: Fixtures.note(id: Fixtures.selfURL($0), attributedTo: "x")))
+        }
+        let b = try await TestServer.start {
+            let request = $0
+            Task { await bReceived.open() }
+            return .document(contentType: activityJSON, body: Fixtures.note(id: Fixtures.selfURL(request), attributedTo: "x"))
+        }
+        try await withTestClient(makeTestClient(admitting: [a.port, b.port])) { client in
+            async let fromA = object(a.url("/n"), via: client, http: [a.port, b.port])
+            async let fromB = object(b.url("/n"), via: client, http: [a.port, b.port])
+            #expect(try await fromA.id == a.url("/n"))
+            #expect(try await fromB.id == b.url("/n"))
+        }
+        #expect(a.stats.requests.count == 1)
+        #expect(b.stats.requests.count == 1)
+        await stopAll(a, b)
+    }
+
+    @Test func storedTargetMiddlewareMisroutes() async throws {           // control
+        let a = try await noteServer()
+        let b = try await noteServer()
+        try await withTestClient(makeTestClient(admitting: [a.port, b.port], middleware: StoredTargetMiddleware())) { client in
+            async let fromA = try? object(a.url("/n"), via: client, http: [a.port, b.port])
+            async let fromB = try? object(b.url("/n"), via: client, http: [a.port, b.port])
+            _ = await (fromA, fromB)
+        }
+        let counts = [a.stats.requests.count, b.stats.requests.count].sorted()
+        #expect(counts == [0, 2])
+        await stopAll(a, b)
+    }
 }
-@Test func unboundFetchThrowsBeforeConnecting() async { /* Task 4's noContext test, repeated with both servers: 0 connections */ }
 ```
 
-- [ ] **Step 2: Run.** Expected: PASS; the control misroutes. This is the measurement for spec "Unverified → TaskLocal isolation on one client".
+  `StoredTargetMiddleware` names HTTPTypes types in the test target. The test target reaches `HTTPTypes` the same way `ActivityPubCore` does: through `transitiveTestProducts` under answer (a), or by an undeclared import under answer (b) (Task 4, Step 1).
+
+- [ ] **Step 2: Run.** **Expected:** PASS, and the control misroutes. This test is the measurement for "TaskLocal isolation on one client" in the spec's "Unverified" section.
 
 - [ ] **Step 3: Commit.** `git commit -m "test: per-task fetch context on one shared client"`
 
@@ -733,25 +1990,61 @@ func invalidActorDocument(_ body: String) async { /* getActor → .invalidDocume
 - Test: `Tests/ActivityPubCoreTests/ActorKeyCacheTests.swift`
 
 **Interfaces:**
-- Produces: `public final class ActorKeyCache: Sendable { public init(loader: @escaping @Sendable (String) async throws -> String); public func signingKey(for username: String) async throws -> String }` (returns the private key PEM). Stored: `Mutex<[String: String]>` (`import Synchronization`) and the loader.
+- Produces: `public final class ActorKeyCache: Sendable { public init(loader: @escaping @Sendable (String) async throws -> String); public func signingKey(for username: String) async throws -> String }`. It returns the private key PEM. Its stored state is a `Mutex<[String: String]>` (`import Synchronization`) and the loader.
 
 - [ ] **Step 1: Write the failing tests.**
 
 ```swift
-@Test func loadsOncePerUsername() async throws {
-    // counting loader; signingKey(for: "a") twice → loader called once for "a"; "b" → once more
-}
-@Test func loaderErrorIsNotCached() async {
-    // loader throws on first call, succeeds after → first throws, second returns the key
-}
-@Test func concurrentMissesBothLoadAndAgree() async throws {
-    // two concurrent misses for "a" → both return the same PEM; loader called 1 or 2 times
+import Synchronization
+import Testing
+@testable import ActivityPubCore
+
+@Suite("ActorKeyCache") struct ActorKeyCacheTests {
+    @Test func loadsOncePerUsername() async throws {
+        let calls = Mutex<[String]>([])
+        let cache = ActorKeyCache { username in calls.withLock { $0.append(username) }; return "pem-\(username)" }
+        #expect(try await cache.signingKey(for: "a") == "pem-a")
+        #expect(try await cache.signingKey(for: "a") == "pem-a")
+        #expect(try await cache.signingKey(for: "b") == "pem-b")
+        #expect(calls.withLock { $0 } == ["a", "b"])
+    }
+
+    @Test func loaderErrorIsNotCached() async throws {
+        struct Boom: Error {}
+        let calls = Mutex(0)
+        let cache = ActorKeyCache { _ in
+            if calls.withLock({ $0 += 1; return $0 }) == 1 { throw Boom() }
+            return "pem"
+        }
+        await #expect(throws: Boom.self) { try await cache.signingKey(for: "a") }
+        #expect(try await cache.signingKey(for: "a") == "pem")
+    }
+
+    @Test func concurrentMissesAgree() async throws {
+        let calls = Mutex(0)
+        let cache = ActorKeyCache { _ in
+            calls.withLock { $0 += 1 }
+            try await Task.sleep(for: .milliseconds(50))
+            return "pem"
+        }
+        async let first = cache.signingKey(for: "a")
+        async let second = cache.signingKey(for: "a")
+        #expect(try await [first, second] == ["pem", "pem"])
+        #expect((1...2).contains(calls.withLock { $0 }))
+    }
 }
 ```
 
-  Control for `loadsOncePerUsername`: a cache whose store step is removed (locally, not committed) calls the loader twice. Record it.
+  The control for `loadsOncePerUsername` is a local edit that is never committed: remove the store step, see `calls == ["a", "a", "b"]`, and record that output.
 
-- [ ] **Step 2: Run** → compile failure. **Step 3: Implement** per §0.1 "Signing keys: `ActorKeyCache`": read inside `withLock`; on a miss, await the loader outside the lock, then store inside a second `withLock`; no lock across an `await`; never invalidated. **Step 4: Run** → PASS.
+- [ ] **Step 2: Run.** **Expected:** it fails to compile.
+
+- [ ] **Step 3: Implement** as §0.1, "Signing keys: `ActorKeyCache`" describes.
+  - Read inside `withLock`.
+  - On a miss, await the loader outside the lock, then store the key inside a second `withLock`.
+  - Never hold the lock across an `await`, and never invalidate an entry.
+
+- [ ] **Step 4: Run.** **Expected:** PASS.
 
 - [ ] **Step 5: Commit.** `git commit -m "feat: ActorKeyCache for per-container signing keys"`
 
@@ -760,36 +2053,111 @@ func invalidActorDocument(_ body: String) async { /* getActor → .invalidDocume
 ### Task 13: `KeyManager` and `InboxHandler`
 
 **Files:**
-- Modify: `Sources/ActivityPubCore/Crypto/KeyManager.swift:27-207`, `Sources/InboxHandler/main.swift:62-90,165-169,197-201,519-528,1731-1739`
-- Delete: `Tests/ActivityPubCoreTests/RemoteFetch/LegacyFetchControlTests.swift`
+- Modify:
+  - `Sources/ActivityPubCore/Crypto/KeyManager.swift`:
+    - the file doc comment, `:1-15`, which describes URLSession, the 10 s idle timeout and `FoundationNetworking`;
+    - the code, `:27-207`.
+  - `Sources/InboxHandler/main.swift`: `:62-90`, `:165-169`, `:197-201`, `:519-528`, `:1731-1739`.
+  - `Sources/ActivityPubCore/Documentation.docc/AuthenticationOverview.md:13`.
+- Delete: `Tests/ActivityPubCoreTests/RemoteFetch/LegacyFetchControlTests.swift`. Its fixture checks move to `KeyFetchTests.swift`.
 - Test: `Tests/ActivityPubCoreTests/RemoteFetch/KeyFetchTests.swift`
 
 **Interfaces:**
-- Consumes: `fetchRemoteActor` internal overload, `RemoteFetchClient`, `ActorKeyCache`.
-- Produces: `KeyManager { let client: RemoteFetchClient; public init(); init(client: RemoteFetchClient); public func getPublicKey(keyId:store:signingKey:deadline: ContinuousClock.Instant) async throws -> String; public func refreshKey(keyId:store:signingKey:deadline:) async throws -> String; func fetchActorDocument(actorUri: String, signingKey: FetchSigningKey?, deadline: ContinuousClock.Instant) async throws -> RemoteActor }`. `KeyManagerError` keeps `invalidActorUri` and `missingPublicKey`; `fetchFailed`, `invalidJSON`, `missingInbox` are removed.
+- Consumes: `fetchRemoteActor` (the internal overload), `RemoteFetchClient`, `ActorKeyCache`.
+- Produces:
 
-- [ ] **Step 1: Write the failing tests** (replacing Task 3's legacy control file, whose recorded output is the control):
+  ```swift
+  KeyManager {
+      let client: RemoteFetchClient
+      public init()
+      init(client: RemoteFetchClient)
+      public func getPublicKey(keyId: String, store: DynamoDBStore, signingKey: (() async throws -> FetchSigningKey)? = nil, deadline: ContinuousClock.Instant) async throws -> String
+      public func refreshKey(keyId: String, store: DynamoDBStore, signingKey: (() async throws -> FetchSigningKey)? = nil, deadline: ContinuousClock.Instant) async throws -> String
+      func fetchActorDocument(actorUri: String, signingKey: FetchSigningKey? = nil, deadline: ContinuousClock.Instant, schemePolicy: SchemePolicy = .httpsOnly) async throws -> RemoteActor
+  }
+  ```
+
+  `KeyManagerError` keeps `invalidActorUri` and `missingPublicKey`. It drops `fetchFailed`, `invalidJSON` and `missingInbox`.
+
+- [ ] **Step 1: Write the failing tests.**
 
 ```swift
-@Test func keyFetchReturnsKey() async throws {
-    // KeyManager(client: makeTestClient(admitting: [A])) .fetchActorDocument(actorUri: A/a, signingKey: nil,
-    // deadline: .now + .seconds(10)) — schemePolicy for http test ports comes from an internal
-    // fetchActorDocument(…, schemePolicy:) overload → publicKeyPem, inbox, sharedInbox, preferredUsername
+@Suite("Key fetch") struct KeyFetchTests {
+    func actorServer() async throws -> TestServer {
+        try await TestServer.start { .document(contentType: activityJSON, body: Fixtures.actor(id: Fixtures.selfURL($0))) }
+    }
+
+    @Test func keyFetchReturnsKey() async throws {
+        let a = try await actorServer()
+        try await withTestClient(makeTestClient(admitting: [a.port])) { client in
+            let actor = try await KeyManager(client: client).fetchActorDocument(
+                actorUri: a.url("/a"), signingKey: nil, deadline: .now + .seconds(10),
+                schemePolicy: .allowingHTTP(ports: [a.port]))
+            #expect(actor.publicKeyPem == Fixtures.publicKeyPem)
+            #expect(actor.inbox == a.url("/a") + "/inbox")
+            #expect(actor.sharedInbox == a.url("/a") + "/shared")
+            #expect(actor.preferredUsername == "alice")
+        }
+        await stopAll(a)
+    }
+
+    @Test func keyFetchFourRedirectsFails() async throws {
+        let d = try await actorServer()
+        let chain = try await redirectChain(4, to: d.url("/a"))
+        let ports = Set(chain.map(\.port) + [d.port])
+        try await withTestClient(makeTestClient(admitting: ports)) { client in
+            #expect(await fetchError {
+                _ = try await KeyManager(client: client).fetchActorDocument(actorUri: chain[0].url("/hop"),
+                    deadline: .now + .seconds(10), schemePolicy: .allowingHTTP(ports: ports))
+            }?.name == "tooManyRedirects")
+        }
+        await stopAll(d); for s in chain { await stopAll(s) }
+    }
+
+    @Test func keyFetchOversizeFails() async throws {
+        let big = try await TestServer.start { .document(contentType: activityJSON,
+            body: Fixtures.padded(Fixtures.actor(id: Fixtures.selfURL($0)), to: 1_048_577)) }
+        try await withTestClient(makeTestClient(admitting: [big.port])) { client in
+            #expect(await fetchError {
+                _ = try await KeyManager(client: client).fetchActorDocument(actorUri: big.url("/a"),
+                    deadline: .now + .seconds(10), schemePolicy: .allowingHTTP(ports: [big.port]))
+            }?.name == "bodyTooLarge")
+        }
+        await stopAll(big)
+    }
+
+    @Test func actorWithoutPublicKeyFails() async throws {
+        let a = try await TestServer.start { .document(contentType: activityJSON,
+            body: #"{"id":"\#(Fixtures.selfURL($0))","type":"Person","inbox":"i"}"#) }
+        try await withTestClient(makeTestClient(admitting: [a.port])) { client in
+            await #expect(throws: KeyManagerError.self) {
+                _ = try await KeyManager(client: client).fetchActorDocument(actorUri: a.url("/a"),
+                    deadline: .now + .seconds(10), schemePolicy: .allowingHTTP(ports: [a.port]))
+            }
+        }
+        await stopAll(a)
+    }
 }
-@Test func keyFetchFourRedirectsFails() async { /* → RemoteFetchError.tooManyRedirects */ }
-@Test func keyFetchOversizeFails() async { /* → RemoteFetchError.bodyTooLarge */ }
-@Test func actorWithoutPublicKeyFails() async { /* → KeyManagerError.missingPublicKey */ }
 ```
 
-  `fetchActorDocument` gets an internal overload with `schemePolicy:` (default `.httpsOnly`) so tests can reach `http` test ports, as `fetchRemoteActor` does.
+  The redirect and size tests are controlled by the legacy run Task 3 recorded, where the code before step 0 returned a key in both cases.
 
-- [ ] **Step 2: Run** → compile failure (signatures).
+- [ ] **Step 2: Run.** **Expected:** compile failures, because the signatures have changed.
 
-- [ ] **Step 3: Implement `KeyManager`.** `fetchActorDocument` calls `fetchRemoteActor(uri:signer:deadline:schemePolicy:client: self.client)` and builds `RemoteActor(actorUri:publicKeyPem:preferredUsername:inbox:sharedInbox:fetchedAt:)`; throws `missingPublicKey` when `publicKeyPem` is `nil`; lets `RemoteFetchError` through unchanged. Delete the hand parser (`:139-155`) and the `FoundationNetworking` import. `getPublicKey`/`refreshKey` pass `deadline` through.
+- [ ] **Step 3: Implement `KeyManager`.**
+  - **`fetchActorDocument`.** It calls `fetchRemoteActor(uri:signer:deadline:schemePolicy:client: self.client)` and builds `RemoteActor(actorUri:publicKeyPem:preferredUsername:inbox:sharedInbox:fetchedAt:)`.
+  - **Errors.** It throws `missingPublicKey` when `publicKeyPem` is `nil`, and lets `RemoteFetchError` through unchanged.
+  - **Cleanup.** Delete the hand parser (`:139-155`) and the `FoundationNetworking` import.
+  - **Deadlines.** `getPublicKey` and `refreshKey` pass `deadline` through.
+  - **Docs.** Rewrite the file doc comment (`:1-15`): the fetch goes through `fetchRemoteActor`, with every step 0 control. Update `AuthenticationOverview.md:13` to match.
 
-- [ ] **Step 4: Implement `InboxHandler`.** Replace `nonisolated(unsafe) var cachedActorKeys` (`:66`) with `let actorKeys = ActorKeyCache { username in … }`, whose loader is today's SSM read (`:80-87`) and throws `InboxError.missingActorKey`; `fetchSigningKey(for:)` builds `FetchSigningKey(keyId:privateKeyPem: try await actorKeys.signingKey(for: username))`. Pass `deadline: .now + .seconds(10)` at `:165`, `:197`, `:522`. At `:1734`, replace `fetchRemoteObject(uri: actorUri)` and `["inbox"] as? String` with `try await fetchRemoteActor(uri: actorUri, signer: try await fetchSigningKey(for: username), deadline: .now + .seconds(10)).inbox`, inside the existing `do/catch`.
+- [ ] **Step 4: Implement `InboxHandler`.**
+  - **The key cache.** Replace `nonisolated(unsafe) var cachedActorKeys` (`:66`) with `let actorKeys = ActorKeyCache { username in … }`. The loader is today's SSM read (`:80-87`) and throws `InboxError.missingActorKey`.
+  - **`fetchSigningKey(for:)`.** It returns `FetchSigningKey(keyId:privateKeyPem: try await actorKeys.signingKey(for: username))`.
+  - **Deadlines.** Pass `deadline: .now + .seconds(10)` at `:165`, `:197` and `:522`.
+  - **The QuoteRequest actor lookup at `:1734`.** Replace `fetchRemoteObject(uri: actorUri)` and `["inbox"] as? String` with `try await fetchRemoteActor(uri: actorUri, signer: try await fetchSigningKey(for: username), deadline: .now + .seconds(10)).inbox`, inside the existing `do/catch`.
 
-- [ ] **Step 5: Run** `swift test --filter "KeyFetchTests|SignedFetchTests"` and `swift build --product InboxHandler`. Expected: PASS, builds.
+- [ ] **Step 5: Run.** `swift test --filter "KeyFetchTests|SignedFetchTests"` and `swift build --product InboxHandler`. **Expected:** the tests pass and the build succeeds.
 
 - [ ] **Step 6: Commit.** `git commit -m "feat: key fetches and QuoteRequest lookups through the hardened client"`
 
@@ -798,18 +2166,33 @@ func invalidActorDocument(_ body: String) async { /* getActor → .invalidDocume
 ### Task 14: `PostHandler` quote path, legacy removal, docs
 
 **Files:**
-- Modify: `Sources/PostHandler/main.swift:36-60,262-280`, `Sources/ActivityPubCore/FetchRemoteObject.swift` (delete the legacy `fetchRemoteObject(uri:)` and `FetchRemoteObjectError`, `:14-58`), `Sources/ActivityPubCore/Documentation.docc/ActivityPubCore.md:64-75`, `AuthenticationOverview.md:13`
+- Modify:
+  - `Sources/PostHandler/main.swift`: `:36-60` and `:262-280`.
+  - `Sources/ActivityPubCore/FetchRemoteObject.swift`:
+    - the file doc comment, `:1-12`, which describes URLSession, the 10 s timeout and that the request is unsigned;
+    - the legacy `fetchRemoteObject(uri:)` and `FetchRemoteObjectError`, `:14-58`, which are deleted.
+  - `Sources/ActivityPubCore/Documentation.docc/ActivityPubCore.md:64-75`.
 
 **Interfaces:**
 - Consumes: `fetchRemoteObject(uri:signer:deadline:)`, `fetchRemoteActor(uri:signer:deadline:)`, `ActorKeyCache`.
 
-- [ ] **Step 1: Implement `PostHandler`.** Add `let actorKeys = ActorKeyCache { username in … }` reading SSM `"\(ssmKeyPrefix)/\(username)"` (PostFunction already reads `activity/${Stage}/*`, `activity-app/functions/template.yaml:134-135`). Inside the existing `do` at `:263`: `let signer = FetchSigningKey(keyId: "https://\(serverDomain)/users/\(username)#main-key", privateKeyPem: try await actorKeys.signingKey(for: username))`; `fetchRemoteObject(uri: quotedId, signer: signer, deadline: .now + .seconds(10)).attributedTo`; on a `REMOTE_ACTOR#` miss, `fetchRemoteActor(uri: attributedTo, signer: signer, deadline: .now + .seconds(10)).inbox`. The `failed` path (`:284-287`) is unchanged.
+- [ ] **Step 1: Implement `PostHandler`.**
+  - **The key cache.** Add `let actorKeys = ActorKeyCache { username in … }`, reading SSM `"\(ssmKeyPrefix)/\(username)"`. PostFunction already reads `activity/${Stage}/*` (`activity-app/functions/template.yaml:134-135`). The stage-prefix fallback at `:33` is FederatedActivityPublisher#295 and is left as it is.
+  - **The signer.** Inside the existing `do` at `:263`: `let signer = FetchSigningKey(keyId: "https://\(serverDomain)/users/\(username)#main-key", privateKeyPem: try await actorKeys.signingKey(for: username))`.
+  - **The fetches.**
+    - `fetchRemoteObject(uri: quotedId, signer: signer, deadline: .now + .seconds(10)).attributedTo`.
+    - On a `REMOTE_ACTOR#` miss: `fetchRemoteActor(uri: attributedTo, signer: signer, deadline: .now + .seconds(10)).inbox`.
+  - **The `failed` path** (`:284-287`) is unchanged.
 
-- [ ] **Step 2: Remove the legacy fetch.** Delete the legacy function and error. `grep -rn "FetchRemoteObjectError\|URLSession" Sources/ActivityPubCore` → no hits.
+- [ ] **Step 2: Remove the legacy fetch.** Delete the legacy function and error, and rewrite the file doc comment.
+  - Check: `grep -rn "FetchRemoteObjectError\|URLSession" Sources/ActivityPubCore`.
+  - **Expected:** no hits.
 
-- [ ] **Step 3: Docs.** Under "Authentication and Cryptography" add `ActorKeyCache`; add a "Remote Fetch" topic group with `fetchRemoteObject(uri:signer:deadline:)`, `fetchRemoteActor(uri:signer:deadline:)`, `RemoteObjectDocument`, `RemoteActorDocument`, `RemoteFetchError`. In `AuthenticationOverview.md:13`, say key documents are fetched through the hardened client and refused with `RemoteFetchError` or `KeyManagerError.missingPublicKey`.
+- [ ] **Step 3: Docs.**
+  - Under "Authentication and Cryptography", add `ActorKeyCache`.
+  - Add a "Remote Fetch" topic group with `fetchRemoteObject(uri:signer:deadline:)`, `fetchRemoteActor(uri:signer:deadline:)`, `RemoteObjectDocument`, `RemoteActorDocument` and `RemoteFetchError`.
 
-- [ ] **Step 4: Run.** CI Test job (`swift test --filter ActivityPubCoreTests`, `.github/workflows/test.yml:65`). Expected: green on Linux.
+- [ ] **Step 4: CI.** The Test job (`.github/workflows/test.yml:65`). **Expected:** green on Linux.
 
 - [ ] **Step 5: Commit.** `git commit -m "feat: signed, hardened quote-path fetches; drop the URLSession fetch"`
 
@@ -817,14 +2200,36 @@ func invalidActorDocument(_ body: String) async { /* getActor → .invalidDocume
 
 ### Task 15: Lambda build (C4) and the implementation PR
 
-**Files:** none in the repository except a throwaway commit (Step 2), reverted.
+**Files:** none in the repository, apart from the throwaway commit in Step 2, which is reverted.
 
-- [ ] **Step 1: C4, build half, before merge.** Mark the PR ready and add the `lambda-build` label. Expected: the Lambda Build job is green: `scripts/build-all-lambdas.sh` compiles every product in `swift-al2023:6.3` against the committed pins, "Package.resolved unchanged by the build" passes, and `scripts/verify-lambda-zips.sh` passes. This is the first AL2023 build that compiles and links AsyncHTTPClient into the handlers.
+- [ ] **Step 1: C4, the build half, before merge.**
+  - Mark the PR ready and add the `lambda-build` label.
+  - **Expected:** the Lambda Build job is green:
+    - `scripts/build-all-lambdas.sh` compiles every product in `swift-al2023:6.3` against the committed pins;
+    - the "Package.resolved unchanged by the build" step passes;
+    - `scripts/verify-lambda-zips.sh` passes.
 
-- [ ] **Step 2: Control for Step 1.** Push one commit that adds `config.notARealSetting = true` to `RemoteFetchClient.make`, re-add the `lambda-build` label, and see the job go red at the build phase with that line in the error. Revert with a new commit and re-run until green. This shows the job compiles the AHC-using file in the deploy image. Record both run URLs.
+- [ ] **Step 2: The control for Step 1.**
+  1. Push a commit that adds `config.notARealSetting = true` in `RemoteFetchClient.make`, and add the `lambda-build` label again.
+  2. **Expected:** the job goes red at the build phase, and the error names that line.
+  3. Revert with a new commit and run the job again until it is green.
+  - Record both run URLs.
 
-- [ ] **Step 3: PR description.** Include: the Task 1 version table; every negative control's observed output (Tasks 2–13), the construction control's run URL (Task 4) and both Lambda Build run URLs; "Refs FederatedActivityPublisher#280" and "Refs FederatedActivityPublisher#292" (no closing keywords; #280 closes only after Step 5); and draft release notes naming every behaviour change in §0.3 of the spec (quote path refusals and signing; inbound key fetch checks and the absolute deadline; typed documents with both consequences; no connection retries).
+- [ ] **Step 3: The PR description.** It includes:
+  - the answer to open question 1;
+  - the Task 1 tables: every pin that changed, and every cited line re-checked;
+  - what every negative control showed (Tasks 2–13), the construction control's run URL (Task 4), and both Lambda Build run URLs;
+  - "Refs FederatedActivityPublisher#280" and "Refs FederatedActivityPublisher#292", with no closing keywords;
+  - draft release notes naming every behaviour change in §0.3 of the spec:
+    - the quote path's new refusals, and its signing;
+    - the inbound key fetch's checks and its absolute deadline;
+    - typed documents, with both of their consequences;
+    - no connection retries.
 
-- [ ] **Step 4: Review.** Request review per the repository's process. Do not merge without it.
+- [ ] **Step 4: Review.** Request review the way the repository requires, and don't merge without it.
 
-- [ ] **Step 5: C4, runtime half, after merge.** The `deploy-stage` run for the merge commit builds and deploys every handler. Pass: on stage, an inbound delivery signed by an actor not cached in `REMOTE_ACTOR#` (for example a first Follow from a remote account) verifies; that key fetch ran on AHC in the deployed binary. Fail: a handler fails to start, or that key fetch fails with `transportFailed`. Fix forward. No prod release containing step 0 is cut until this has passed (spec, §0.2 "Release").
+- [ ] **Step 5: C4, the runtime half, after merge.**
+  - **What runs.** The `deploy-stage` run for the merge commit builds and deploys every handler.
+  - **Pass.** On stage, an inbound delivery verifies when it is signed by an actor not cached in `REMOTE_ACTOR#` (a first Follow from a remote account, for example). That key fetch ran on AHC in the deployed binary.
+  - **Fail.** A handler fails to start, or that key fetch fails with `transportFailed`. Fix forward.
+  - **Release.** No prod release containing step 0 is cut until this has passed (spec, §0.2, "Release").
