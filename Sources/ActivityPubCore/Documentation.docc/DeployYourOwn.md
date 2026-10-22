@@ -7,7 +7,7 @@ This guide walks through deploying your own instance of FederatedActivityPublish
 - **AWS account** with IAM credentials that can create CloudFormation stacks, Lambda functions, DynamoDB tables, S3 buckets, SQS queues, CloudFront distributions, Route 53 hosted zones, and ACM certificates
 - **A domain name** you control (e.g. `example.com`)
 - **GitHub account** (for forking the repo and running workflows)
-- **Docker** on the runner (GitHub-hosted runners have it already; a self-hosted runner needs it installed). The Lambda build runs in a Docker container, so the deploy runner needs no Swift toolchain. A local **Swift 6.3** toolchain is needed only to run the `ActivityProvisioner` CLI
+- **Docker** on the runner (GitHub-hosted runners have it already, and so do the maintainers' tart runners; any other self-hosted runner needs it installed). The Lambda build runs in a Docker container, so the deploy runner needs no Swift toolchain. A local **Swift 6.3** toolchain is needed only to run the `ActivityProvisioner` CLI
 
 ## Time estimate
 
@@ -37,7 +37,7 @@ Under **Settings > Secrets and variables > Actions > Variables**, add:
 | `SERVER_DOMAIN` | Your server domain (e.g. `example.com`) | Yes |
 | `HANDLE_DOMAIN` | Your handle domain (e.g. `example.com`) | Yes |
 | `AWS_REGION` | AWS region for deployments (e.g. `us-east-1`) | No (defaults to `us-east-1`) |
-| `RUNNER_LABELS_LINUX` | JSON array of runner labels (e.g. `["self-hosted", "linux"]`) | No (defaults to `ubuntu-latest`) |
+| `RUNNER_LABELS_LINUX` | JSON array of runner labels (e.g. `["self-hosted", "linux"]`) | No. Unset, the deploy, Lambda Build and Resolve Packages workflows use `ubuntu-24.04-arm`, and test, bootstrap, environment and integration-test workflows use `ubuntu-latest` |
 | `PROXY_DISTRIBUTION_ID` | CloudFront distribution ID for parent-domain proxy | No (only for split DNS) |
 
 For simple DNS mode (recommended), set `SERVER_DOMAIN` and `HANDLE_DOMAIN` to the same value.
