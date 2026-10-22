@@ -204,9 +204,16 @@ These inputs follow from the spec, but no test the spec lists exercises them. Th
   - **Expected:** one new pin, `swift-openapi-async-http-client` at `1.5.0` or later. Each new entry's pin is at or above its floor, and no pin is removed.
   - **Other pins can move,** because the script resolves from scratch. List every moved pin in the PR description. A moved pin is not a reason to stop, but every one is listed.
 
-- [ ] **Step 4: Re-check the cited lines.** For each third-party file:line cited in §0.1, §0.2 or the Testing section of the spec, or in "Changes since the spec" items 9 and 10 above, read the file at the pinned tag. Read it read-only, from `https://raw.githubusercontent.com/<org>/<repo>/<tag>/<path>`.
+- [ ] **Step 4: Re-check the cited lines.** For every third-party file:line in this plan, and every one cited in §0.1, §0.2 or the Testing section of the spec, read the file at the pinned tag. Read it read-only, from `https://raw.githubusercontent.com/<org>/<repo>/<tag>/<path>`.
+  - **This includes:**
+    - runtime `Base/OpenAPIMIMEType.swift`: `init?(_:)`, `==` (`:87-88`) and `evaluate` (`:206-251`, the `Dictionary(uniqueKeysWithValues:)` at `:239`);
+    - runtime `Conversion/Converter+Common.swift:25-76`, `Conversion/ServerVariable.swift:29-43`, `Conversion/URLExtensions.swift:33-36`, `Conversion/Converter+Client.swift:42` and `Interface/ClientTransport.swift:224-230`;
+    - AHC `HTTPClient.swift:1334-1343`, `HTTPHandler.swift:861-877`, `DeconstructedURL.swift:45-69` and `RequestValidation.swift:166-179`;
+    - the transport's `convertRequest`;
+    - the NIO, NIOSSL and NIOHTTP2 symbols listed under Task 3, Step 2;
+    - generator `Translator/CommonTypes/Constants.swift:27`.
   - Add a table to the PR description: `cited | pinned tag | holds (yes/no, new line)`.
-  - If any cited behaviour no longer holds, stop and report it.
+  - If any cited behaviour no longer holds, stop and report it. The exception is `evaluate`: if its trap is gone at the pinned version, record that, and keep Task 6's refusal anyway.
 
 - [ ] **Step 5: CI.** The Test job on the pushed commit. **Expected:** green.
 
@@ -662,6 +669,11 @@ enum Fixtures {
 - [ ] **Step 4: Fixture checks** (they go in `LegacyFetchControlTests.swift`).
 
 ```swift
+// LegacyFetchControlTests.swift
+import Foundation
+import Testing
+@testable import ActivityPubCore
+
 @Test func fixtureFourRedirectsAreServed() async throws {
     let d = try await TestServer.start { .document(contentType: activityJSON,
                                                    body: Fixtures.actor(id: Fixtures.selfURL($0))) }
@@ -940,6 +952,11 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
 
 ```swift
 // RemoteFetchClientTests.swift
+import Foundation
+import OpenAPIRuntime
+import Testing
+@testable import ActivityPubCore
+
 @Suite("Remote fetch client") struct RemoteFetchClientTests {
     @Test func clientConstructionCompletes() async throws {
         // The construction RemoteFetchClient.shared uses; it runs the try! on Servers.Server1.url().
@@ -976,6 +993,17 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
         await stopAll(a)
     }
 
+    @Test func boundCallConnects() async throws {                         // control
+        let a = try await noteServer()
+        try await withTestClient(makeTestClient(admitting: [a.port])) { client in
+            let context = RemoteFetchContext(target: URL(string: a.url("/n"))!, signer: nil,
+                                             deadline: .now + .seconds(10), schemePolicy: .allowingHTTP(ports: [a.port]))
+            _ = try await RemoteFetchContext.$current.withValue(context) { try await client.client.getObject() }
+            #expect(a.stats.connections == 1)
+        }
+        await stopAll(a)
+    }
+
     @Test func unparsableURIFailsWithInvalidURI() async throws {
         try await withTestClient(makeTestClient(admitting: [])) { client in
             #expect(await fetchError { _ = try await object("not a url", via: client) }?.name == "invalidURI")
@@ -1007,7 +1035,7 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
     - The client is `Client(serverURL: try! Servers.Server1.url(), transport: transport, middlewares: [middleware ?? RemoteFetchMiddleware(checks: checks)])`.
     - `static let shared = RemoteFetchClient.make()`.
     - `shutdown()` awaits `httpClient.shutdown()`.
-    - The file starts with `import AsyncHTTPClient`, `import NIOCore` and `import OpenAPIAsyncHTTPClient`. The hook's NIOCore calls resolve through that explicit import.
+    - The hook's NIOCore calls resolve through the file's explicit `import NIOCore` (import headers below).
   - **`RemoteFetchMiddleware.intercept`** (only this much in this task).
     - With no context bound, throw `.noContext`.
     - Otherwise build the hop's request as "Changes since the spec", item 9 describes:
@@ -1030,7 +1058,16 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
     - `language` is `contentMap`'s key when it has exactly one.
     - The actor's `publicKeyPem` comes from the object, or from the array's first entry.
     - The actor's `sharedInbox` is `endpoints.sharedInbox`.
-  - **Imports.** `RemoteFetchMiddleware.swift` starts with `import HTTPTypes` and `import OpenAPIRuntime` (Task 6 makes the second one `@_spi(Generated) import OpenAPIRuntime`).
+  - **Import header of each production file:**
+    - `RemoteFetchError.swift`: `import AsyncHTTPClient` (for `HTTPClientError`, rule 3), `import Foundation`, `import OpenAPIRuntime` (for `ClientError`).
+    - `RemoteFetchContext.swift`: `import Foundation`.
+    - `PrivateAddressCheck.swift` (Task 2): `import Foundation` (for `inet_pton`).
+    - `RemoteFetchClient.swift`: `import AsyncHTTPClient`, `import Foundation`, `import NIOCore`, `import OpenAPIAsyncHTTPClient`, `import OpenAPIRuntime`.
+    - `RemoteFetchMiddleware.swift`: `import Foundation`, `import HTTPTypes`, `import OpenAPIRuntime` (Task 6 changes the last to `@_spi(Generated) import OpenAPIRuntime`).
+    - `RemoteDocuments.swift`: `import Foundation`.
+    - `FetchRemoteObject.swift`: `import Foundation`, `import OpenAPIRuntime`.
+    - `ActorKeyCache.swift` (Task 12): `import Synchronization`.
+  - `TestSupport.swift` part 2 adds `import OpenAPIRuntime` to part 1's import list.
 
 - [ ] **Step 5: Run.** The same filter, locally and in CI. **Expected:** PASS.
 
@@ -1056,6 +1093,10 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
 - [ ] **Step 1: Write the failing tests.**
 
 ```swift
+import Foundation
+import Testing
+@testable import ActivityPubCore
+
 @Suite("Redirects and scheme") struct RedirectAndSchemeTests {
     @Test func threeRedirectsPass() async throws {
         let d = try await noteServer()
@@ -1203,9 +1244,20 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
 - [ ] **Step 1: Write the failing tests.**
 
 ```swift
+import AsyncHTTPClient
+import Foundation
+import OpenAPIRuntime
+import Testing
+@testable import ActivityPubCore
+
 @Suite("Status and content type") struct StatusAndContentTypeTests {
     static let refusedConcrete = ["text/html", "text/html; charset=utf-8", "application/ld+json",
         #"application/ld+json; profile="https://www.w3.org/ns/activitystreams https://example.org/p""#]
+    /// Parameter names that collide case-insensitively. Admitted, they would reach the runtime's
+    /// `OpenAPIMIMEType.evaluate`, which builds `Dictionary(uniqueKeysWithValues:)` from lowercased
+    /// names and traps on the duplicate (`Base/OpenAPIMIMEType.swift:239`, runtime 1.11.0).
+    static let collidingParameters = ["application/activity+json; a=1; A=2",
+                                      "application/activity+json; charset=utf-8; Charset=utf-8"]
     static let nonConcrete: [String?] = [nil, "", "*/*", "text/*", "html", "*/html"]
     static let accepted = ["application/activity+json; charset=utf-8",
         #"application/ld+json; profile="https://www.w3.org/ns/activitystreams""#, "Application/Activity+JSON"]
@@ -1261,6 +1313,21 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
         #expect(!RemoteFetchMiddleware.admitsContentType("Application/Activity+XML"))
     }
 
+    @Test(arguments: collidingParameters) func collidingParameterNamesRefusedByMiddleware(_ ct: String) async throws {
+        let s = try await noteServer(contentType: ct)
+        try await withTestClient(makeTestClient(admitting: [s.port])) { client in
+            let error = await fetchError { _ = try await object(s.url("/n"), via: client, http: [s.port]) }
+            guard case .contentType(let got)? = error else { Issue.record("\(String(describing: error))"); return }
+            #expect(got == ct)
+        }
+        await stopAll(s)
+    }
+
+    @Test func collidingParameterNamesAreNotAdmitted() {
+        for ct in Self.collidingParameters { #expect(!RemoteFetchMiddleware.admitsContentType(ct)) }
+        #expect(RemoteFetchMiddleware.admitsContentType("application/activity+json; a=1; b=2"))
+    }
+
     /// 404 with a valid document; 204 with an empty body (a 204 must not carry one).
     func statusServer(_ code: Int) async throws -> TestServer {
         code == 204 ? try await TestServer.start { _ in .document(contentType: activityJSON, body: "", status: 204) }
@@ -1298,16 +1365,20 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
 }
 ```
 
+  **No in-process negative control for the trap.** With the content-type check off, a colliding header would trap the test process in the runtime rather than fail a test, so `collidingParameterNamesRefusedByMiddleware` has no capability-removed control. Its receipt is the source read: `OpenAPIMIMEType.init?(_:)` dedups parameters on exact keys only (`Dictionary(_:uniquingKeysWith:)`), and `evaluate` then builds `Dictionary(uniqueKeysWithValues: receivedParameters.map { ($0.key.lowercased(), $0.value) })` (`Base/OpenAPIMIMEType.swift:239`, runtime 1.11.0; Task 1 re-checks it at the pinned version). `Converter.bestContentType` calls `evaluate` for every concrete received type (`Conversion/Converter+Common.swift:43-76`). The refusal test runs whether or not the trap still exists at the pinned version.
+
 - [ ] **Step 2: Run.** **Expected:** the tests that expect the middleware to refuse fail.
 
 - [ ] **Step 3: Implement** step 4 of "One middleware" in §0.1, and "Content type and status".
   - After the last hop, with `.status`, require 200, or throw `.status(code)`.
   - With `.contentType`:
     1. Parse `response.headerFields[.contentType]` with `OpenAPIMIMEType(_:)`, and require `.concrete`.
-    2. Match a declared type. Type and subtype compare case-insensitively.
-    3. Every declared parameter must be present. Its name compares case-insensitively and its value case-sensitively. The runtime keeps the quotes in parameter values, so the `profile` value is compared with its quotes.
-    4. Ignore extra received parameters.
+    2. Refuse when any two received parameter names are equal case-insensitively. Check with a `Set` of lowercased names, comparing its count with the parameter count.
+    3. Match a declared type. Type and subtype compare case-insensitively.
+    4. Every declared parameter must be present. Its name compares case-insensitively and its value case-sensitively. The runtime keeps the quotes in parameter values, so the `profile` value is compared with its quotes.
+    5. Ignore extra received parameters.
     - Otherwise throw `.contentType(raw)`.
+  - **No trap in FAP's own comparison.** The middleware never calls `Dictionary(uniqueKeysWithValues:)` and never compares two `OpenAPIMIMEType` values with `==`, which builds the same kind of dictionary (`Base/OpenAPIMIMEType.swift:87-88`, runtime 1.11.0). For each declared parameter it looks the name up by iterating the received parameters with a case-insensitive comparison.
 
 - [ ] **Step 4: Run.** **Expected:** PASS. Record the controls.
 
@@ -1330,6 +1401,12 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
 - [ ] **Step 1: Write the failing tests.**
 
 ```swift
+import AsyncHTTPClient
+import Foundation
+import Synchronization
+import Testing
+@testable import ActivityPubCore
+
 @Suite("Body and deadline", .serialized) struct BodyAndDeadlineTests {
     func sized(_ bytes: Int) async throws -> TestServer {
         try await TestServer.start { .document(contentType: activityJSON,
@@ -1433,9 +1510,19 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
         await stopAll(s)
     }
 
+    @Test func expiredDeadlineConnectsWithDeadlineOff() async throws {    // control
+        let s = try await sized(100)
+        try await withTestClient(makeTestClient(admitting: [s.port], checks: .all.subtracting(.deadline))) {
+            _ = try await object(s.url("/n"), via: $0, http: [s.port], deadline: .now - .seconds(1))
+            #expect(s.stats.connections == 1)
+        }
+        await stopAll(s)
+    }
+
+    /// The only test that exercises the head race (`withoutActuallyEscaping` + task group): the
+    /// server accepts the request and never answers.
     @Test func slowHeadFailsAtDeadline() async throws {
-        let barrier = TestBarrier()
-        let s = try await TestServer.start { _ in .holdUntil(barrier, then: .never) }
+        let s = try await TestServer.start { _ in .never }
         try await withTestClient(makeTestClient(admitting: [s.port])) { client in
             let start = ContinuousClock.now
             #expect(await fetchError {
@@ -1443,7 +1530,20 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
             }?.name == "deadlineExceeded")
             #expect(ContinuousClock.now - start < .milliseconds(2500))
         }
-        await barrier.open()
+        await stopAll(s)
+    }
+
+    @Test func slowHeadOutlivesDeadlineWithDeadlineOff() async throws {   // control
+        let s = try await TestServer.start { _ in .never }
+        try await withTestClient(makeTestClient(admitting: [s.port], checks: .all.subtracting(.deadline))) { client in
+            let start = ContinuousClock.now
+            let error = await fetchError {
+                _ = try await object(s.url("/n"), via: client, http: [s.port], deadline: start + .seconds(2))
+            }
+            // Ended by the transport's 10 s timeout (or the 10 s read timeout), not by the deadline.
+            #expect(error?.name != "deadlineExceeded")
+            #expect(ContinuousClock.now - start >= .milliseconds(2500))
+        }
         await stopAll(s)
     }
 
@@ -1463,7 +1563,7 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
 
 - [ ] **Step 3: Implement.**
   - **Before each hop.** With `.deadline`, if `ContinuousClock.now >= deadline`, throw `.deadlineExceeded` without calling `next`.
-  - **The race.** Inside `withoutActuallyEscaping(next)`, run `next` in a `withThrowingTaskGroup` against `try await Task.sleep(until: deadline, clock: .continuous)`. The first child to finish wins, and the group cancels the other. If the sleep finishes first, throw `.deadlineExceeded`.
+  - **The race** (with `.deadline` on; with it off, call `next` directly). Inside `withoutActuallyEscaping(next)`, run `next` in a `withThrowingTaskGroup` against `try await Task.sleep(until: deadline, clock: .continuous)`. The first child to finish wins, and the group cancels the other. If the sleep finishes first, throw `.deadlineExceeded`.
   - **Bodies.** Wrap the final body in `CappedBody`, and drain 3xx bodies through it as well.
 
 - [ ] **Step 4: Run.** **Expected:** PASS. Record the elapsed times.
@@ -1484,6 +1584,10 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
 - [ ] **Step 1: Write the tests.**
 
 ```swift
+import Foundation
+import Testing
+@testable import ActivityPubCore
+
 @Suite("Typed documents") struct DocumentTests {
     func serving(_ body: String) async throws -> TestServer {
         try await TestServer.start { _ in .document(contentType: activityJSON, body: body) }
@@ -1611,6 +1715,10 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
 - [ ] **Step 1: Write the failing tests.**
 
 ```swift
+import Foundation
+import Testing
+@testable import ActivityPubCore
+
 @Suite("Request target and signing") struct SigningAndTargetTests {
     static let signer = FetchSigningKey(keyId: "https://activity.example/users/memes#main-key",
                                         privateKeyPem: Fixtures.signingKey.pemRepresentation)
@@ -1645,6 +1753,16 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
         }
         #expect(a.stats.requests.count == 1)
         #expect(a.stats.requests.first?.target == "//other/x")
+        await stopAll(a)
+    }
+
+    @Test func doubleSlashPathChangesWithoutVerbatimTarget() async throws {   // control
+        let a = try await noteServer()
+        try await withTestClient(makeTestClient(admitting: [a.port], checks: .all.subtracting(.verbatimRequestTarget))) {
+            _ = try? await object(a.url("//other/x"), via: $0, http: [a.port])
+        }
+        #expect(a.stats.requests.count == 1)
+        #expect(a.stats.requests.first?.target != "//other/x")
         await stopAll(a)
     }
 
@@ -1726,6 +1844,13 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
   - **Server C.** It is never admitted.
 
 ```swift
+import AsyncHTTPClient
+import Foundation
+import NIOSSL
+import OpenAPIRuntime
+import Testing
+@testable import ActivityPubCore
+
 @Suite("Connection-level address check", .serialized) struct ConnectionTests {
     /// A admits; A redirects to C, which the policy refuses.
     func redirectToC(_ c: TestServer) async throws -> TestServer {
@@ -1867,9 +1992,13 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
 - [ ] **Step 1: Write the tests.**
 
 ```swift
+import Foundation
 import HTTPTypes
 import OpenAPIRuntime
 import Synchronization
+import Testing
+@testable import ActivityPubCore
+
 
 /// Control only: keeps the context in a stored property on the one shared middleware, so a
 /// later call's target overwrites an earlier call's.
@@ -2038,6 +2167,10 @@ import Testing
 - [ ] **Step 1: Write the failing tests.**
 
 ```swift
+import Foundation
+import Testing
+@testable import ActivityPubCore
+
 @Suite("Key fetch") struct KeyFetchTests {
     func actorServer() async throws -> TestServer {
         try await TestServer.start { .document(contentType: activityJSON, body: Fixtures.actor(id: Fixtures.selfURL($0))) }
