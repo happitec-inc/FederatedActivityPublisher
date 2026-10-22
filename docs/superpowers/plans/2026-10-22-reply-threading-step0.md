@@ -21,7 +21,7 @@ The middleware rewrites the placeholder origin to each hop and applies these con
 
 `fetchRemoteObject` and `fetchRemoteActor` bind a `@TaskLocal` context for each call and map the generated types to two public structs.
 
-**Tech Stack:** Swift 6.3, swift-openapi-generator and swift-openapi-runtime, swift-openapi-async-http-client, async-http-client, SwiftNIO (test target), Swift Testing.
+**Tech Stack:** Swift 6.3, swift-openapi-generator and swift-openapi-runtime, swift-openapi-async-http-client, async-http-client, swift-http-types, SwiftNIO (`NIOCore` in production; `NIOPosix`, `NIOSSL`, `NIOHTTP2` in tests), Swift Testing.
 
 **Spec:** `docs/superpowers/specs/2026-10-20-reply-threading-design.md`. The relevant parts are:
 - "Step 0 — Fetch hardening (security)" (§0.1–§0.3);
@@ -31,7 +31,7 @@ The middleware rewrites the placeholder origin to each hop and applies these con
 - "Guards and fallbacks";
 - decisions 14–17.
 
-Decisions 1–17 in the spec are settled, and this plan does not reopen them. Where the plan and the spec differ, "Changes since the spec" explains why. One question is open; it is set out before Task 4.
+Decisions 1–17 in the spec are settled, and this plan does not reopen them. Where the plan and the spec differ, "Changes since the spec" explains why.
 
 ## Global Constraints
 
@@ -42,9 +42,10 @@ Decisions 1–17 in the spec are settled, and this plan does not reopen them. Wh
   - `apple/swift-nio` `from: "2.97.1"`
   - `apple/swift-nio-ssl` `from: "2.36.1"`
   - `apple/swift-nio-http2` `from: "1.42.0"`
-  - Open question 1 may add `apple/swift-http-types`. Its answer decides that, not this plan.
+  - `apple/swift-http-types` `from: "1.8.0"`, the version `Package.resolved` pins at `6d02908`. It is resolved today only through other packages; `Package.swift` has no root entry for it.
 - **Raised floors.** `swift-openapi-generator` `from: "1.11.1"` and `swift-openapi-runtime` `from: "1.11.0"`. Today they are `1.6.0` and `1.7.0` (`Package.swift:36-37`).
-- **NIO products.** `NIOCore`, `NIOPosix`, `NIOSSL` and `NIOHTTP2` are test-target products (decision 16 in the spec). Whether `ActivityPubCore` declares `NIOCore` is open question 1.
+- **Products on `ActivityPubCore`.** `AsyncHTTPClient`, `OpenAPIRuntime`, `OpenAPIAsyncHTTPClient`, `NIOCore` (package `swift-nio`) and `HTTPTypes` (package `swift-http-types`). Each source file that uses `NIOCore` or `HTTPTypes` imports it explicitly.
+- **Test-only products.** `NIOPosix`, `NIOSSL` and `NIOHTTP2` are products of `ActivityPubCoreTests` only. No production target names them (decision 16 in the spec).
 - **Pins.** `Package.resolved` is regenerated only by the Resolve Packages workflow (the `resolve-packages` label), never with a local toolchain (`AGENTS.md:271`).
 - **Placeholder origin.** `https://remote-fetch.invalid` is written once, in the document's `servers:`. It never appears as a literal in Swift.
 - **Deadlines.** Each fetch at a non-search call site gets `.now + .seconds(10)` (a `ContinuousClock.Instant`), computed when that fetch is called.
@@ -104,17 +105,26 @@ These changes follow from the repository at `6d02908` (current `main`). None of 
 3. **TLS fixtures.**
    - **Why they are Swift literals.** `.gitignore:25-26` ignores `*.pem` and `*.key`, and no FAP target uses SwiftPM resources. So the CA certificate, the leaf certificate and the leaf private key are string literals in `TestOnlyTLS.swift`.
    - **The keys.** The CA's private key is deleted as soon as it has signed the leaf, so nothing else can ever be issued under the test CA. The leaf is limited to `IP:127.0.0.1, DNS:localhost`. Its key constant is named `loopbackLeafPrivateKeyPEM_testOnly`.
-4. **NIOCore and HTTPTypes in `ActivityPubCore`.** Open question 1 (before Task 4).
-5. **Line numbers.** The spec's FAP line references are at `8a78008`. This plan cites `6d02908`. For example:
+4. **NIOCore in `ActivityPubCore`.** Settled 2026-10-22: production code declares NIOCore and HTTPTypes explicitly.
+   - **Why it is needed.** The connection hook uses NIOCore API: `Channel.remoteAddress`, `SocketAddress.ipAddress`, `SocketAddress.port`, `Channel.close(promise:)`, `EventLoop.makeFailedFuture(_:)` and `makeSucceededVoidFuture()`.
+   - **What it means for the PR.** `ActivityPubCore` declares `.product(name: "NIOCore", package: "swift-nio")`, and `RemoteFetchClient.swift` has `import NIOCore`. The hook doesn't rely on transitive member visibility (SE-0444).
+   - **Relation to the spec.** This extends decision 16 in the spec, which approved the NIO products for the test target only. `NIOPosix`, `NIOSSL` and `NIOHTTP2` stay test-only.
+   - **What it adds to the build.** Nothing: `NIOCore` is already resolved and linked through `async-http-client`.
+5. **HTTPTypes in `ActivityPubCore`.** Part of the same settled point.
+   - **Why it is needed.** `RemoteFetchMiddleware` names `HTTPRequest`, `HTTPResponse` and `HTTPField`.
+   - **What it means for the PR.** `ActivityPubCore` declares `.product(name: "HTTPTypes", package: "swift-http-types")`, and the middleware's file has `import HTTPTypes`.
+   - **The package entry.** `Package.swift` has no root entry for `swift-http-types` at `6d02908`, where it is resolved only through `swift-openapi-runtime` and the transport. Task 1 adds one at `from: "1.8.0"`, the version pinned at `6d02908`.
+   - **Generated code.** Its own `import HTTPTypes` is covered by the same declaration.
+6. **Line numbers.** The spec's FAP line references are at `8a78008`. This plan cites `6d02908`. For example:
    - `KeyManager` is at `Sources/ActivityPubCore/Crypto/KeyManager.swift:27`.
    - `let keyManager = KeyManager()` is at `Sources/InboxHandler/main.swift:62`.
    - The QuoteRequest actor lookup is at `:1734`.
-6. **`actorDocumentRequest`.**
+7. **`actorDocumentRequest`.**
    - **What happens to it.** FederatedActivityPublisher#279's `KeyManager.actorDocumentRequest(url:signingKey:date:)` (`KeyManager.swift:85-117`) builds a `URLRequest`, and nothing sends one after step 0. Its path and query and its `host[:port]` derivation move to `HTTPSignature.signedGetHeaders(url:signer:date:)`. `SignedFetchTests` move to that function (Task 9).
    - **What kept the `Accept` header.** The deleted code also set `Accept: application/activity+json`. The generated client now sends `Accept` from the declared response types, and Task 4 asserts it.
    - **`KeyManagerError.invalidActorUri`.** The spec doesn't mention it, and it is kept.
-7. **`contentMap`.** "No schema sets `additionalProperties`" (§0.1) is about the object schemas, so that unknown fields are tolerated. `contentMap` is "an object whose values are strings", which is written `additionalProperties: {type: string}`. No schema uses `additionalProperties: false`.
-8. **The request target and the transport.**
+8. **`contentMap`.** "No schema sets `additionalProperties`" (§0.1) is about the object schemas, so that unknown fields are tolerated. `contentMap` is "an object whose values are strings", which is written `additionalProperties: {type: string}`. No schema uses `additionalProperties: false`.
+9. **The request target and the transport.**
    - **The transport code.** `AsyncHTTPClientTransport.convertRequest` (swift-openapi-async-http-client 1.5.0, `Sources/OpenAPIAsyncHTTPClient/AsyncHTTPClientTransport.swift`) does this:
      - `guard var baseUrlComponents = URLComponents(string: baseURL.absoluteString),`
      - `let requestUrlComponents = URLComponents(string: request.path ?? "")`
@@ -125,7 +135,7 @@ These changes follow from the repository at `6d02908` (current `main`). None of 
    - **What AHC does next.** It derives the target from the URL as `percentEncodedPath` plus `"?" + query` (`HTTPHandler.swift:861-877` and `DeconstructedURL.swift:45-69`, AHC 1.33.1).
    - **How it is checked.** Task 1 re-checks both files at the pinned versions, and the Task 9 tests measure the byte-for-byte result.
    - **Receipts.** The quoted lines come from a read of the file at tag 1.5.0. That package is not in any local checkout until Task 1 resolves it, so no line numbers are given.
-9. **`withoutActuallyEscaping`.** `ClientMiddleware.intercept` receives `next` as a non-escaping `@Sendable` closure (`Interface/ClientTransport.swift:224-230`, runtime 1.11.0). The deadline race runs `next` in a task group, so it uses `withoutActuallyEscaping(next)`. The group finishes before `intercept` returns, so the closure never outlives the call.
+10. **`withoutActuallyEscaping`.** `ClientMiddleware.intercept` receives `next` as a non-escaping `@Sendable` closure (`Interface/ClientTransport.swift:224-230`, runtime 1.11.0). The deadline race runs `next` in a task group, so it uses `withoutActuallyEscaping(next)`. The group finishes before `intercept` returns, so the closure never outlives the call.
 
 ## Known limitations
 
@@ -149,7 +159,7 @@ These inputs follow from the spec, but no test the spec lists exercises them. Th
 
 | File | Responsibility |
 |---|---|
-| `Package.swift`, `Package.resolved` | Dependencies, floors, products, generator plugin, the open question 1 switch |
+| `Package.swift`, `Package.resolved` | Dependencies, floors, products, generator plugin |
 | `Sources/ActivityPubCore/openapi.yaml`, `openapi-generator-config.yaml` | Remote-fetch document and generator config |
 | `Sources/ActivityPubCore/RemoteFetch/RemoteFetchError.swift` | `RemoteFetchError`, `UndocumentedStatusError`, the mapping order |
 | `Sources/ActivityPubCore/RemoteFetch/RemoteFetchContext.swift` | `RemoteFetchContext` (`@TaskLocal`), `SchemePolicy` |
@@ -176,13 +186,13 @@ These inputs follow from the spec, but no test the spec lists exercises them. Th
 
 **Interfaces:**
 - Produces these products:
-  - **`ActivityPubCore`:** `AsyncHTTPClient`, `OpenAPIRuntime`, `OpenAPIAsyncHTTPClient`.
-  - **`ActivityPubCoreTests`:** `AsyncHTTPClient`, `OpenAPIRuntime`, `NIOCore`, `NIOPosix`, `NIOSSL`, `NIOHTTP2`.
+  - **`ActivityPubCore`:** `AsyncHTTPClient`, `OpenAPIRuntime`, `OpenAPIAsyncHTTPClient`, `NIOCore`, `HTTPTypes`.
+  - **`ActivityPubCoreTests`:** `AsyncHTTPClient`, `OpenAPIRuntime`, `HTTPTypes`, `NIOCore`, `NIOPosix`, `NIOSSL`, `NIOHTTP2`.
 
 - [ ] **Step 1: Branch.** Run `git switch -c feat/fetch-hardening origin/main`.
 
 - [ ] **Step 2: Edit `Package.swift`.**
-  - Raise the two floors and add the five package entries (Global Constraints).
+  - Raise the two floors and add the six package entries (Global Constraints), including `.package(url: "https://github.com/apple/swift-http-types", from: "1.8.0")`.
   - Add the products listed under Interfaces.
   - Leave the generator plugin out for now: it fails while the target has no document (Task 4).
 
@@ -194,7 +204,7 @@ These inputs follow from the spec, but no test the spec lists exercises them. Th
   - **Expected:** one new pin, `swift-openapi-async-http-client` at `1.5.0` or later. Each new entry's pin is at or above its floor, and no pin is removed.
   - **Other pins can move,** because the script resolves from scratch. List every moved pin in the PR description. A moved pin is not a reason to stop, but every one is listed.
 
-- [ ] **Step 4: Re-check the cited lines.** For each third-party file:line cited in §0.1, §0.2 or the Testing section of the spec, or in "Changes since the spec" items 8 and 9 above, read the file at the pinned tag. Read it read-only, from `https://raw.githubusercontent.com/<org>/<repo>/<tag>/<path>`.
+- [ ] **Step 4: Re-check the cited lines.** For each third-party file:line cited in §0.1, §0.2 or the Testing section of the spec, or in "Changes since the spec" items 9 and 10 above, read the file at the pinned tag. Read it read-only, from `https://raw.githubusercontent.com/<org>/<repo>/<tag>/<path>`.
   - Add a table to the PR description: `cited | pinned tag | holds (yes/no, new line)`.
   - If any cited behaviour no longer holds, stop and report it.
 
@@ -695,43 +705,6 @@ enum Fixtures {
 
 ---
 
-### Open question 1 (answer before Task 4): how `ActivityPubCore` reaches NIOCore and HTTPTypes
-
-**The question.**
-- **NIOCore.** The connection hook uses this NIOCore API: `Channel.remoteAddress`, `SocketAddress.ipAddress`, `SocketAddress.port`, `Channel.close(promise:)`, `EventLoop.makeFailedFuture(_:)` and `makeSucceededVoidFuture()`.
-- **HTTPTypes.** `RemoteFetchMiddleware` names `HTTPRequest`, `HTTPResponse` and `HTTPField`, so its file needs `import HTTPTypes`.
-- **Today.** `ActivityPubCore` declares neither product. Both modules are already resolved and linked: NIOCore through `async-http-client`, HTTPTypes through `swift-openapi-runtime` and the transport.
-
-**(a) Declare both. Recommended.**
-- **What it adds:**
-  - `.product(name: "NIOCore", package: "swift-nio")` and `.product(name: "HTTPTypes", package: "swift-http-types")` on `ActivityPubCore`;
-  - a package entry `apple/swift-http-types` `from: "1.8.0"`, the version pinned at `6d02908`.
-- **Pros:**
-  - `Package.swift` states every module that production code uses.
-  - The code keeps compiling if `MemberImportVisibility` (SE-0444, opt-in today) is turned on, or becomes the default in a future language mode.
-  - Both modules are handled the same way.
-  - No new package is resolved.
-- **Cons:**
-  - It widens decision 16 in the spec, which approved the NIO products for the test target only.
-  - It adds one package entry.
-  - A production target names NIOCore.
-
-**(b) Reach both implicitly.**
-- **What it does.** No declaration. The middleware's `import HTTPTypes` is undeclared, as generated code's is: the existing `APIClient` target compiles generated code that imports `HTTPTypes` without the product (`Package.swift:240-249`; generator `Translator/CommonTypes/Constants.swift:27`). The hook uses NIOCore by member access, with no import. A member of a type from a module imported only transitively is in scope while `MemberImportVisibility` is off (SE-0444, "Implemented (Swift 6.1)", opt-in), and `Package.swift` sets no `swiftSettings`.
-- **Pros:**
-  - It keeps to the letter of decision 16.
-  - `Package.swift` doesn't change.
-- **Cons:**
-  - It hides a dependency on NIOCore's API.
-  - It breaks when `MemberImportVisibility` is enabled or becomes the default.
-  - It relies on SwiftPM accepting undeclared transitive imports.
-
-**How the answer lands.**
-- **The switch.** The answer is one line, the value of `declareTransitiveModules` (Task 4, Step 1). The Swift sources are the same under both answers: the middleware imports `HTTPTypes`, and the hook uses NIOCore by member access.
-- **If the answer is (a).** It adds a package entry, which changes `Package.resolved`'s origin hash. So under (a), Task 4 Step 1 also re-runs the resolve (Task 1, Step 3).
-
----
-
 ### Task 4: Document, generated client, client construction and the fetch pipe
 
 **Files:**
@@ -739,7 +712,7 @@ enum Fixtures {
   - `Sources/ActivityPubCore/openapi.yaml` and `openapi-generator-config.yaml`
   - `RemoteFetch/RemoteFetchError.swift`, `RemoteFetchContext.swift`, `RemoteFetchClient.swift`, `RemoteFetchMiddleware.swift`, `RemoteDocuments.swift`
 - Modify:
-  - `Package.swift`: the open question 1 switch; `plugins: [.plugin(name: "OpenAPIGenerator", package: "swift-openapi-generator")]` on `ActivityPubCore`.
+  - `Package.swift`: `plugins: [.plugin(name: "OpenAPIGenerator", package: "swift-openapi-generator")]` on `ActivityPubCore`.
   - `Sources/ActivityPubCore/FetchRemoteObject.swift`: add the new functions beside the legacy one, which Task 14 deletes.
 - Test: `Tests/ActivityPubCoreTests/RemoteFetch/RemoteFetchClientTests.swift`, and `TestSupport.swift` (part 2)
 
@@ -760,24 +733,7 @@ enum Fixtures {
     - the same pair for `fetchRemoteActor`, returning `RemoteActorDocument`.
   - **Test support,** defined in Step 2.
 
-- [ ] **Step 1: The open question 1 switch, the document and the config.** In `Package.swift`, above `let package`:
-
-```swift
-/// Open question 1 in docs/superpowers/plans/2026-10-22-reply-threading-step0.md: whether
-/// ActivityPubCore declares NIOCore and HTTPTypes, which it uses through async-http-client and
-/// swift-openapi-runtime. Set to the decided answer: true for (a), false for (b).
-let declareTransitiveModules = <answer>
-let transitiveModulePackages: [Package.Dependency] = declareTransitiveModules
-    ? [.package(url: "https://github.com/apple/swift-http-types", from: "1.8.0")] : []
-let transitiveModuleProducts: [Target.Dependency] = declareTransitiveModules
-    ? [.product(name: "NIOCore", package: "swift-nio"),
-       .product(name: "HTTPTypes", package: "swift-http-types")] : []
-let transitiveTestProducts: [Target.Dependency] = declareTransitiveModules
-    ? [.product(name: "HTTPTypes", package: "swift-http-types")] : []   // NIOCore is already a test product
-```
-
-  - Append `+ transitiveModulePackages` to `dependencies:`, `+ transitiveModuleProducts` to `ActivityPubCore.dependencies`, and `+ transitiveTestProducts` to `ActivityPubCoreTests.dependencies`.
-  - Under (a), re-run the resolve (Task 1, Step 3).
+- [ ] **Step 1: The document and the config.**
 
   `Sources/ActivityPubCore/openapi.yaml`:
 
@@ -1051,10 +1007,10 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
     - The client is `Client(serverURL: try! Servers.Server1.url(), transport: transport, middlewares: [middleware ?? RemoteFetchMiddleware(checks: checks)])`.
     - `static let shared = RemoteFetchClient.make()`.
     - `shutdown()` awaits `httpClient.shutdown()`.
-    - This file names no NIO type under either answer to open question 1.
+    - The file starts with `import AsyncHTTPClient`, `import NIOCore` and `import OpenAPIAsyncHTTPClient`. The hook's NIOCore calls resolve through that explicit import.
   - **`RemoteFetchMiddleware.intercept`** (only this much in this task).
     - With no context bound, throw `.noContext`.
-    - Otherwise build the hop's request as "Changes since the spec", item 8 describes:
+    - Otherwise build the hop's request as "Changes since the spec", item 9 describes:
       - `var parts = URLComponents(url: hop, resolvingAgainstBaseURL: false)!`
       - keep `let query = parts.percentEncodedQuery`
       - set `parts.percentEncodedQuery = nil` and `parts.fragment = nil`
@@ -1074,7 +1030,7 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
     - `language` is `contentMap`'s key when it has exactly one.
     - The actor's `publicKeyPem` comes from the object, or from the array's first entry.
     - The actor's `sharedInbox` is `endpoints.sharedInbox`.
-  - **Stop condition.** Under answer (b), if `RemoteFetchClient.swift` or `RemoteFetchMiddleware.swift` doesn't compile on Linux CI, stop and report. Do not change the answer yourself.
+  - **Imports.** `RemoteFetchMiddleware.swift` starts with `import HTTPTypes` and `import OpenAPIRuntime` (Task 6 makes the second one `@_spi(Generated) import OpenAPIRuntime`).
 
 - [ ] **Step 5: Run.** The same filter, locally and in CI. **Expected:** PASS.
 
@@ -1747,7 +1703,7 @@ func noteServer(contentType: String? = activityJSON, status: Int = 200) async th
   - **Signing.** On each hop with `context.signer`, set the `signedGetHeaders` output on `request.headerFields`, replacing what the previous hop set. The headers are `HTTPField.Name("Signature")!`, `"Date"` and `"Host"`.
   - **AHC and `Host`.** AHC keeps a `Host` header that is already present (`addHostIfNeeded`, `RequestValidation.swift:166-179`, AHC 1.33.1).
   - **Switches.** With `.resignEachHop` off, reuse hop 0's headers. With `.verbatimRequestTarget` off, set the base URL to the hop's origin only and `request.path` to `try Converter(configuration: .init()).renderedPath(template: "/{}", parameters: [pathAndQuery])` (`Conversion/Converter+Client.swift:42`, runtime 1.11.0), which is what a `/{path}` template produces.
-  - **If `pathStartingWithDoubleSlashIsSentVerbatim` fails,** the transport or AHC rewrites the target under the item 8 mechanism. Stop and report with the recorded target. Do not weaken the assertion.
+  - **If `pathStartingWithDoubleSlashIsSentVerbatim` fails,** the transport or AHC rewrites the target under the item 9 mechanism. Stop and report with the recorded target. Do not weaken the assertion.
 
 - [ ] **Step 4: Run** the new tests and `SignedFetchTests`. **Expected:** PASS.
 
@@ -1975,7 +1931,7 @@ final class StoredTargetMiddleware: ClientMiddleware, Sendable {
 }
 ```
 
-  `StoredTargetMiddleware` names HTTPTypes types in the test target. The test target reaches `HTTPTypes` the same way `ActivityPubCore` does: through `transitiveTestProducts` under answer (a), or by an undeclared import under answer (b) (Task 4, Step 1).
+  `StoredTargetMiddleware` names HTTPTypes types. The test target declares the `HTTPTypes` product (Task 1).
 
 - [ ] **Step 2: Run.** **Expected:** PASS, and the control misroutes. This test is the measurement for "TaskLocal isolation on one client" in the spec's "Unverified" section.
 
@@ -2216,7 +2172,6 @@ import Testing
   - Record both run URLs.
 
 - [ ] **Step 3: The PR description.** It includes:
-  - the answer to open question 1;
   - the Task 1 tables: every pin that changed, and every cited line re-checked;
   - what every negative control showed (Tasks 2–13), the construction control's run URL (Task 4), and both Lambda Build run URLs;
   - "Refs FederatedActivityPublisher#280" and "Refs FederatedActivityPublisher#292", with no closing keywords;
