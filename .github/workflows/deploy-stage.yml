@@ -1,5 +1,5 @@
 name: Deploy Stage
-run-name: "Deploy Stage (${{ github.event.head_commit.message }})"
+run-name: "Deploy Stage (${{ github.sha }})"
 
 on:
   push:
