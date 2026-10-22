@@ -85,9 +85,7 @@ docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
 # Build all Lambda zips: one swift build for every product, then one zip per
 # handler in activity-app/functions/template.yaml, written to
 # .build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/{Target}/{Target}.zip
-docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp/home \
-  -v "$PWD:/workspace" -w /workspace swift-al2023:6.3 \
-  bash scripts/build-all-lambdas.sh
+scripts/in-build-image.sh scripts/build-all-lambdas.sh
 
 # Deploy to stage
 sam deploy \

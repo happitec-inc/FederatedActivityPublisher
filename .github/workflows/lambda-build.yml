@@ -3,23 +3,27 @@ name: Lambda Build
 # Builds every deployed Lambda the same way the deploy workflows do
 # (scripts/build-all-lambdas.sh in the AL2023 image) and checks the zips.
 # No AWS credentials: this job never deploys anything.
+#
+# On demand only (Erin's call, 2026-10-21). Run it by adding the
+# `lambda-build` label to a PR, or with workflow_dispatch once this file is on
+# the default branch. It never runs on ordinary pushes.
 on:
   pull_request:
-    branches: [main]
-    paths:
-      - 'Package.swift'
-      - 'Package.resolved'
-      - 'scripts/**'
-      - 'docker/**'
-      - '.github/workflows/**'
-      - 'activity-app/functions/template.yaml'
+    types: [labeled]
   workflow_dispatch:
+
+# The label is part of the group so that adding some other label to the PR
+# (which also fires `labeled`) can't cancel a running build.
+concurrency:
+  group: lambda-build-${{ github.ref }}-${{ github.event.label.name || github.event_name }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   lambda-build:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'lambda-build'
     runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-24.04-arm' }}
     steps:
       - name: Remove root-owned build output (self-hosted)
@@ -35,23 +39,6 @@ jobs:
         if: ${{ vars.RUNNER_LABELS_LINUX }}
         run: sudo git clean -fdx
 
-      - name: Install Docker
-        run: |
-          if command -v docker &>/dev/null; then
-            echo "Docker already installed"
-          else
-            curl -fsSL https://get.docker.com | sudo sh
-          fi
-          sudo chmod 666 /var/run/docker.sock
-          docker --version
-
-      - name: Runner resources
-        run: |
-          echo "nproc: $(nproc)"
-          free -g
-          docker info --format 'docker NCPU={{.NCPU}} MemTotal={{.MemTotal}} bytes'
-          df -h .
-
       - name: Cache Docker image
         uses: actions/cache@v5
         with:
@@ -59,58 +46,31 @@ jobs:
           key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
 
       - name: Load or build AL2023 Swift Docker image
-        run: |
-          if [ -f /tmp/docker-image.tar ]; then
-            echo "Loading cached Docker image"
-            docker load < /tmp/docker-image.tar
-          else
-            echo "Building Docker image"
-            docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
-            docker save swift-al2023:6.3 > /tmp/docker-image.tar
-          fi
+        run: bash scripts/load-build-image.sh
 
-      # Restore only: a PR reads the deploy cache for the same Package.resolved
-      # and Dockerfile, but never saves, so PR runs can't evict it.
+      - name: Runner resources
+        run: nproc; free -g; docker info --format 'docker NCPU={{.NCPU}} MemTotal={{.MemTotal}}'; df -h .
+
+      # Restore only: a PR reads the deploy's Swift build cache for the same
+      # Package.resolved and Dockerfile, but never saves one.
       - name: Compute Swift build cache key
         id: swift-cache
-        run: |
-          HASH=$(cat Package.resolved docker/Dockerfile.al2023-swift | sha256sum | cut -c1-16)
-          echo "prefix=swift-al2023-$HASH" >> "$GITHUB_OUTPUT"
+        run: echo "prefix=swift-al2023-$(cat Package.resolved docker/Dockerfile.al2023-swift | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Restore Swift build cache
-        id: restore
         uses: happitec-inc/public-actions/swift-build-cache-restore@main
         with:
           key-prefix: ${{ steps.swift-cache.outputs.prefix }}
 
       - name: Build all Lambda zips
-        run: |
-          echo "cache key prefix: ${{ steps.swift-cache.outputs.prefix }} (exact hit: ${{ steps.restore.outputs.cache-hit || 'false' }})"
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp/home \
-            -v "$(pwd):/workspace" \
-            -w /workspace \
-            swift-al2023:6.3 \
-            bash scripts/build-all-lambdas.sh
+        run: scripts/in-build-image.sh scripts/build-all-lambdas.sh
+
+      - name: Package.resolved unchanged by the build
+        run: git diff --exit-code Package.resolved
 
       - name: Verify Lambda zips
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp/home \
-            -v "$(pwd):/workspace" \
-            -w /workspace \
-            swift-al2023:6.3 \
-            bash scripts/verify-lambda-zips.sh
+        run: scripts/in-build-image.sh scripts/verify-lambda-zips.sh
 
-      - name: Check .build ownership
+      - name: No root-owned files in .build
         if: always()
-        run: |
-          ROOT_OWNED=$(find .build -maxdepth 3 -user root 2>/dev/null | head -5)
-          if [ -n "$ROOT_OWNED" ]; then
-            echo "Root-owned files in .build:"
-            echo "$ROOT_OWNED"
-            exit 1
-          fi
-          echo ".build is owned by $(id -un)"
+        run: test -z "$(find .build -user root -print -quit 2>/dev/null)" || { find .build -user root | head; exit 1; }

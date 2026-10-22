@@ -131,9 +131,7 @@ jobs:
       # fast deploy starts from the last full build's .build.
       - name: Compute Swift build cache key
         id: swift-cache
-        run: |
-          HASH=$(cat Package.resolved docker/Dockerfile.al2023-swift | sha256sum | cut -c1-16)
-          echo "prefix=swift-al2023-$HASH" >> "$GITHUB_OUTPUT"
+        run: echo "prefix=swift-al2023-$(cat Package.resolved docker/Dockerfile.al2023-swift | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Restore Swift build cache
         uses: happitec-inc/public-actions/swift-build-cache-restore@main
@@ -304,9 +302,7 @@ jobs:
       # before the build, so restore and save use the same one.
       - name: Compute Swift build cache key
         id: swift-cache
-        run: |
-          HASH=$(cat Package.resolved docker/Dockerfile.al2023-swift | sha256sum | cut -c1-16)
-          echo "prefix=swift-al2023-$HASH" >> "$GITHUB_OUTPUT"
+        run: echo "prefix=swift-al2023-$(cat Package.resolved docker/Dockerfile.al2023-swift | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Restore Swift build cache
         uses: happitec-inc/public-actions/swift-build-cache-restore@main
@@ -317,14 +313,7 @@ jobs:
       # for every product, then zip the template's handlers with the OpenSSL
       # libs. Runs as the runner uid so .build is never root-owned.
       - name: Build Lambda zips
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp/home \
-            -v "$(pwd):/workspace" \
-            -w /workspace \
-            swift-al2023:6.3 \
-            bash scripts/build-all-lambdas.sh
+        run: scripts/in-build-image.sh scripts/build-all-lambdas.sh
 
       - name: Save Swift build cache
         if: always()

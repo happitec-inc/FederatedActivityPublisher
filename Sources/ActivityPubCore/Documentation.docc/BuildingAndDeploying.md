@@ -31,7 +31,7 @@ After either path completes, integration tests run automatically in a Docker con
 2. Run `scripts/substitute-variables.sh` to replace domain placeholders in templates
 3. Build or reuse a cached Docker image from `docker/Dockerfile.al2023-swift`
 4. Restore the Swift build cache (keyed on `Package.resolved` and the Dockerfile)
-5. Run `scripts/build-all-lambdas.sh` in one `docker run`, as the runner's uid: one `swift build` for every product, then one zip per deployed handler with `libcrypto.so.3` and `libssl.so.3` in `lib/`
+5. Run `scripts/build-all-lambdas.sh` in one container, as the runner's uid (through `scripts/in-build-image.sh`): one `swift build` for every product, then one zip per deployed handler with `libcrypto.so.3` and `libssl.so.3` in `lib/`
 6. Deploy with `sam deploy` using `CAPABILITY_IAM CAPABILITY_AUTO_EXPAND`
 7. Upload frontend assets to S3 with immutable cache headers
 8. Run integration tests in Docker against the deployed stack
@@ -123,16 +123,25 @@ Runs the `ActivityPubCoreTests` unit test suite on every pull request.
 
 ### Lambda Build (`lambda-build.yml`)
 
-Runs the full Lambda build on a pull request, without AWS credentials, and checks the zips. It runs `scripts/build-all-lambdas.sh` in the AL2023 image and then `scripts/verify-lambda-zips.sh`, which asserts that:
+Runs the full Lambda build on demand, without AWS credentials, and checks the zips. It runs `scripts/build-all-lambdas.sh` in the AL2023 image, checks with `git diff --exit-code Package.resolved` that the build did not change the pins, and then runs `scripts/verify-lambda-zips.sh`, which asserts that:
 
 - the produced zips are exactly the `CodeUri` zips in `activity-app/functions/template.yaml`, and there is no `ActivityProvisioner` zip;
 - each zip has an executable `bootstrap` (an ELF binary for the runner's architecture with no `libswiftCore.so` dependency) and `lib/libcrypto.so.3` plus `lib/libssl.so.3`.
 
-The job also logs the runner's CPU count, memory and Docker limits. It restores the deploy build cache but never saves one.
+The job also logs the runner's CPU count, memory and Docker limits, and fails if anything in `.build` is root-owned. It restores the deploy's Swift build cache but never saves one. (It does save the Docker image tarball, under the same key the deploy workflows use.)
 
-**Triggers:**
-- Pull request targeting `main` that changes `Package.swift`, `Package.resolved`, `scripts/**`, `docker/**`, `.github/workflows/**` or `activity-app/functions/template.yaml`
-- Manual dispatch
+It never runs on its own; this is an explicit-invocation check, and a deploy fails on the same problems anyway. A run on the single self-hosted runner takes about 14 minutes cold.
+
+**How to run it:**
+- Add the `lambda-build` label to a pull request. To run it again, remove the label and add it back.
+- Or run the workflow by hand (`workflow_dispatch`) once `lambda-build.yml` is on the default branch.
+
+### Resolve Packages (`resolve-packages.yml`)
+
+Regenerates `Package.resolved` from scratch with the deploy toolchain (`scripts/resolve-packages.sh` in `swift-al2023:6.3`), prints the pins and uploads the file as the `Package.resolved` artifact. No AWS credentials. This is the way to update the pinned dependencies; see "Pinned dependencies" below.
+
+**How to run it:**
+- Add the `resolve-packages` label to a pull request, or run the workflow by hand (`workflow_dispatch`) once it is on the default branch.
 
 ### Run Integration Tests (`run-integration-tests.yml`)
 
@@ -257,7 +266,7 @@ Both deployment workflows cache the Docker build image using GitHub Actions `act
 
 ### Swift Build Caching
 
-The `.build` directory is cached across workflow runs. The key combines a hash of the committed `Package.resolved` and `docker/Dockerfile.al2023-swift` with the commit SHA, and a run restores the newest cache with the same `Package.resolved` and Dockerfile. Because dependency versions are pinned, an unchanged `Package.resolved` means the restored dependency builds are still valid. The full and fast paths share the key.
+The `.build` directory is cached across workflow runs by `happitec-inc/public-actions` `swift-build-cache-restore` and `swift-build-cache-save`. The workflows pass a key prefix of `swift-al2023-` plus the first 16 hex digits of a SHA-256 over the committed `Package.resolved` and `docker/Dockerfile.al2023-swift`. The actions then build the full key as `<prefix>-<hashFiles('Package.swift')>-<commit SHA>`. A restore tries the exact key, then the newest cache with the same prefix and `Package.swift` hash (`<prefix>-<Package.swift hash>-`), then the newest cache with the same prefix (`<prefix>-`), so a `Package.swift` change still starts from a cache with the same pins and Dockerfile. Because dependency versions are pinned, a matching prefix means the restored dependency builds are still valid. The full and fast paths share the prefix.
 
 The full build keeps dependency clones and the SwiftPM manifest cache inside `.build` (`--disable-dependency-cache --manifest-cache local`), so they are cached with it, and the container runs as the runner's uid so the cached files are never root-owned.
 
@@ -320,15 +329,15 @@ This image is based on Amazon Linux 2023 with Swift 6.3 and all required build d
 
 ```bash
 docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
-docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp/home \
-  -v "$PWD:/workspace" -w /workspace swift-al2023:6.3 \
-  bash scripts/build-all-lambdas.sh
+scripts/in-build-image.sh scripts/build-all-lambdas.sh
 ```
+
+`scripts/in-build-image.sh <script> [args]` holds the `docker run` invocation every workflow uses: the image, the workspace mount, the caller's uid and gid (so `.build` is never root-owned), and a writable `HOME`.
 
 The script:
 
-1. Resolves the package once, against the committed `Package.resolved` (`--force-resolved-versions`, so a stale file fails the build instead of being updated).
-2. Runs one `swift build -c release --static-swift-stdlib -Xlinker -s` with no `--product`, so every product compiles and links in a single parallel build graph. Set `SWIFT_BUILD_JOBS` to cap the job count if parallel links run short of memory.
+1. Resolves the package once, against the committed `Package.resolved` (`--force-resolved-versions`, so SwiftPM uses the pinned versions instead of resolving again).
+2. Runs one `swift build -c release --static-swift-stdlib -Xlinker -s` with no `--product`, so every product compiles and links in a single parallel build graph.
 3. Reads the deployed handlers from the `CodeUri` entries in `activity-app/functions/template.yaml`, so there is no hand-maintained list. `ActivityProvisioner` is built (it is a product) but never zipped.
 4. Stages each handler as `bootstrap` plus `lib/libcrypto.so.3` and `lib/libssl.so.3`, and zips it once to `.build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager/{Target}/{Target}.zip`, the path the template's `CodeUri` expects. The zips are written in parallel.
 5. Fails if any expected zip is missing, and prints timings for each phase.
@@ -339,7 +348,17 @@ The fast path (`scripts/build-selective.sh`) builds only the changed handlers in
 
 ### Pinned dependencies
 
-`Package.resolved` is committed. Every build resolves to exactly the pinned versions, so a new aws-sdk-swift or smithy-swift release does not change what gets compiled until someone updates the file. To pick up new versions, run `swift package update` with Swift 6.3 and commit the new `Package.resolved`; `deploy-stage.yml` treats a `Package.resolved` change as a full build.
+`Package.resolved` is committed. Every build uses exactly the pinned versions, so a new aws-sdk-swift or smithy-swift release does not change what gets compiled until someone updates the file.
+
+To update the pins:
+
+1. Add the `resolve-packages` label to a pull request (or run the `Resolve Packages` workflow by hand).
+2. Download the result with `gh run download <run-id> -n Package.resolved`.
+3. Review the diff, then commit it. `deploy-stage.yml` treats a `Package.resolved` change as a full build, and the `lambda-build` label checks it before merge.
+
+Generate the file only with the deploy toolchain. A different Swift version reads different version-specific manifests: Swift 6.4 reads swift-aws-lambda-runtime's `Package@swift-6.4.swift`, which adds soto-core, so a 6.4-generated file pins three packages the 6.3 build never uses.
+
+`--force-resolved-versions` does not catch that. It stops the build from re-resolving and changing versions, but it does not check that the pin set matches what this toolchain would resolve; extra pins are accepted (and fetched). The `git diff --exit-code Package.resolved` step in the `lambda-build` check confirms only that the build left the file alone.
 
 ## Topics
 

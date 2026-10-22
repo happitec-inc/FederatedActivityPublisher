@@ -2,10 +2,10 @@
 # verify-lambda-zips.sh
 #
 # Checks the output of scripts/build-all-lambdas.sh. Runs inside the
-# swift-al2023:6.3 image (it needs unzip and readelf), from the repo root:
+# swift-al2023:6.3 image (it needs unzip and readelf).
 #
-#   docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" \
-#     -w /workspace swift-al2023:6.3 bash scripts/verify-lambda-zips.sh
+# Usage:
+#   scripts/in-build-image.sh scripts/verify-lambda-zips.sh
 #
 # Asserts:
 #   - the set of produced zips equals the set of CodeUri zips in
@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-TEMPLATE="${TEMPLATE:-activity-app/functions/template.yaml}"
+TEMPLATE="activity-app/functions/template.yaml"
 OUTPUT_BASE=".build/plugins/AWSLambdaPackager/outputs/AWSLambdaPackager"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
