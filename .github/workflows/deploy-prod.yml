@@ -43,16 +43,6 @@ jobs:
           HANDLE_DOMAIN="${{ vars.HANDLE_DOMAIN }}" \
           bash scripts/substitute-variables.sh
 
-      - name: Install Docker
-        run: |
-          if command -v docker &>/dev/null; then
-            echo "Docker already installed"
-          else
-            curl -fsSL https://get.docker.com | sudo sh
-          fi
-          sudo chmod 666 /var/run/docker.sock
-          docker --version
-
       - name: Cache Docker image
         uses: actions/cache@v5
         with:
@@ -60,15 +50,7 @@ jobs:
           key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
 
       - name: Load or build AL2023 Swift Docker image
-        run: |
-          if [ -f /tmp/docker-image.tar ]; then
-            echo "Loading cached Docker image"
-            docker load < /tmp/docker-image.tar
-          else
-            echo "Building Docker image"
-            docker build -t swift-al2023:6.3 -f docker/Dockerfile.al2023-swift .
-            docker save swift-al2023:6.3 > /tmp/docker-image.tar
-          fi
+        run: bash scripts/load-build-image.sh
 
       # The build cache is keyed on the committed Package.resolved plus the
       # build image's Dockerfile: a restored .build only helps when both the

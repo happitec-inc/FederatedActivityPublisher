@@ -7,7 +7,7 @@ This guide walks through deploying your own instance of FederatedActivityPublish
 - **AWS account** with IAM credentials that can create CloudFormation stacks, Lambda functions, DynamoDB tables, S3 buckets, SQS queues, CloudFront distributions, Route 53 hosted zones, and ACM certificates
 - **A domain name** you control (e.g. `example.com`)
 - **GitHub account** (for forking the repo and running workflows)
-- **Swift 6.3** and **Docker** (only if using self-hosted runners; GitHub-hosted `ubuntu-latest` runners install these automatically)
+- **Docker** on the runner (GitHub-hosted runners have it already; a self-hosted runner needs it installed). The Lambda build runs in a Docker container, so the deploy runner needs no Swift toolchain. A local **Swift 6.3** toolchain is needed only to run the `ActivityProvisioner` CLI
 
 ## Time estimate
 
@@ -195,5 +195,5 @@ The certificate validates via DNS records in the hosted zone created by the same
 
 ### swift build fails on GitHub-hosted runner
 
-- GitHub-hosted `ubuntu-latest` does not have Swift pre-installed. The workflow installs it, but this adds ~2 minutes.
+- The Lambda build runs inside the `swift-al2023:6.3` Docker image, so the runner needs Docker but not Swift. Run the `lambda-build` check on a PR (see <doc:BuildingAndDeploying>) to reproduce a build failure without deploying.
 - If disk space is an issue, consider self-hosted runners (see README.md for runner label configuration).

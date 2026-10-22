@@ -5,7 +5,7 @@ Guide for creating and managing bot accounts on your ActivityPub server.
 ## Prerequisites
 
 - AWS CLI configured with access to your AWS region (default: `us-east-1`)
-- The `ActivityProvisioner` CLI built (or access to the Linux runner VM)
+- The `ActivityProvisioner` CLI built locally (Swift 6.3, macOS or Linux). Provisioning never runs in CI
 - Bearer token for the account you want to post as (stored in DynamoDB, created during provisioning)
 
 ## Creating a New Account
