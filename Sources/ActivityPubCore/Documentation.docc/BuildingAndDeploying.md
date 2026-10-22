@@ -27,7 +27,7 @@ After either path completes, integration tests run automatically in a Docker con
 - `AWS_SECRET_ACCESS_KEY` -- IAM secret key for deployment
 
 **Key steps (full path):**
-1. Clean workspace (runs whenever `RUNNER_LABELS_LINUX` is set; a no-op on a fresh GitHub-hosted VM, and needed on a self-hosted runner)
+1. Clean workspace (runs whenever `RUNNER_LABELS_LINUX` is set; harmless on a fresh ephemeral VM)
 2. Run `scripts/substitute-variables.sh` to replace domain placeholders in templates
 3. Build or reuse a cached Docker image from `docker/Dockerfile.al2023-swift`
 4. Restore the Swift build cache (keyed on `Package.resolved` and the Dockerfile)
@@ -130,7 +130,7 @@ Runs the full Lambda build on demand, without AWS credentials, and checks the zi
 
 The job also logs the runner's CPU count, memory, Docker limits and free disk, and fails if anything in `.build` is root-owned. It restores the deploy's Swift build cache and Docker image cache read-only (`actions/cache/restore`), so it never saves a cache.
 
-It never runs on its own; this is an explicit-invocation check, and a deploy fails on the same problems anyway. On a GitHub-hosted `ubuntu-24.04-arm` runner, a cold run takes about 14 minutes.
+It never runs on its own; this is an explicit-invocation check, and a deploy fails on the same problems anyway. On the fleet's ephemeral tart runners (4 CPUs, 15.6 GiB), a cold run with no image or Swift cache took 10m24s for the job: resolve 177s, build 261s, zip 11s (run 39706774240).
 
 **How to run it:**
 - Add the `lambda-build` label to a pull request. To run it again, remove the label and add it back.
@@ -233,7 +233,7 @@ Set these repository variables so the CI/CD workflows can reference them:
 | `CLIENT_API_DOMAIN_STAGE` | Execute-api domain for stage Client API Gateway (enables same-origin routing) | `abc123.execute-api.us-east-1.amazonaws.com` |
 | `CLIENT_API_DOMAIN_PROD` | Execute-api domain for prod Client API Gateway | `def456.execute-api.us-east-1.amazonaws.com` |
 | `AWS_REGION` | AWS region for all deployments (default: `us-east-1`) | `us-east-1` |
-| `RUNNER_LABELS_LINUX` | JSON array of runner labels for Linux jobs (default: see Runner Configuration) | `["ubuntu-24.04-arm"]` |
+| `RUNNER_LABELS_LINUX` | JSON array of runner labels for Linux jobs (default: see Runner Configuration) | `["self-hosted", "Linux", "ARM64", "tart"]` |
 | `RUNNER_LABELS_MACOS` | JSON array of runner labels for macOS jobs (default: `macos-26`) | `["macos-26"]` |
 
 ## CI/CD Pipeline
@@ -288,7 +288,11 @@ CloudFront caches expire based on TTL values configured in the CDN stack's cache
 
 ## Runner Configuration
 
-The workflows pick their runner from repository variables, so you can change runners without editing workflow files. This project's own deployment runs every Linux job on GitHub-hosted `ubuntu-24.04-arm` runners, with `RUNNER_LABELS_LINUX` set to `["ubuntu-24.04-arm"]`, and has no self-hosted runners. The Lambdas are arm64, so an arm runner builds them natively.
+The workflows pick their runner from repository variables, so you can change runners without editing workflow files. This project's own Linux jobs run on the maintainers' ephemeral self-hosted tart runners: `RUNNER_LABELS_LINUX` is set to `["self-hosted", "Linux", "ARM64", "tart"]`, the same value as the organization's `RUNNER_LINUX` variable. The repository variable doesn't follow the org variable on its own, so if the org value changes, update the repository variable by hand to match. Each job gets a fresh ARM64 VM with Docker preinstalled, and the Lambdas are arm64, so the runner builds them natively.
+
+In a fork, `RUNNER_LABELS_LINUX` is normally unset, so every job falls back to a GitHub-hosted label (see the table below).
+
+Workflows on pull requests from external contributors, including forks, don't start until a maintainer approves them.
 
 ### Configuration Variables
 
@@ -297,17 +301,17 @@ The workflows pick their runner from repository variables, so you can change run
 | `RUNNER_LABELS_LINUX` | JSON array of runner labels for Linux jobs | `ubuntu-24.04-arm` in `deploy-stage.yml`, `deploy-prod.yml`, `lambda-build.yml` and `resolve-packages.yml`; `ubuntu-latest` in `test.yml`, `bootstrap.yml`, `environment.yml` and `run-integration-tests.yml` |
 | `RUNNER_LABELS_MACOS` | JSON array of runner labels for macOS jobs | `macos-26` |
 
-Set them under **Settings > Variables > Actions**. For example, `RUNNER_LABELS_LINUX` = `["ubuntu-24.04-arm"]` for GitHub-hosted arm runners, or `["self-hosted", "linux"]` for your own.
+Set them under **Settings > Variables > Actions**. For example, `RUNNER_LABELS_LINUX` = `["ubuntu-24.04-arm"]` for GitHub-hosted arm runners, or `["self-hosted", "linux"]` for your own. Leave it unset to use the fallback labels.
 
 ### Workspace Cleanup Steps
 
-The deploy jobs and `test.yml` have cleanup steps gated on `if: vars.RUNNER_LABELS_LINUX`. They run whenever the variable is set, whatever runner it names:
-- Workspace cleaning (`sudo rm -rf .build/`, then checkout with `clean: false`, then `sudo git clean -fdx`)
-- Docker container and builder pruning (deploy jobs)
+Four workflows have a "Clean workspace (self-hosted)" step gated on `if: vars.RUNNER_LABELS_LINUX`: the full-path `build` job in `deploy-stage.yml`, `deploy-prod.yml`, `test.yml` and `run-integration-tests.yml`. The step runs before the checkout, and that checkout uses `clean: false`. It runs whenever the variable is set, whatever runner it names:
+- `sudo rm -rf .build/` and `sudo git clean -fdx -e .git`
+- `docker container prune` and `docker builder prune` (the two deploy jobs only)
 
-On a GitHub-hosted runner each job starts on a fresh VM, so these steps find nothing to remove and finish in seconds. They matter only if you point `RUNNER_LABELS_LINUX` at a self-hosted runner that reuses its workspace between jobs. There, an earlier build can leave root-owned files in `.build` that a plain `actions/checkout` clean can't delete, which is why the steps use `sudo`. The full-path build runs its container as the runner's uid, so it no longer creates root-owned files; the fast path still does, and its job runs `chown` afterwards.
+This project's tart runners give each job a fresh ephemeral VM, so these steps find nothing to remove and finish in seconds. They matter only on a self-hosted runner that reuses its workspace between jobs. There, an earlier build can leave root-owned files in `.build` that a plain `actions/checkout` clean can't delete, which is why the steps use `sudo`. The full-path build runs its container as the runner's uid, so it no longer creates root-owned files; the fast path still does, and its job runs `chown` afterwards.
 
-A self-hosted Linux runner also needs Docker installed, with the runner user able to use it: `scripts/load-build-image.sh` fails with a clear message if `docker` is missing. It does not need Swift; the Lambda build runs in the container. `test.yml` installs Swift on the runner itself.
+Any self-hosted Linux runner needs Docker installed, with the runner user able to use it: `scripts/load-build-image.sh` fails with a clear message if `docker` is missing. It does not need Swift; the Lambda build runs in the container. `test.yml` installs Swift on the runner itself.
 
 ## Building the Docker Image
 

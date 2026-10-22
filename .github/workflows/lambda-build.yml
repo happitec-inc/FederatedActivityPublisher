@@ -29,8 +29,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # Restore only: deploys on main save the image; an on-demand run reads
-      # main's copy and never saves a PR-scoped 1 GiB one.
+      # Restore only: deploys on main save the image. An on-demand run hits
+      # that copy only when the Dockerfile matches main's (otherwise it builds
+      # the image) and never saves a PR-scoped 1 GiB one.
       - name: Restore Docker image cache
         uses: actions/cache/restore@v5
         with:

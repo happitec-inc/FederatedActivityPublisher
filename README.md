@@ -163,7 +163,7 @@ These must be set for deployment workflows to succeed:
 |----------|---------|---------|-------------|
 | `SERVER_DOMAIN` | deploy-stage, deploy-prod | _(required)_ | Domain where the ActivityPub server runs. In simple mode, same as handle domain. In split mode, the subdomain (e.g. `activity.example.com`). |
 | `HANDLE_DOMAIN` | deploy-stage, deploy-prod | _(required)_ | Domain used in handles (`@user@example.com`). Permanent once federated. |
-| `RUNNER_LABELS_LINUX` | all Linux jobs | `ubuntu-24.04-arm` (deploy-stage, deploy-prod, lambda-build, resolve-packages); `ubuntu-latest` (test, bootstrap, environment, run-integration-tests) | JSON array of runner labels. This project uses GitHub-hosted `["ubuntu-24.04-arm"]`; `["self-hosted", "linux"]` points the jobs at your own runner, which needs Docker |
+| `RUNNER_LABELS_LINUX` | all Linux jobs | `ubuntu-24.04-arm` (deploy-stage, deploy-prod, lambda-build, resolve-packages); `ubuntu-latest` (test, bootstrap, environment, run-integration-tests) | JSON array of runner labels. This project sets it to `["self-hosted", "Linux", "ARM64", "tart"]` (ephemeral tart VMs), matching the org's `RUNNER_LINUX`; keep the two in sync by hand. Leave it unset in a fork to use the hosted fallbacks. A self-hosted runner needs Docker |
 | `RUNNER_LABELS_MACOS` | deploy-docc | `"macos-26"` | JSON array of runner labels for macOS jobs |
 | `PROXY_DISTRIBUTION_ID` | deploy-stage, deploy-prod | _(empty)_ | CloudFront distribution ID for cross-distribution routing; leave empty if not using a parent domain proxy |
 | `ACTIVITY_DISTRIBUTION_ID_STAGE` | deploy-stage | _(empty)_ | CloudFront distribution ID for the stage activity server; passed as parameter to avoid circular dependency |
