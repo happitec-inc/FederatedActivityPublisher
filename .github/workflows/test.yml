@@ -5,6 +5,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A new push supersedes the previous SHA's run instead of running beside it.
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
