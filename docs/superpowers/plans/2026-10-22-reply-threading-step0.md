@@ -661,7 +661,9 @@ enum Fixtures {
     static func padded(_ json: String, to bytes: Int) -> String {
         let open = String(json.dropLast()) + #","padding":""#
         let close = #""}"#
-        return open + String(repeating: "x", count: bytes - open.utf8.count - close.utf8.count) + close
+        let fill = bytes - open.utf8.count - close.utf8.count
+        precondition(fill >= 0, "Fixtures.padded: target \(bytes) bytes is smaller than the fixture plus padding member (\(open.utf8.count + close.utf8.count) bytes)")
+        return open + String(repeating: "x", count: fill) + close
     }
 }
 ```
@@ -1328,6 +1330,27 @@ import Testing
         #expect(RemoteFetchMiddleware.admitsContentType("application/activity+json; a=1; b=2"))
     }
 
+    // Exit tests: each body runs in a child process and captures nothing. A thrown error is caught
+    // and the body returns, so the child exits successfully; only a trap makes it exit with failure.
+
+    @Test func collidingParameterNamesTrapInRuntimeWithCheckOff() async {   // control, in a child process
+        await #expect(processExitsWith: .failure) {
+            let s = try await noteServer(contentType: "application/activity+json; a=1; A=2")
+            try await withTestClient(makeTestClient(admitting: [s.port], checks: .all.subtracting(.contentType))) {
+                do { _ = try await object(s.url("/n"), via: $0, http: [s.port]) } catch {}
+            }
+        }
+    }
+
+    @Test func collidingParameterNamesDoNotTrapWithCheckOn() async {
+        await #expect(processExitsWith: .success) {
+            let s = try await noteServer(contentType: "application/activity+json; a=1; A=2")
+            try await withTestClient(makeTestClient(admitting: [s.port])) {
+                do { _ = try await object(s.url("/n"), via: $0, http: [s.port]) } catch {}
+            }
+        }
+    }
+
     /// 404 with a valid document; 204 with an empty body (a 204 must not carry one).
     func statusServer(_ code: Int) async throws -> TestServer {
         code == 204 ? try await TestServer.start { _ in .document(contentType: activityJSON, body: "", status: 204) }
@@ -1365,7 +1388,14 @@ import Testing
 }
 ```
 
-  **No in-process negative control for the trap.** With the content-type check off, a colliding header would trap the test process in the runtime rather than fail a test, so `collidingParameterNamesRefusedByMiddleware` has no capability-removed control. Its receipt is the source read: `OpenAPIMIMEType.init?(_:)` dedups parameters on exact keys only (`Dictionary(_:uniquingKeysWith:)`), and `evaluate` then builds `Dictionary(uniqueKeysWithValues: receivedParameters.map { ($0.key.lowercased(), $0.value) })` (`Base/OpenAPIMIMEType.swift:239`, runtime 1.11.0; Task 1 re-checks it at the pinned version). `Converter.bestContentType` calls `evaluate` for every concrete received type (`Conversion/Converter+Common.swift:43-76`). The refusal test runs whether or not the trap still exists at the pinned version.
+  **The trap's control runs in a child process.** With the content-type check off, a colliding header traps in the runtime.
+  - **How the trap happens.** `OpenAPIMIMEType.init?(_:)` dedups parameters on exact keys only (`Dictionary(_:uniquingKeysWith:)`). `evaluate` then builds `Dictionary(uniqueKeysWithValues: receivedParameters.map { ($0.key.lowercased(), $0.value) })` (`Base/OpenAPIMIMEType.swift:239`, runtime 1.11.0). `Converter.bestContentType` calls `evaluate` for every concrete received type (`Conversion/Converter+Common.swift:43-76`).
+  - **The control.** `collidingParameterNamesTrapInRuntimeWithCheckOff` measures the trap at the pinned runtime with a Swift Testing exit test, and `collidingParameterNamesDoNotTrapWithCheckOn` shows that the middleware's refusal prevents it.
+  - **Receipts for exit tests** (swiftlang/swift-testing at tag `swift-6.3-RELEASE`):
+    - `Sources/Testing/Expectations/Expectation+Macro.swift` declares `@freestanding(expression) @discardableResult macro expect(processExitsWith expectedExitCondition: ExitTest.Condition, observing: [any PartialKeyPath<ExitTest.Result> & Sendable] = [], _ comment:, sourceLocation:, performing expression: @escaping @Sendable () async throws -> Void) -> ExitTest.Result?`. It is unavailable only under `SWT_NO_EXIT_TESTS`.
+    - `Package.swift` defines `SWT_NO_EXIT_TESTS` only for Embedded Swift and for iOS, watchOS, tvOS, visionOS, WASI and Android, so exit tests run on Linux and macOS.
+    - `Sources/Testing/ExitTests/ExitTest.Condition.swift` declares `public static var success: Self` and `public static var failure: Self` (available from Swift 6.2). `failure` "matches any exit code other than `EXIT_SUCCESS` or any signal that causes the process to exit", so the test body catches thrown errors to keep a transport failure from counting as the trap.
+  - **If the trap is gone at the pinned runtime,** `collidingParameterNamesTrapInRuntimeWithCheckOff` goes red. Record that in the PR, delete that one test, and keep the refusal and the other tests.
 
 - [ ] **Step 2: Run.** **Expected:** the tests that expect the middleware to refuse fail.
 
@@ -1500,7 +1530,7 @@ import Testing
     }
 
     @Test func expiredDeadlineFailsBeforeConnecting() async throws {
-        let s = try await sized(100)
+        let s = try await sized(1024)
         try await withTestClient(makeTestClient(admitting: [s.port])) { client in
             #expect(await fetchError {
                 _ = try await object(s.url("/n"), via: client, http: [s.port], deadline: .now - .seconds(1))
@@ -1511,7 +1541,7 @@ import Testing
     }
 
     @Test func expiredDeadlineConnectsWithDeadlineOff() async throws {    // control
-        let s = try await sized(100)
+        let s = try await sized(1024)
         try await withTestClient(makeTestClient(admitting: [s.port], checks: .all.subtracting(.deadline))) {
             _ = try await object(s.url("/n"), via: $0, http: [s.port], deadline: .now - .seconds(1))
             #expect(s.stats.connections == 1)
@@ -1998,7 +2028,6 @@ import OpenAPIRuntime
 import Synchronization
 import Testing
 @testable import ActivityPubCore
-
 
 /// Control only: keeps the context in a stored property on the one shared middleware, so a
 /// later call's target overwrites an earlier call's.
