@@ -1,0 +1,59 @@
+name: Resolve Packages
+
+# Regenerates Package.resolved with the deploy toolchain (Swift 6.3 in the
+# swift-al2023:6.3 image) and uploads it as an artifact. This is how the pins
+# are updated: run it, download the artifact, review the diff and commit it.
+#
+# On demand only. Run it by adding the `resolve-packages` label to a PR, or
+# with workflow_dispatch once this file is on the default branch. No AWS
+# credentials.
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+# The label is part of the group so that adding some other label to the PR
+# (which also fires `labeled`) can't cancel a running resolve.
+concurrency:
+  group: resolve-packages-${{ github.ref }}-${{ github.event.label.name || github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'resolve-packages'
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-24.04-arm' }}
+    steps:
+      - name: Remove root-owned build output (self-hosted)
+        if: ${{ vars.RUNNER_LABELS_LINUX }}
+        run: sudo rm -rf .build/
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - name: Clean workspace (self-hosted)
+        if: ${{ vars.RUNNER_LABELS_LINUX }}
+        run: sudo git clean -fdx
+
+      - name: Cache Docker image
+        uses: actions/cache@v5
+        with:
+          path: /tmp/docker-image.tar
+          key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
+
+      - name: Load or build AL2023 Swift Docker image
+        run: bash scripts/load-build-image.sh
+
+      - name: Resolve with Swift 6.3
+        run: scripts/in-build-image.sh scripts/resolve-packages.sh
+
+      - name: Upload Package.resolved
+        uses: actions/upload-artifact@v4
+        with:
+          name: Package.resolved
+          path: Package.resolved
+          if-no-files-found: error
