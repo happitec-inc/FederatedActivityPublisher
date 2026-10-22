@@ -27,7 +27,7 @@ After either path completes, integration tests run automatically in a Docker con
 - `AWS_SECRET_ACCESS_KEY` -- IAM secret key for deployment
 
 **Key steps (full path):**
-1. Clean workspace (self-hosted runners only)
+1. Clean workspace (runs whenever `RUNNER_LABELS_LINUX` is set; a no-op on a fresh GitHub-hosted VM, and needed on a self-hosted runner)
 2. Run `scripts/substitute-variables.sh` to replace domain placeholders in templates
 3. Build or reuse a cached Docker image from `docker/Dockerfile.al2023-swift`
 4. Restore the Swift build cache (keyed on `Package.resolved` and the Dockerfile)
@@ -128,9 +128,9 @@ Runs the full Lambda build on demand, without AWS credentials, and checks the zi
 - the produced zips are exactly the `CodeUri` zips in `activity-app/functions/template.yaml`, and there is no `ActivityProvisioner` zip;
 - each zip has an executable `bootstrap` (an ELF binary for the runner's architecture with no `libswiftCore.so` dependency) and `lib/libcrypto.so.3` plus `lib/libssl.so.3`.
 
-The job also logs the runner's CPU count, memory and Docker limits, and fails if anything in `.build` is root-owned. It restores the deploy's Swift build cache but never saves one. (It does save the Docker image tarball, under the same key the deploy workflows use.)
+The job also logs the runner's CPU count, memory, Docker limits and free disk, and fails if anything in `.build` is root-owned. It restores the deploy's Swift build cache and Docker image cache read-only (`actions/cache/restore`), so it never saves a cache.
 
-It never runs on its own; this is an explicit-invocation check, and a deploy fails on the same problems anyway. A run on the single self-hosted runner takes about 14 minutes cold.
+It never runs on its own; this is an explicit-invocation check, and a deploy fails on the same problems anyway. On a GitHub-hosted `ubuntu-24.04-arm` runner, a cold run takes about 14 minutes.
 
 **How to run it:**
 - Add the `lambda-build` label to a pull request. To run it again, remove the label and add it back.
@@ -233,8 +233,8 @@ Set these repository variables so the CI/CD workflows can reference them:
 | `CLIENT_API_DOMAIN_STAGE` | Execute-api domain for stage Client API Gateway (enables same-origin routing) | `abc123.execute-api.us-east-1.amazonaws.com` |
 | `CLIENT_API_DOMAIN_PROD` | Execute-api domain for prod Client API Gateway | `def456.execute-api.us-east-1.amazonaws.com` |
 | `AWS_REGION` | AWS region for all deployments (default: `us-east-1`) | `us-east-1` |
-| `RUNNER_LABELS_LINUX` | Runner labels for Linux jobs (default: `ubuntu-latest`) | `["self-hosted", "linux"]` |
-| `RUNNER_LABELS_MACOS` | Runner labels for macOS jobs (default: `macos-26`) | `["self-hosted", "macOS"]` |
+| `RUNNER_LABELS_LINUX` | JSON array of runner labels for Linux jobs (default: see Runner Configuration) | `["ubuntu-24.04-arm"]` |
+| `RUNNER_LABELS_MACOS` | JSON array of runner labels for macOS jobs (default: `macos-26`) | `["macos-26"]` |
 
 ## CI/CD Pipeline
 
@@ -288,30 +288,26 @@ CloudFront caches expire based on TTL values configured in the CDN stack's cache
 
 ## Runner Configuration
 
-All deployment workflows support both self-hosted and GitHub-hosted runners via repository variables. This lets you migrate between runner types without modifying workflow files.
+The workflows pick their runner from repository variables, so you can change runners without editing workflow files. This project's own deployment runs every Linux job on GitHub-hosted `ubuntu-24.04-arm` runners, with `RUNNER_LABELS_LINUX` set to `["ubuntu-24.04-arm"]`, and has no self-hosted runners. The Lambdas are arm64, so an arm runner builds them natively.
 
 ### Configuration Variables
 
 | Variable | Purpose | Default (if unset) |
 |---|---|---|
-| `RUNNER_LABELS_LINUX` | Runner labels for Linux jobs | `ubuntu-latest` |
-| `RUNNER_LABELS_MACOS` | Runner labels for macOS jobs | `macos-26` |
+| `RUNNER_LABELS_LINUX` | JSON array of runner labels for Linux jobs | `ubuntu-24.04-arm` in `deploy-stage.yml`, `deploy-prod.yml`, `lambda-build.yml` and `resolve-packages.yml`; `ubuntu-latest` in `test.yml`, `bootstrap.yml`, `environment.yml` and `run-integration-tests.yml` |
+| `RUNNER_LABELS_MACOS` | JSON array of runner labels for macOS jobs | `macos-26` |
 
-To use self-hosted runners, set these variables in the repository settings under **Settings > Variables > Actions**:
+Set them under **Settings > Variables > Actions**. For example, `RUNNER_LABELS_LINUX` = `["ubuntu-24.04-arm"]` for GitHub-hosted arm runners, or `["self-hosted", "linux"]` for your own.
 
-- `RUNNER_LABELS_LINUX` = `["self-hosted", "linux"]`
-- `RUNNER_LABELS_MACOS` = `["self-hosted", "macOS"]`
+### Workspace Cleanup Steps
 
-To use GitHub-hosted runners, remove or leave these variables unset. The workflows fall back to `ubuntu-latest` for Linux and `macos-26` for macOS.
+The deploy jobs and `test.yml` have cleanup steps gated on `if: vars.RUNNER_LABELS_LINUX`. They run whenever the variable is set, whatever runner it names:
+- Workspace cleaning (`sudo rm -rf .build/`, then checkout with `clean: false`, then `sudo git clean -fdx`)
+- Docker container and builder pruning (deploy jobs)
 
-### Self-Hosted Runner Considerations
+On a GitHub-hosted runner each job starts on a fresh VM, so these steps find nothing to remove and finish in seconds. They matter only if you point `RUNNER_LABELS_LINUX` at a self-hosted runner that reuses its workspace between jobs. There, an earlier build can leave root-owned files in `.build` that a plain `actions/checkout` clean can't delete, which is why the steps use `sudo`. The full-path build runs its container as the runner's uid, so it no longer creates root-owned files; the fast path still does, and its job runs `chown` afterwards.
 
-When using self-hosted runners, the workflows include additional cleanup steps:
-- Workspace cleaning (`rm -rf .build/`, `git clean -fdx`) to avoid stale build artifacts
-- Docker container and builder pruning
-- Persistent Docker image cache (avoids rebuilding the Swift AL2023 image on every run)
-
-These cleanup steps are automatically skipped on GitHub-hosted runners, which start with a clean environment.
+A self-hosted Linux runner also needs Docker installed, with the runner user able to use it: `scripts/load-build-image.sh` fails with a clear message if `docker` is missing. It does not need Swift; the Lambda build runs in the container. `test.yml` installs Swift on the runner itself.
 
 ## Building the Docker Image
 

@@ -26,21 +26,13 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'resolve-packages'
     runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-24.04-arm' }}
     steps:
-      - name: Remove root-owned build output (self-hosted)
-        if: ${{ vars.RUNNER_LABELS_LINUX }}
-        run: sudo rm -rf .build/
-
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          clean: false
 
-      - name: Clean workspace (self-hosted)
-        if: ${{ vars.RUNNER_LABELS_LINUX }}
-        run: sudo git clean -fdx
-
-      - name: Cache Docker image
-        uses: actions/cache@v5
+      # Restore only: deploys on main save the image; an on-demand run reads
+      # main's copy and never saves a PR-scoped 1 GiB one.
+      - name: Restore Docker image cache
+        uses: actions/cache/restore@v5
         with:
           path: /tmp/docker-image.tar
           key: docker-al2023-swift-${{ hashFiles('docker/Dockerfile.al2023-swift') }}
