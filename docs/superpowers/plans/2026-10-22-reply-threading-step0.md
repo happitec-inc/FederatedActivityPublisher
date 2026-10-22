@@ -62,6 +62,7 @@ Decisions 1–17 in the spec are settled, and this plan does not reopen them. Wh
   - `RemoteActorDocument`
   - `RemoteFetchError`
   - `ActorKeyCache`
+  - `prepareRemoteFetch()`
 - **Test clients.** Every `HTTPClient` and `RemoteFetchClient` a test builds runs inside `withTestClient(_:body:)`. Tests stop their servers before they return. A server left open by a failed assertion only holds a loopback port until the test process exits.
 - **Negative controls.** Each test names its negative control, and counts only after that control has been seen red. The implementation PR description records what each control showed.
 - **Commit messages.** Short and about the code, ending with the `Co-Authored-By:` trailer the repository's other commits use.
@@ -166,7 +167,7 @@ These inputs follow from the spec, but no test the spec lists exercises them. Th
 | `Sources/ActivityPubCore/RemoteFetch/RemoteFetchContext.swift` | `RemoteFetchContext` (`@TaskLocal`), `SchemePolicy` |
 | `Sources/ActivityPubCore/RemoteFetch/PrivateAddressCheck.swift` | Address classifier, `AddressPolicy` |
 | `Sources/ActivityPubCore/RemoteFetch/RemoteFetchMiddleware.swift` | `RemoteFetchChecks`, `RemoteFetchMiddleware`, `CappedBody` |
-| `Sources/ActivityPubCore/RemoteFetch/RemoteFetchClient.swift` | Client construction, `shared`, `shutdown()` |
+| `Sources/ActivityPubCore/RemoteFetch/RemoteFetchClient.swift` | Client construction, `shared`, `prepareRemoteFetch()`, `shutdown()` |
 | `Sources/ActivityPubCore/RemoteFetch/RemoteDocuments.swift` | `RemoteObjectDocument`, `RemoteActorDocument`, mapping |
 | `Sources/ActivityPubCore/FetchRemoteObject.swift` | `fetchRemoteObject`, `fetchRemoteActor` |
 | `Sources/ActivityPubCore/Crypto/ActorKeyCache.swift` | Private-key cache for each container |
@@ -2304,7 +2305,7 @@ import Testing
     - `fetchRemoteObject(uri: quotedId, signer: signer, deadline: .now + .seconds(10)).attributedTo`.
     - On a `REMOTE_ACTOR#` miss: `fetchRemoteActor(uri: attributedTo, signer: signer, deadline: .now + .seconds(10)).inbox`.
   - **The `failed` path** (`:284-287`) is unchanged.
-  - **Build the client at init.** Call `prepareRemoteFetch()` at the top level, after `let ssmClient = try await SSMClient()` (`:38`) and before `LambdaRuntime`, so `RemoteFetchClient.shared` is built during the init phase, not on the first quote fetch ("Changes since the spec", item 11).
+  - **Build the client at init.** Call `prepareRemoteFetch()` at the top level, after `let ssmClient = try await SSMClient()` (`:38`) and before `LambdaRuntime`, so `RemoteFetchClient.shared` is built during the init phase, not on the first quote fetch ("Changes since the spec", item 11). No test checks that the call builds the client at init; if it didn't, the only effect would be construction on the first quote fetch, which is the spec's original behaviour. This is accepted.
 
 - [ ] **Step 2: Remove the legacy fetch.** Delete the legacy function and error, and rewrite the file doc comment.
   - Check: `grep -rn "FetchRemoteObjectError\|URLSession" Sources/ActivityPubCore`.
@@ -2312,7 +2313,7 @@ import Testing
 
 - [ ] **Step 3: Docs.**
   - Under "Authentication and Cryptography", add `ActorKeyCache`.
-  - Add a "Remote Fetch" topic group with `fetchRemoteObject(uri:signer:deadline:)`, `fetchRemoteActor(uri:signer:deadline:)`, `RemoteObjectDocument`, `RemoteActorDocument` and `RemoteFetchError`.
+  - Add a "Remote Fetch" topic group with `fetchRemoteObject(uri:signer:deadline:)`, `fetchRemoteActor(uri:signer:deadline:)`, `RemoteObjectDocument`, `RemoteActorDocument`, `RemoteFetchError` and `prepareRemoteFetch()`.
 
 - [ ] **Step 4: CI.** The Test job (`.github/workflows/test.yml:65`). **Expected:** green on Linux.
 
