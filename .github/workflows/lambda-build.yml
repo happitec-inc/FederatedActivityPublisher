@@ -4,7 +4,7 @@ name: Lambda Build
 # (scripts/build-all-lambdas.sh in the AL2023 image) and checks the zips.
 # No AWS credentials: this job never deploys anything.
 #
-# On demand only (Erin's call, 2026-10-21). Run it by adding the
+# On demand only. Run it by adding the
 # `lambda-build` label to a PR, or with workflow_dispatch once this file is on
 # the default branch. It never runs on ordinary pushes.
 on:
