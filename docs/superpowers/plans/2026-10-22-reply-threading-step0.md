@@ -136,6 +136,7 @@ These changes follow from the repository at `6d02908` (current `main`). None of 
    - **How it is checked.** Task 1 re-checks both files at the pinned versions, and the Task 9 tests measure the byte-for-byte result.
    - **Receipts.** The quoted lines come from a read of the file at tag 1.5.0. That package is not in any local checkout until Task 1 resolves it, so no line numbers are given.
 10. **`withoutActuallyEscaping`.** `ClientMiddleware.intercept` receives `next` as a non-escaping `@Sendable` closure (`Interface/ClientTransport.swift:224-230`, runtime 1.11.0). The deadline race runs `next` in a task group, so it uses `withoutActuallyEscaping(next)`. The group finishes before `intercept` returns, so the closure never outlives the call.
+11. **PostHandler builds the client at init.** The spec has `PostHandler` build `RemoteFetchClient.shared` on its first quote fetch. Settled 2026-10-22: it builds it at init, the way `InboxHandler` does, so no request pays for construction. `RemoteFetchClient` is `internal`, so `ActivityPubCore` exposes `public func prepareRemoteFetch()` (Task 4), and `PostHandler` calls it at the top level (Task 14).
 
 ## Known limitations
 
@@ -740,6 +741,7 @@ import Testing
   - **`RemoteFetchChecks`.** `struct RemoteFetchChecks: OptionSet, Sendable`, with `scheme`, `redirectLimit`, `bodyCap`, `contentType`, `status`, `deadline`, `verbatimRequestTarget`, `resignEachHop` and `static let all`.
   - **`RemoteFetchMiddleware`.** `struct RemoteFetchMiddleware: ClientMiddleware { init(checks: RemoteFetchChecks = .all) }`. Its constants are `static let maxRedirects = 3` and `static let maxBodyBytes = 1_048_576`.
   - **`RemoteFetchClient`.** `struct RemoteFetchClient: Sendable { let client: Client; let httpClient: HTTPClient; static let shared: RemoteFetchClient; static func make(addressPolicy: AddressPolicy = .mastodonPrivateAddressCheck, checks: RemoteFetchChecks = .all, closesRefusedChannel: Bool = true, middleware: (any ClientMiddleware)? = nil, adjust: (inout HTTPClient.Configuration) -> Void = { _ in }) -> RemoteFetchClient; func shutdown() async throws }`.
+  - **`prepareRemoteFetch`.** `public func prepareRemoteFetch()`, which builds `RemoteFetchClient.shared` if it isn't built yet.
   - **`RemoteObjectDocument` and `RemoteActorDocument`.** Public structs whose fields are those of §0.1 ("How the typed results are consumed"), as `public let`s.
   - **The fetch functions:**
     - `public func fetchRemoteObject(uri: String, signer: FetchSigningKey? = nil, deadline: ContinuousClock.Instant) async throws -> RemoteObjectDocument`
@@ -1037,6 +1039,7 @@ import Testing
     - The client is `Client(serverURL: try! Servers.Server1.url(), transport: transport, middlewares: [middleware ?? RemoteFetchMiddleware(checks: checks)])`.
     - `static let shared = RemoteFetchClient.make()`.
     - `shutdown()` awaits `httpClient.shutdown()`.
+    - `public func prepareRemoteFetch() { _ = RemoteFetchClient.shared }`, so a handler outside the module can build the client at init ("Changes since the spec", item 11). It adds no test: `.shared` is `make()` with the defaults, which `clientConstructionCompletes` already builds.
     - The hook's NIOCore calls resolve through the file's explicit `import NIOCore` (import headers below).
   - **`RemoteFetchMiddleware.intercept`** (only this much in this task).
     - With no context bound, throw `.noContext`.
@@ -2301,6 +2304,7 @@ import Testing
     - `fetchRemoteObject(uri: quotedId, signer: signer, deadline: .now + .seconds(10)).attributedTo`.
     - On a `REMOTE_ACTOR#` miss: `fetchRemoteActor(uri: attributedTo, signer: signer, deadline: .now + .seconds(10)).inbox`.
   - **The `failed` path** (`:284-287`) is unchanged.
+  - **Build the client at init.** Call `prepareRemoteFetch()` at the top level, after `let ssmClient = try await SSMClient()` (`:38`) and before `LambdaRuntime`, so `RemoteFetchClient.shared` is built during the init phase, not on the first quote fetch ("Changes since the spec", item 11).
 
 - [ ] **Step 2: Remove the legacy fetch.** Delete the legacy function and error, and rewrite the file doc comment.
   - Check: `grep -rn "FetchRemoteObjectError\|URLSession" Sources/ActivityPubCore`.

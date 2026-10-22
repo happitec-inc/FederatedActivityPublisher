@@ -504,8 +504,9 @@ the maintainer's, and everything here is this spec's.
     defect, not a runtime condition; the step 0 "Client construction" test builds the client in
     CI, so a broken document fails the PR rather than the first access to `.shared`. In
     `InboxHandler` that first access is its top-level `let keyManager = KeyManager()`
-    (`InboxHandler/main.swift:50`), whose `init()` reads `.shared`; in `PostHandler` it is the
-    first quote fetch.
+    (`InboxHandler/main.swift:50`), whose `init()` reads `.shared`; in `PostHandler` it is a
+    top-level `prepareRemoteFetch()` call, so both handlers build the client during the Lambda
+    init phase and no request pays for it (settled 2026-10-22).
 
   The shared `HTTPClient` lives for the life of the Lambda container and is never shut down or
   deinitialized; it is built on the shared singleton event-loop group
