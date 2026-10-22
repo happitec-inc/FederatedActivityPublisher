@@ -38,15 +38,6 @@
       }
     },
     {
-      "identity" : "jmespath.swift",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/jmespath/jmespath.swift.git",
-      "state" : {
-        "revision" : "129d1f18169e02d548c11d32a8df7b69a7fd32d6",
-        "version" : "1.1.1"
-      }
-    },
-    {
       "identity" : "multipart-kit",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/vapor/multipart-kit.git",
@@ -71,15 +62,6 @@
       "state" : {
         "revision" : "c94e080d5cea0c40194afd48dad5bfffdf64374d",
         "version" : "0.259.0"
-      }
-    },
-    {
-      "identity" : "soto-core",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/soto-project/soto-core.git",
-      "state" : {
-        "revision" : "4309f0c0f608b1f4db1d84e5928a925a3894ee91",
-        "version" : "7.17.0"
       }
     },
     {
@@ -251,15 +233,6 @@
       "state" : {
         "revision" : "25cb61d3482054b09ae76ca4f281b1bfe7fe5a43",
         "version" : "0.9.0"
-      }
-    },
-    {
-      "identity" : "swift-metrics",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-metrics.git",
-      "state" : {
-        "revision" : "9467f9cc3c32b4386fad1ecc4618328887ef5758",
-        "version" : "2.12.0"
       }
     },
     {
