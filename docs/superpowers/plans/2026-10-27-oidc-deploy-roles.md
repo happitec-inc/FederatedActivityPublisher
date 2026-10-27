@@ -620,7 +620,7 @@ There is no code in this task. Record each result on the merged Task 1 PR.
 
 - [ ] **Step 1: Run `oidc-trust-check.yml` from `main` with `expect-boundary: stage`**
 
-  From here on, every trust-check run sets `expect-boundary`: `stage` until a release has carried Task 3 to prod, then `all`. A missing boundary then fails the run.
+  From here on, every trust-check run sets `expect-boundary`: `stage` until a release has carried Task 3 to prod, then `all`. A missing boundary then fails the run. Once Task 8's precondition run with `all` is green, change the input's default from `none` to `all` in the same PR as Task 8, so a dispatch that omits the input still enforces the boundary on both stages.
 
   Expected: green. The inventory shows `yes` for every `activity-app-stage-*` role, and no non-Lambda trust in either stage. The `stage` job's boundary checks are the negative control for the IAM conditions:
   - creating a role without the stage boundary is denied;
@@ -824,6 +824,7 @@ There is no code in this task. Record each result on the merged Task 1 PR.
 
   All of the following must hold:
   - `grep -rn "AWS_ACCESS_KEY_ID\|AWS_SECRET_ACCESS_KEY" .github/` on `main` prints nothing;
+  - a trust-check run dispatched with no inputs (so the default `all` applies) is green;
   - the docs from Task 9 are merged;
   - there is a green OIDC run of each of these:
     - `run-integration-tests` (stage and prod);
