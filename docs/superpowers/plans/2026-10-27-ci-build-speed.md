@@ -110,8 +110,8 @@ The ~46 s gap before "Planning build" appears in three logs `[measured]`:
 Whether it is manifest/graph load or plugin evaluation is unknown. Task 6 also needs the `.build` composition. One dispatch measures both. The dispatch restores main's entry if one exists (Review Focus 3); record from its restore log whether it ran warm or cold. Either way works: a warm run shows the composition of the cached tree, and a cold run shows a fresh one.
 
 - [ ] **Step 1:** `git switch -c measure/build-composition origin/main`. Make two changes:
-  - In `scripts/build-all-lambdas.sh:106`, add `-v` to `BUILD_ARGS`.
-  - In `lambda-build.yml`, after "Verify Lambda zips" (`:64-65`), add a step whose commands give each measured path its own `du` call. GNU `du` prints nothing for an operand that an earlier operand already counted, so `.build/*` would swallow `.build/plugins/AWSLambdaPackager`:
+  - In `scripts/build-all-lambdas.sh:107`, add `-v` to the build invocation only, not to `BUILD_ARGS`. `BUILD_ARGS` is also used by the `--show-bin-path` call at `:108`, which captures stdout into `BIN_PATH`; verbose output there would break packaging.
+  - In `lambda-build.yml`, after "Verify Lambda zips" (`:64-65`), add a step with `if: always()`, so it runs even if packaging fails, whose commands give each measured path its own `du` call. GNU `du` prints nothing for an operand that an earlier operand already counted, so `.build/*` would swallow `.build/plugins/AWSLambdaPackager`:
     ```bash
     for p in .build/lambda-staging .build/plugins/AWSLambdaPackager .build/repositories .build/checkouts .build; do du -sb "$p"; done
     du -sb .build/*; tar -cf - .build | wc -c
@@ -245,7 +245,7 @@ Only `.build/plugins/AWSLambdaPackager` is excluded; other `.build/plugins/*` di
 - Modify: `scripts/build-all-lambdas.sh:95-100` (delete the "resolve" phase), `:9-11` (header: drop item 2 and renumber)
 - Modify: `BuildingAndDeploying.md:342` ("Resolves the package once, against the committed `Package.resolved` …")
 
-`SWIFTPM_FLAGS` (`:37`) includes `--force-resolved-versions`, and the build at `:106-107` passes `"${SWIFTPM_FLAGS[@]}"`, so `swift build` resolves against the committed pins itself. The flag is listed by `swift build --help` (local 6.4.2). Phase cost: 9 s warm, 127 s cold `[measured]`. On a cold build most of that is the clone, which moves into the build phase rather than disappearing. The saving is at most the duplicated work `[inferred]`.
+`SWIFTPM_FLAGS` (`:37`) includes `--force-resolved-versions`, and the build at `:106-107` passes `"${SWIFTPM_FLAGS[@]}"`, so `swift build` resolves against the committed pins itself. The flag is listed by `swift build --help` (local 6.4.2). Phase cost: 9 s warm (run 39718739545), 127 s cold (run 39710962177) and 177 s cold (run 39706774240, the Step 3 baseline) `[measured]`. On a cold build most of that is the clone, which moves into the build phase rather than disappearing. The saving is at most the duplicated work `[inferred]`.
 
 - [ ] **Step 1:** Delete the phase. Keep `SWIFTPM_FLAGS` unchanged.
 - [ ] **Step 2: Docs.** Rewrite `:342`: `swift build --force-resolved-versions` resolves against the committed `Package.resolved` as part of the build, so there is no separate resolve step. Renumber the list that follows.
