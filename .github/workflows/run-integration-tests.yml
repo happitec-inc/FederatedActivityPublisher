@@ -51,12 +51,17 @@ jobs:
           echo "client_url=$CLIENT_API_URL" >> "$GITHUB_OUTPUT"
           echo "Testing against: $API_URL (federation) + $CLIENT_API_URL (client)"
 
-          TOKEN_VALUE=$(aws ssm get-parameter \
-            --name "/activity/${{ inputs.environment }}/keys/client-token" \
-            --with-decryption --query "Parameter.Value" --output text --region ${{ vars.AWS_REGION || 'us-east-1' }} 2>/dev/null || echo "")
-          if [ -n "$TOKEN_VALUE" ]; then
-            BEARER=$(echo "$TOKEN_VALUE" | cut -d: -f2)
-            echo "bearer=$BEARER" >> "$GITHUB_OUTPUT"
+          # Stage uses the STAGE_TEST_BEARER_TOKEN secret (masked by Actions).
+          # Prod still reads its SSM token; mask it before it reaches any output.
+          if [ "${{ inputs.environment }}" = "prod" ]; then
+            TOKEN_VALUE=$(aws ssm get-parameter \
+              --name "/activity/prod/keys/client-token" \
+              --with-decryption --query "Parameter.Value" --output text --region ${{ vars.AWS_REGION || 'us-east-1' }} 2>/dev/null || echo "")
+            if [ -n "$TOKEN_VALUE" ]; then
+              BEARER=$(echo "$TOKEN_VALUE" | cut -d: -f2)
+              echo "::add-mask::$BEARER"
+              echo "bearer=$BEARER" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
       - name: Install Swift dependencies
@@ -96,7 +101,7 @@ jobs:
         env:
           TEST_API_URL: ${{ steps.api.outputs.url }}
           TEST_CLIENT_API_URL: ${{ steps.api.outputs.client_url }}
-          TEST_BEARER_TOKEN: ${{ steps.api.outputs.bearer }}
+          TEST_BEARER_TOKEN: ${{ inputs.environment == 'stage' && secrets.STAGE_TEST_BEARER_TOKEN || steps.api.outputs.bearer }}
           TEST_HANDLE_DOMAIN: ${{ inputs.environment == 'prod' && vars.HANDLE_DOMAIN || format('{0}.{1}', inputs.environment, vars.HANDLE_DOMAIN) }}
           LD_LIBRARY_PATH: /usr/local/lib/swift/linux
         run: cd integration-tests && swift test

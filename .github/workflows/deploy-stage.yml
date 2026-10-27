@@ -440,23 +440,11 @@ jobs:
           echo "api_url=$API_URL" >> "$GITHUB_OUTPUT"
           echo "client_api_url=$CLIENT_API_URL" >> "$GITHUB_OUTPUT"
 
-      - name: Get bearer token from SSM
-        id: token
-        run: |
-          TOKEN_VALUE=$(aws ssm get-parameter \
-            --name "/activity/stage/keys/client-token" \
-            --with-decryption --query "Parameter.Value" --output text \
-            --region ${{ vars.AWS_REGION || 'us-east-1' }} 2>/dev/null || echo "")
-          if [ -n "$TOKEN_VALUE" ]; then
-            BEARER=$(echo "$TOKEN_VALUE" | cut -d: -f2)
-            echo "bearer=$BEARER" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Run integration tests in Docker
         env:
           TEST_API_URL: ${{ steps.stack.outputs.api_url }}
           TEST_CLIENT_API_URL: ${{ steps.stack.outputs.client_api_url }}
-          TEST_BEARER_TOKEN: ${{ steps.token.outputs.bearer }}
+          TEST_BEARER_TOKEN: ${{ secrets.STAGE_TEST_BEARER_TOKEN }}
           TEST_HANDLE_DOMAIN: ${{ format('{0}.{1}', 'stage', vars.HANDLE_DOMAIN) }}
         run: |
           # FoundationNetworking on Linux crashes during process teardown after
