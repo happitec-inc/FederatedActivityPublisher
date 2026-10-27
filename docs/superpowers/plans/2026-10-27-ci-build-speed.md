@@ -245,7 +245,7 @@ Only `.build/plugins/AWSLambdaPackager` is excluded; other `.build/plugins/*` di
 - Modify: `scripts/build-all-lambdas.sh:95-100` (delete the "resolve" phase), `:9-11` (header: drop item 2 and renumber)
 - Modify: `BuildingAndDeploying.md:342` ("Resolves the package once, against the committed `Package.resolved` …")
 
-`SWIFTPM_FLAGS` (`:37`) includes `--force-resolved-versions`, and the build at `:106-107` passes `"${SWIFTPM_FLAGS[@]}"`, so `swift build` resolves against the committed pins itself. The flag is listed by `swift build --help` (local 6.4.2). Phase cost: 9 s warm (run 39718739545), 127 s cold (run 39710962177) and 177 s cold (run 39706774240, the Step 3 baseline) `[measured]`. On a cold build most of that is the clone, which moves into the build phase rather than disappearing. The saving is at most the duplicated work `[inferred]`.
+`SWIFTPM_FLAGS` (`:37`) includes `--force-resolved-versions`, and the build at `:106-107` passes `"${SWIFTPM_FLAGS[@]}"`, so `swift build` resolves against the committed pins itself. The flag is listed by `swift build --help` (local 6.4.2). Phase cost: 9 s warm (run 39718739545), 127 s cold (run 39710962177) and 177 s cold (run 39706774240, the cold baseline Steps 4 and 5 use) `[measured]`. On a cold build most of that is the clone, which moves into the build phase rather than disappearing. The saving is at most the duplicated work `[inferred]`.
 
 - [ ] **Step 1:** Delete the phase. Keep `SWIFTPM_FLAGS` unchanged.
 - [ ] **Step 2: Docs.** Rewrite `:342`: `swift build --force-resolved-versions` resolves against the committed `Package.resolved` as part of the build, so there is no separate resolve step. Renumber the list that follows.
