@@ -25,6 +25,7 @@ After either path completes, integration tests run automatically in a Docker con
 **Required secrets:**
 - `AWS_ACCESS_KEY_ID` -- IAM access key for deployment
 - `AWS_SECRET_ACCESS_KEY` -- IAM secret key for deployment
+- `STAGE_TEST_BEARER_TOKEN` -- bearer token for the stage integration tests, minted with `ActivityProvisioner mint-token --stage stage` (365-day TTL by default; re-mint before it expires)
 
 **Key steps (full path):**
 1. Clean workspace (runs whenever `RUNNER_LABELS_LINUX` is set; harmless on a fresh ephemeral VM)
@@ -149,6 +150,8 @@ Runs integration tests in a Docker container against a deployed stack. Tests are
 
 **Triggers:**
 - Manual dispatch -- caller selects the target environment (stage or prod)
+
+**Bearer token:** stage uses the `STAGE_TEST_BEARER_TOKEN` secret. Prod reads the legacy `/activity/prod/keys/client-token` SSM parameter and masks the value before using it.
 
 ## Deployment Order
 

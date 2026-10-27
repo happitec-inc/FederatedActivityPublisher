@@ -150,6 +150,7 @@ These must be set for deployment workflows to succeed:
 |--------|---------|-------------|
 | `AWS_ACCESS_KEY_ID` | deploy-stage, deploy-prod, bootstrap, environment | IAM access key for SAM deployments |
 | `AWS_SECRET_ACCESS_KEY` | deploy-stage, deploy-prod, bootstrap, environment | IAM secret key for SAM deployments |
+| `STAGE_TEST_BEARER_TOKEN` | deploy-stage, run-integration-tests (stage) | Bearer token for the stage integration-test actor, minted with `ActivityProvisioner mint-token --stage stage`. It expires after the mint's TTL (365 days by default); re-mint it and update the secret before then, or the stage integration tests fail with 401 |
 
 ### Optional GitHub Secrets
 
