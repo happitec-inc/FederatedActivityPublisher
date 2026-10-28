@@ -1,0 +1,945 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  FederatedActivityPublisher OIDC roles. Five IAM roles that GitHub Actions
+  jobs of one repository assume through the account's GitHub OIDC provider,
+  each trusting exactly one environment subject. The function permissions
+  boundaries the deploy roles refer to are defined in the activity-environment
+  stacks, not here.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: happitec-inc
+    Description: GitHub organization or user that owns the repository
+  GitHubRepo:
+    Type: String
+    Default: FederatedActivityPublisher
+    Description: Repository name; also the role name prefix
+  GitHubOrgId:
+    Type: String
+    Default: "174214171"
+    AllowedPattern: "^[0-9]+$"
+    Description: Numeric ID of the owner, for the immutable subject form
+  GitHubRepoId:
+    Type: String
+    Default: "1193951865"
+    AllowedPattern: "^[0-9]+$"
+    Description: Numeric ID of the repository, for the immutable subject form
+  BootstrapStackName:
+    Type: String
+    Default: activity-bootstrap
+    Description: Stack that exports the hosted zone, domain and certificate
+  StageDistributionId:
+    Type: String
+    Default: ""
+    Description: CloudFront distribution ID of activity-app-stage
+  ProdDistributionId:
+    Type: String
+    Default: ""
+    Description: CloudFront distribution ID of activity-app-prod
+  AllowDistributionCreate:
+    Type: String
+    Default: "false"
+    AllowedValues: ["false", "true"]
+    Description: Let the deploy roles create a distribution (first deployment only)
+
+Conditions:
+  DistributionCreate: !Equals [!Ref AllowDistributionCreate, "true"]
+
+Rules:
+  DistributionIdsRequired:
+    RuleCondition: !Equals [!Ref AllowDistributionCreate, "false"]
+    Assertions:
+      - Assert: !And
+          - !Not [!Equals [!Ref StageDistributionId, ""]]
+          - !Not [!Equals [!Ref ProdDistributionId, ""]]
+        AssertDescription: Set ACTIVITY_DISTRIBUTION_ID_STAGE and _PROD, or deploy with AllowDistributionCreate=true for a first deployment
+
+Resources:
+  # --- Deploy role: stage (environment:stage) ---
+
+  StageDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${GitHubRepo}-github-actions-deploy-stage
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:stage
+                  - !Sub repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:environment:stage
+      Policies:
+        - PolicyName: deploy-stage
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Stacks
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:ListChangeSets
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:ListStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:GetStackPolicy
+                  - cloudformation:UpdateTerminationProtection
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-app-stage/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-app-stage-*/*
+              - Sid: EnvironmentOutputs
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-environment-stage/*
+              - Sid: SamTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
+              - Sid: SamManagedStack
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*
+              - Sid: SamArtifactsBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-*
+              - Sid: SamArtifactsObjects
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-*/activity-app-stage/*
+              - Sid: LambdaFunctions
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:PublishVersion
+                  - lambda:PutFunctionConcurrency
+                  - lambda:DeleteFunctionConcurrency
+                  - lambda:GetFunctionCodeSigningConfig
+                  - lambda:GetFunctionRecursionConfig
+                  - lambda:PutFunctionRecursionConfig
+                  - lambda:GetFunctionScalingConfig
+                  - lambda:PutFunctionScalingConfig
+                  - lambda:GetRuntimeManagementConfig
+                  - lambda:PutRuntimeManagementConfig
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                  - lambda:GetPolicy
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:ListTags
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:activity-app-*-stage
+              - Sid: CreateEventSourceMappings
+                Effect: Allow
+                Action: lambda:CreateEventSourceMapping
+                Resource: "*"
+                Condition:
+                  ArnLike:
+                    lambda:FunctionArn: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:activity-app-*-stage
+              - Sid: ChangeEventSourceMappings
+                Effect: Allow
+                Action:
+                  - lambda:UpdateEventSourceMapping
+                  - lambda:DeleteEventSourceMapping
+                Resource: "*"
+              - Sid: ReadEventSourceMappings
+                Effect: Allow
+                Action:
+                  - lambda:GetEventSourceMapping
+                  - lambda:ListEventSourceMappings
+                Resource: "*"
+              - Sid: FunctionRolesBounded
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:PutRolePermissionsBoundary
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-stage-*
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: !Sub arn:aws:iam::${AWS::AccountId}:policy/activity-app-stage-function-boundary
+              - Sid: FunctionRoleManagedPolicies
+                Effect: Allow
+                Action:
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-stage-*
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: !Sub arn:aws:iam::${AWS::AccountId}:policy/activity-app-stage-function-boundary
+                  ArnEquals:
+                    iam:PolicyARN:
+                      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+                      - arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
+              - Sid: FunctionRolesOther
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:DeleteRole
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:ListRoleTags
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-stage-*
+              - Sid: NoBoundaryRemoval
+                Effect: Deny
+                Action: iam:DeleteRolePermissionsBoundary
+                Resource: "*"
+              - Sid: PassFunctionRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-stage-*
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+              - Sid: ApiGateway
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:POST
+                  - apigateway:PUT
+                  - apigateway:PATCH
+                  - apigateway:DELETE
+                  - apigateway:UpdateRestApiPolicy
+                Resource:
+                  - !Sub arn:aws:apigateway:${AWS::Region}::/restapis
+                  - !Sub arn:aws:apigateway:${AWS::Region}::/restapis/*
+                  - !Sub arn:aws:apigateway:${AWS::Region}::/tags/*
+              - Sid: CloudFrontDistribution
+                Effect: Allow
+                Action:
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetDistributionConfig
+                  - cloudfront:UpdateDistribution
+                  - cloudfront:UpdateDistributionWithStagingConfig
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:ListTagsForResource
+                Resource: !If
+                  - DistributionCreate
+                  - !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/*
+                  - !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${StageDistributionId}
+              - !If
+                - DistributionCreate
+                - Sid: CloudFrontDistributionCreate
+                  Effect: Allow
+                  Action: cloudfront:CreateDistribution
+                  Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/*
+                - !Ref AWS::NoValue
+              - Sid: CloudFrontPolicies
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateCachePolicy
+                  - cloudfront:GetCachePolicy
+                  - cloudfront:UpdateCachePolicy
+                  - cloudfront:DeleteCachePolicy
+                  - cloudfront:CreateOriginRequestPolicy
+                  - cloudfront:GetOriginRequestPolicy
+                  - cloudfront:UpdateOriginRequestPolicy
+                  - cloudfront:DeleteOriginRequestPolicy
+                  - cloudfront:CreateOriginAccessControl
+                  - cloudfront:GetOriginAccessControl
+                  - cloudfront:UpdateOriginAccessControl
+                  - cloudfront:DeleteOriginAccessControl
+                Resource:
+                  - !Sub arn:aws:cloudfront::${AWS::AccountId}:cache-policy/*
+                  - !Sub arn:aws:cloudfront::${AWS::AccountId}:origin-request-policy/*
+                  - !Sub arn:aws:cloudfront::${AWS::AccountId}:origin-access-control/*
+              - Sid: CloudFrontFunction
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateFunction
+                  - cloudfront:DescribeFunction
+                  - cloudfront:GetFunction
+                  - cloudfront:PublishFunction
+                  - cloudfront:UpdateFunction
+                  - cloudfront:DeleteFunction
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:ListTagsForResource
+                Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:function/activity-profile-rewrite-stage
+              - Sid: DnsRecord
+                Effect: Allow
+                Action: route53:ChangeResourceRecordSets
+                Resource: !Sub
+                  - arn:aws:route53:::hostedzone/${Zone}
+                  - Zone: !ImportValue
+                      Fn::Sub: ${BootstrapStackName}-HostedZoneId
+                Condition:
+                  ForAllValues:StringEquals:
+                    route53:ChangeResourceRecordSetsNormalizedRecordNames: !Sub
+                      - stage.${Domain}
+                      - Domain: !ImportValue
+                          Fn::Sub: ${BootstrapStackName}-DomainName
+              - Sid: DnsRead
+                Effect: Allow
+                Action:
+                  - route53:GetHostedZone
+                  - route53:ListResourceRecordSets
+                Resource: !Sub
+                  - arn:aws:route53:::hostedzone/${Zone}
+                  - Zone: !ImportValue
+                      Fn::Sub: ${BootstrapStackName}-HostedZoneId
+              - Sid: DnsLookups
+                Effect: Allow
+                Action:
+                  - route53:GetChange
+                  - route53:ListHostedZones
+                Resource: "*"
+              - Sid: MediaBucketPolicy
+                Effect: Allow
+                Action:
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:ListBucket
+                Resource: arn:aws:s3:::activity-media-stage
+              - Sid: FrontendAssets
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: arn:aws:s3:::activity-media-stage/media/frontend/*
+              - Sid: RoleStackParameters
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${GitHubRepo}-oidc/*
+      Tags:
+        - Key: Project
+          Value: !Ref GitHubRepo
+
+  # --- Deploy role: prod (environment:production) ---
+
+  ProdDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${GitHubRepo}-github-actions-deploy-prod
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:production
+                  - !Sub repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:environment:production
+      Policies:
+        - PolicyName: deploy-prod
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Stacks
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:ListChangeSets
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:ListStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:GetStackPolicy
+                  - cloudformation:UpdateTerminationProtection
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-app-prod/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-app-prod-*/*
+              - Sid: EnvironmentOutputs
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-environment-prod/*
+              - Sid: SamTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
+              - Sid: SamManagedStack
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*
+              - Sid: SamArtifactsBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-*
+              - Sid: SamArtifactsObjects
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: arn:aws:s3:::aws-sam-cli-managed-default-samclisourcebucket-*/activity-app-prod/*
+              - Sid: LambdaFunctions
+                Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:PublishVersion
+                  - lambda:PutFunctionConcurrency
+                  - lambda:DeleteFunctionConcurrency
+                  - lambda:GetFunctionCodeSigningConfig
+                  - lambda:GetFunctionRecursionConfig
+                  - lambda:PutFunctionRecursionConfig
+                  - lambda:GetFunctionScalingConfig
+                  - lambda:PutFunctionScalingConfig
+                  - lambda:GetRuntimeManagementConfig
+                  - lambda:PutRuntimeManagementConfig
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                  - lambda:GetPolicy
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:ListTags
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:activity-app-*-prod
+              - Sid: CreateEventSourceMappings
+                Effect: Allow
+                Action: lambda:CreateEventSourceMapping
+                Resource: "*"
+                Condition:
+                  ArnLike:
+                    lambda:FunctionArn: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:activity-app-*-prod
+              - Sid: ChangeEventSourceMappings
+                Effect: Allow
+                Action:
+                  - lambda:UpdateEventSourceMapping
+                  - lambda:DeleteEventSourceMapping
+                Resource: "*"
+              - Sid: ReadEventSourceMappings
+                Effect: Allow
+                Action:
+                  - lambda:GetEventSourceMapping
+                  - lambda:ListEventSourceMappings
+                Resource: "*"
+              - Sid: FunctionRolesBounded
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:PutRolePermissionsBoundary
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-prod-*
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: !Sub arn:aws:iam::${AWS::AccountId}:policy/activity-app-prod-function-boundary
+              - Sid: FunctionRoleManagedPolicies
+                Effect: Allow
+                Action:
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-prod-*
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: !Sub arn:aws:iam::${AWS::AccountId}:policy/activity-app-prod-function-boundary
+                  ArnEquals:
+                    iam:PolicyARN:
+                      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+                      - arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
+              - Sid: FunctionRolesOther
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:DeleteRole
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:ListRoleTags
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-prod-*
+              - Sid: NoBoundaryRemoval
+                Effect: Deny
+                Action: iam:DeleteRolePermissionsBoundary
+                Resource: "*"
+              - Sid: PassFunctionRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-prod-*
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+              - Sid: ApiGateway
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:POST
+                  - apigateway:PUT
+                  - apigateway:PATCH
+                  - apigateway:DELETE
+                  - apigateway:UpdateRestApiPolicy
+                Resource:
+                  - !Sub arn:aws:apigateway:${AWS::Region}::/restapis
+                  - !Sub arn:aws:apigateway:${AWS::Region}::/restapis/*
+                  - !Sub arn:aws:apigateway:${AWS::Region}::/tags/*
+              - Sid: CloudFrontDistribution
+                Effect: Allow
+                Action:
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetDistributionConfig
+                  - cloudfront:UpdateDistribution
+                  - cloudfront:UpdateDistributionWithStagingConfig
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:ListTagsForResource
+                Resource: !If
+                  - DistributionCreate
+                  - !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/*
+                  - !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProdDistributionId}
+              - !If
+                - DistributionCreate
+                - Sid: CloudFrontDistributionCreate
+                  Effect: Allow
+                  Action: cloudfront:CreateDistribution
+                  Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/*
+                - !Ref AWS::NoValue
+              - Sid: CloudFrontPolicies
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateCachePolicy
+                  - cloudfront:GetCachePolicy
+                  - cloudfront:UpdateCachePolicy
+                  - cloudfront:DeleteCachePolicy
+                  - cloudfront:CreateOriginRequestPolicy
+                  - cloudfront:GetOriginRequestPolicy
+                  - cloudfront:UpdateOriginRequestPolicy
+                  - cloudfront:DeleteOriginRequestPolicy
+                  - cloudfront:CreateOriginAccessControl
+                  - cloudfront:GetOriginAccessControl
+                  - cloudfront:UpdateOriginAccessControl
+                  - cloudfront:DeleteOriginAccessControl
+                Resource:
+                  - !Sub arn:aws:cloudfront::${AWS::AccountId}:cache-policy/*
+                  - !Sub arn:aws:cloudfront::${AWS::AccountId}:origin-request-policy/*
+                  - !Sub arn:aws:cloudfront::${AWS::AccountId}:origin-access-control/*
+              - Sid: CloudFrontFunction
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateFunction
+                  - cloudfront:DescribeFunction
+                  - cloudfront:GetFunction
+                  - cloudfront:PublishFunction
+                  - cloudfront:UpdateFunction
+                  - cloudfront:DeleteFunction
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:ListTagsForResource
+                Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:function/activity-profile-rewrite-prod
+              - Sid: DnsRecord
+                Effect: Allow
+                Action: route53:ChangeResourceRecordSets
+                Resource: !Sub
+                  - arn:aws:route53:::hostedzone/${Zone}
+                  - Zone: !ImportValue
+                      Fn::Sub: ${BootstrapStackName}-HostedZoneId
+                Condition:
+                  ForAllValues:StringEquals:
+                    route53:ChangeResourceRecordSetsNormalizedRecordNames: !ImportValue
+                      Fn::Sub: ${BootstrapStackName}-DomainName
+              - Sid: DnsRead
+                Effect: Allow
+                Action:
+                  - route53:GetHostedZone
+                  - route53:ListResourceRecordSets
+                Resource: !Sub
+                  - arn:aws:route53:::hostedzone/${Zone}
+                  - Zone: !ImportValue
+                      Fn::Sub: ${BootstrapStackName}-HostedZoneId
+              - Sid: DnsLookups
+                Effect: Allow
+                Action:
+                  - route53:GetChange
+                  - route53:ListHostedZones
+                Resource: "*"
+              - Sid: MediaBucketPolicy
+                Effect: Allow
+                Action:
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:ListBucket
+                Resource: arn:aws:s3:::activity-media-prod
+              - Sid: FrontendAssets
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: arn:aws:s3:::activity-media-prod/media/frontend/*
+              - Sid: RoleStackParameters
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${GitHubRepo}-oidc/*
+      Tags:
+        - Key: Project
+          Value: !Ref GitHubRepo
+
+  # --- Infrastructure role (environment:infrastructure) ---
+
+  InfraRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${GitHubRepo}-github-actions-infra
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:infrastructure
+                  - !Sub repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:environment:infrastructure
+      Policies:
+        - PolicyName: infra
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Stacks
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-environment-stage/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-environment-prod/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-bootstrap/*
+              - Sid: SamTransform
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
+              - Sid: MediaBucketConfig
+                Effect: Allow
+                Action:
+                  - s3:CreateBucketMetadataTableConfiguration
+                  - s3:DeleteBucketMetadataTableConfiguration
+                  - s3:DeleteBucketWebsite
+                  - s3:GetAccelerateConfiguration
+                  - s3:GetAnalyticsConfiguration
+                  - s3:GetBucketAbac
+                  - s3:GetBucketCORS
+                  - s3:GetBucketLogging
+                  - s3:GetBucketMetadataTableConfiguration
+                  - s3:GetBucketNotification
+                  - s3:GetBucketObjectLockConfiguration
+                  - s3:GetBucketOwnershipControls
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketTagging
+                  - s3:GetBucketVersioning
+                  - s3:GetBucketWebsite
+                  - s3:GetEncryptionConfiguration
+                  - s3:GetIntelligentTieringConfiguration
+                  - s3:GetInventoryConfiguration
+                  - s3:GetLifecycleConfiguration
+                  - s3:GetMetricsConfiguration
+                  - s3:GetReplicationConfiguration
+                  - s3:ListBucket
+                  - s3:ListTagsForResource
+                  - s3:PutAccelerateConfiguration
+                  - s3:PutAnalyticsConfiguration
+                  - s3:PutBucketAbac
+                  - s3:PutBucketAcl
+                  - s3:PutBucketCORS
+                  - s3:PutBucketLogging
+                  - s3:PutBucketNotification
+                  - s3:PutBucketObjectLockConfiguration
+                  - s3:PutBucketOwnershipControls
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketTagging
+                  - s3:PutBucketVersioning
+                  - s3:PutBucketWebsite
+                  - s3:PutEncryptionConfiguration
+                  - s3:PutIntelligentTieringConfiguration
+                  - s3:PutInventoryConfiguration
+                  - s3:PutLifecycleConfiguration
+                  - s3:PutMetricsConfiguration
+                  - s3:PutReplicationConfiguration
+                  - s3:TagResource
+                  - s3:UntagResource
+                  - s3:UpdateBucketMetadataAnnotationTableConfiguration
+                  - s3:UpdateBucketMetadataInventoryTableConfiguration
+                  - s3:UpdateBucketMetadataJournalTableConfiguration
+                Resource:
+                  - arn:aws:s3:::activity-media-stage
+                  - arn:aws:s3:::activity-media-prod
+              - Sid: Table
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:UpdateTable
+                  - dynamodb:DescribeTimeToLive
+                  - dynamodb:UpdateTimeToLive
+                  - dynamodb:DescribeContinuousBackups
+                  - dynamodb:UpdateContinuousBackups
+                  - dynamodb:DescribeContributorInsights
+                  - dynamodb:UpdateContributorInsights
+                  - dynamodb:DescribeKinesisStreamingDestination
+                  - dynamodb:EnableKinesisStreamingDestination
+                  - dynamodb:DisableKinesisStreamingDestination
+                  - dynamodb:UpdateKinesisStreamingDestination
+                  - dynamodb:GetResourcePolicy
+                  - dynamodb:PutResourcePolicy
+                  - dynamodb:DeleteResourcePolicy
+                  - dynamodb:TagResource
+                  - dynamodb:UntagResource
+                  - dynamodb:ListTagsOfResource
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/activity-stage
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/activity-stage/index/*
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/activity-prod
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/activity-prod/index/*
+              - Sid: Queues
+                Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                  - sqs:SetQueueAttributes
+                  - sqs:ListQueueTags
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
+                Resource:
+                  - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:activity-delivery-stage
+                  - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:activity-delivery-prod
+                  - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:activity-delivery-dlq-stage
+                  - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:activity-delivery-dlq-prod
+              - Sid: AlarmTopic
+                Effect: Allow
+                Action:
+                  - sns:CreateTopic
+                  - sns:DeleteTopic
+                  - sns:GetTopicAttributes
+                  - sns:SetTopicAttributes
+                  - sns:Subscribe
+                  - sns:Unsubscribe
+                  - sns:ListSubscriptionsByTopic
+                  - sns:GetDataProtectionPolicy
+                  - sns:PutDataProtectionPolicy
+                  - sns:TagResource
+                  - sns:UntagResource
+                  - sns:ListTagsForResource
+                Resource:
+                  - !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:activity-dlq-alarm-stage
+                  - !Sub arn:aws:sns:${AWS::Region}:${AWS::AccountId}:activity-dlq-alarm-prod
+              - Sid: Alarm
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:TagResource
+                  - cloudwatch:UntagResource
+                  - cloudwatch:ListTagsForResource
+                Resource:
+                  - !Sub arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:activity-dlq-depth-stage
+                  - !Sub arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:activity-dlq-depth-prod
+              - Sid: AlarmRead
+                Effect: Allow
+                Action: cloudwatch:DescribeAlarms
+                Resource: "*"
+              - Sid: BootstrapZone
+                Effect: Allow
+                Action:
+                  - route53:GetHostedZone
+                  - route53:GetChange
+                  - route53:ListTagsForResource
+                  - route53:ChangeTagsForResource
+                  - route53:UpdateHostedZoneComment
+                  - route53:UpdateHostedZoneFeatures
+                  - route53:CreateQueryLoggingConfig
+                  - route53:DeleteQueryLoggingConfig
+                  - route53:ListQueryLoggingConfigs
+                Resource:
+                  - !Sub
+                    - arn:aws:route53:::hostedzone/${Zone}
+                    - Zone: !ImportValue
+                        Fn::Sub: ${BootstrapStackName}-HostedZoneId
+                  - arn:aws:route53:::change/*
+              - Sid: BootstrapCertificate
+                Effect: Allow
+                Action:
+                  - acm:DescribeCertificate
+                  - acm:ListTagsForCertificate
+                  - acm:AddTagsToCertificate
+                  - acm:RemoveTagsFromCertificate
+                  - acm:UpdateCertificateOptions
+                Resource: !ImportValue
+                  Fn::Sub: ${BootstrapStackName}-CertificateArn
+              - Sid: FunctionBoundaries
+                Effect: Allow
+                Action:
+                  - iam:CreatePolicy
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListPolicyVersions
+                  - iam:ListEntitiesForPolicy
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:policy/activity-app-stage-function-boundary
+                  - !Sub arn:aws:iam::${AWS::AccountId}:policy/activity-app-prod-function-boundary
+      Tags:
+        - Key: Project
+          Value: !Ref GitHubRepo
+
+  # --- Integration read role (environment:integration) ---
+
+  IntegrationReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${GitHubRepo}-github-actions-integration-read
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:integration
+                  - !Sub repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:environment:integration
+      Policies:
+        - PolicyName: integration-read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AppOutputs
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-app-stage/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-app-prod/*
+              - Sid: ProdClientToken
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/activity/prod/keys/client-token
+              - Sid: DecryptViaSsm
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: !Ref GitHubRepo
+
+  # --- Trust-check role (environment:trust-check), read-only ---
+
+  TrustCheckRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${GitHubRepo}-github-actions-trust-check
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:trust-check
+                  - !Sub repo:${GitHubOrg}@${GitHubOrgId}/${GitHubRepo}@${GitHubRepoId}:environment:trust-check
+      Policies:
+        - PolicyName: trust-check
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListRoles
+                Effect: Allow
+                Action: iam:ListRoles
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/*
+              - Sid: ReadAppRoles
+                Effect: Allow
+                Action: iam:GetRole
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-stage-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-prod-*
+              - Sid: AppStacks
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:ListStackResources
+                  - cloudformation:GetTemplate
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-app-stage/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-app-stage-*/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-app-prod/*
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/activity-app-prod-*/*
+      Tags:
+        - Key: Project
+          Value: !Ref GitHubRepo
+
+Outputs:
+  StageDeployRoleName:
+    Description: Role assumed by deploy-stage.yml (environment stage)
+    Value: !Ref StageDeployRole
+  ProdDeployRoleName:
+    Description: Role assumed by deploy-prod.yml (environment production)
+    Value: !Ref ProdDeployRole
+  InfraRoleName:
+    Description: Role assumed by environment.yml and bootstrap.yml (environment infrastructure)
+    Value: !Ref InfraRole
+  IntegrationReadRoleName:
+    Description: Role assumed by run-integration-tests.yml (environment integration)
+    Value: !Ref IntegrationReadRole
+  TrustCheckRoleName:
+    Description: Role assumed by oidc-trust-check.yml job inventory (environment trust-check)
+    Value: !Ref TrustCheckRole
