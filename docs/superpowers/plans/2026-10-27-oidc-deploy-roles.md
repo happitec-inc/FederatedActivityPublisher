@@ -31,7 +31,7 @@ Then `environment.yml` moves to the infra role and deploys the two boundaries, a
   No wildcards. The org, repo and IDs are template parameters. Their defaults are this repository's values: `happitec-inc`, `FederatedActivityPublisher`, owner ID `174214171` and repo ID `1193951865`, read from `GET /repos/happitec-inc/FederatedActivityPublisher` on 2026-10-27.
 - **No AWS managed policy** is attached to any of the five roles, and no role is shared with another project.
 - **Every IAM role-write action of the deploy roles is conditioned on `iam:PermissionsBoundary`** equal to that stage's boundary policy. `iam:UpdateAssumeRolePolicy` is not granted. `iam:DeleteRolePermissionsBoundary` is explicitly denied.
-- **Only the infra role writes the boundary policies.** It holds `iam:CreatePolicy`, `iam:CreatePolicyVersion`, `iam:DeletePolicyVersion`, `iam:DeletePolicy`, `iam:GetPolicy`, `iam:GetPolicyVersion`, `iam:ListPolicyVersions` and `iam:TagPolicy`, on exactly the two boundary ARNs. The deploy roles hold none of those actions.
+- **Only the infra role writes the boundary policies.** It holds `iam:CreatePolicy`, `iam:CreatePolicyVersion`, `iam:DeletePolicyVersion`, `iam:DeletePolicy`, `iam:GetPolicy`, `iam:GetPolicyVersion`, `iam:ListPolicyVersions` and `iam:ListEntitiesForPolicy`, on exactly the two boundary ARNs (D3.2). The deploy roles hold none of those actions.
 - **The role stack contains only `AWS::IAM::Role` resources with inline policies.** No managed policy is defined in it.
 - **Names.**
   - Roles: `FederatedActivityPublisher-github-actions-deploy-stage`, `FederatedActivityPublisher-github-actions-deploy-prod`, `FederatedActivityPublisher-github-actions-infra`, `FederatedActivityPublisher-github-actions-integration-read` and `FederatedActivityPublisher-github-actions-trust-check`.
@@ -156,11 +156,13 @@ Options (a), (b) and (c) differ in where the roles are defined and which workflo
 
    The environment stack declares `S3::Bucket`, `DynamoDB::Table`, `SQS::Queue`, `SNS::Topic` and `CloudWatch::Alarm`, and after Task 11 one `IAM::ManagedPolicy`, the stage's function boundary. The bootstrap stack declares `Route53::HostedZone` and `CertificateManager::Certificate`.
 
-   For `AWS::IAM::ManagedPolicy`, the infra role's grant is the eight-action list settled 2026-10-27 (A.2 `FunctionBoundaries`). The registry schema `aws-iam-managedpolicy.json` differs from it in two places, read 2026-10-27:
-   - its `read` and `delete` handlers also list `iam:ListEntitiesForPolicy`, which the list does not grant;
-   - its `tagging` block says `"taggable": false`, so `iam:TagPolicy` is not exercised.
+   For `AWS::IAM::ManagedPolicy`, the infra role's grant follows the same rule (A.2 `FunctionBoundaries`). The registry schema `aws-iam-managedpolicy.json`, read 2026-10-27, lists these handler permissions:
+   - `create`: `iam:CreatePolicy`;
+   - `read`: `iam:GetPolicy`, `iam:GetPolicyVersion`, `iam:ListEntitiesForPolicy`;
+   - `update`: `iam:GetPolicy`, `iam:ListPolicyVersions`, `iam:CreatePolicyVersion`, `iam:DeletePolicyVersion`;
+   - `delete`: `iam:GetPolicy`, `iam:ListPolicyVersions`, `iam:DeletePolicyVersion`, `iam:DeletePolicy`, `iam:ListEntitiesForPolicy`.
 
-   The `Attach*` and `Detach*` actions its handlers list apply only when the policy names `Roles`, `Groups` or `Users`, and the boundary names none. Q14 carries the `ListEntitiesForPolicy` difference.
+   Each handler also lists `Attach*` and `Detach*` actions for groups, users and roles. Those apply only when the policy names `Roles`, `Groups` or `Users`, and the boundary names none, so they are left out. The schema's `tagging` block says `"taggable": false`, so no tagging action is granted. The `list` handler's `iam:ListPolicies` is left out too, because stack create, update and delete use the other four handlers [inferred].
 3. **The rule.**
    - Grant the handler actions of the resource's own service, scoped to this repository's resource names.
    - Grant cross-service actions only for features the templates use: `iam:PassRole` to Lambda, and `s3:GetObject` and `s3:GetObjectVersion` on the code artifacts.
@@ -354,7 +356,7 @@ Task numbers group the work by subject. The real dependency order differs:
      |---|---|
      | `...-deploy-stage` | 7,234 |
      | `...-deploy-prod` | 7,213 |
-     | `...-infra` | 5,692 (5,309 before `FunctionBoundaries`) |
+     | `...-infra` | 5,704 (5,309 before `FunctionBoundaries`) |
      | `...-integration-read` | 636 |
      | `...-trust-check` | 828 |
 
@@ -938,7 +940,7 @@ A new stack would add a template, a workflow and a stack name to the infra role'
      - Expected: green, creating `activity-app-prod-function-boundary`.
      - `integration-tests` is skipped.
 
-  On a failure, a maintainer reads the stack events. An `AccessDenied` there names the missing IAM action (U13, Q14). Stop and decide; do not change a grant on the strength of the log alone.
+  On a failure, a maintainer reads the stack events. An `AccessDenied` there names the missing IAM action (U13). Stop and decide; do not change a grant on the strength of the log alone.
 
 - [ ] **Step 7: Trust check**
 
@@ -970,7 +972,6 @@ A new stack would add a template, a workflow and a stack name to the infra role'
 - **Q10: Required reviewers.** Add required reviewers to `production`, `infrastructure` and `oidc-bootstrap`? Recommendation: yes for `oidc-bootstrap` and `infrastructure`; for `production`, it is a release-flow decision. `infrastructure` now also gates every change to the function boundaries (Task 11).
 - **Q11: Split build and deploy jobs.** Splitting would mean the jobs that hold `id-token: write` run no build steps at all; artifacts would pass between jobs. With SHA pins and a token-free build container, the remaining exposure is GitHub-owned actions. Recommendation: not now.
 - **Q12: The one-time role-stack credential. Settled 2026-10-27.** The role stack contains only IAM roles with inline policies. The two boundary managed policies come from the infra role's deploys of `activity-environment-stage` and `activity-environment-prod` (Task 11), not from the role stack. Recomputed inline sizes are in Task 1 Step 2 and boundary sizes in Task 11 Step 5. How the role-stack credential is provided is decided outside this plan.
-- **Q14: `iam:ListEntitiesForPolicy` for the infra role.** The settled grant for the boundary policies has eight actions. The registry's `read` and `delete` handlers for `AWS::IAM::ManagedPolicy` also list `iam:ListEntitiesForPolicy` (D3.2). If CloudFormation calls it during the create in Task 11 Step 6, that run fails safe with `AccessDenied` on stage. Add `iam:ListEntitiesForPolicy` on the same two ARNs before Task 1 merges, or keep the eight and let Task 11 Step 6 measure it? Recommendation: add it, since the registry is the derivation rule in D3.
 
 ## Unverified premises, and what measures each
 
@@ -987,7 +988,7 @@ A new stack would add a template, a workflow and a stack name to the infra role'
 | U9 | The boundary, including `kms:Decrypt` conditioned on `kms:ViaService`, keeps every function working. | Task 3 Step 2: integration tests and one hour of Lambda error counts. The tests reach only the handlers and paths D5 names as covered. |
 | U10 | `--force-upload` on `sam package` with `--s3-prefix` re-uploads every artifact each time. | Task 4 Step 4 log |
 | U11 | CloudFormation needs no `lambda:TagResource` on an event source mapping when the template sets no tags. | Task 7 Step 4 |
-| U13 | The infra role's grant on the two boundary ARNs (A.2 `FunctionBoundaries`) is enough for CloudFormation to create and update `AWS::IAM::ManagedPolicy` (Q14). | Task 11 Step 6, on stage first |
+| U13 | CloudFormation calls nothing for `AWS::IAM::ManagedPolicy` beyond the registry handler permissions in A.2 `FunctionBoundaries` (D3.2). | Task 11 Step 6, on stage first |
 
 ---
 
@@ -1046,7 +1047,7 @@ Placeholders:
 | `AlarmRead` | `cloudwatch:DescribeAlarms` | `*` |
 | `BootstrapZone` | `route53:` `GetHostedZone`, `GetChange`, `ListTagsForResource`, `ChangeTagsForResource`, `UpdateHostedZoneComment`, `UpdateHostedZoneFeatures`, `CreateQueryLoggingConfig`, `DeleteQueryLoggingConfig`, `ListQueryLoggingConfigs` | `arn:aws:route53:::hostedzone/<Zone>`, and `change/*` for `GetChange` |
 | `BootstrapCertificate` | `acm:` `DescribeCertificate`, `ListTagsForCertificate`, `AddTagsToCertificate`, `RemoveTagsFromCertificate`, `UpdateCertificateOptions` | the import of `${BootstrapStackName}-CertificateArn` |
-| `FunctionBoundaries` | `iam:` `CreatePolicy`, `CreatePolicyVersion`, `DeletePolicyVersion`, `DeletePolicy`, `GetPolicy`, `GetPolicyVersion`, `ListPolicyVersions`, `TagPolicy` | `arn:aws:iam::<A>:policy/activity-app-stage-function-boundary`, `arn:aws:iam::<A>:policy/activity-app-prod-function-boundary` |
+| `FunctionBoundaries` | `iam:` `CreatePolicy`, `CreatePolicyVersion`, `DeletePolicyVersion`, `DeletePolicy`, `GetPolicy`, `GetPolicyVersion`, `ListPolicyVersions`, `ListEntitiesForPolicy` | `arn:aws:iam::<A>:policy/activity-app-stage-function-boundary`, `arn:aws:iam::<A>:policy/activity-app-prod-function-boundary` |
 
 The SNS topic and the alarm are not retained, so they keep create and delete. The table, bucket and queues get neither.
 
