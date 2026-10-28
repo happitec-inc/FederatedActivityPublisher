@@ -246,6 +246,7 @@ The job assumes `OIDC_BOOTSTRAP_ROLE_ARN` with the pinned `configure-aws-credent
 | `activity-environment/template.yaml` | Modify: new resource after `DLQAlarm` (101–120), before `Outputs` (122) | `FunctionBoundary`, the stage's `activity-app-<stage>-function-boundary` |
 | `activity-environment/samconfig.toml` | Modify `:7` | `CAPABILITY_NAMED_IAM`, for a self-hoster's local deploy |
 | `.github/workflows/oidc-roles.yml` | Create | Dispatch-only, `environment: oidc-bootstrap`: deploy `FederatedActivityPublisher-oidc` with quiet output |
+| `scripts/oidc/` | Create | The two workflows' steps, one script per step, with shared helpers in `lib.sh` (B10) |
 | `.github/workflows/oidc-trust-check.yml` | Create | Dispatch-only: per-role positive and negative assumes, scope checks, boundary checks; an `inventory` job for role trust, boundaries and distribution IDs. It deliberately spans every environment in one run, because a cross-environment refusal check cannot work otherwise. |
 | `activity-app/functions/template.yaml` | Modify `Globals.Function` (75–107) | `PermissionsBoundary` |
 | `.github/actions/setup-sam-portable/action.yml` | Modify `:59` | Pin `aws-actions/setup-sam` by SHA |
@@ -383,8 +384,10 @@ Task numbers group the work by subject. The real dependency order differs:
   4. **Deploy.** Run:
 
      ```
-     sam deploy --template-file activity-oidc/template.yaml --stack-name FederatedActivityPublisher-oidc --capabilities CAPABILITY_NAMED_IAM --no-confirm-changeset --no-fail-on-empty-changeset --region <region> --parameter-overrides StageDistributionId=${{ vars.ACTIVITY_DISTRIBUTION_ID_STAGE }} ProdDistributionId=${{ vars.ACTIVITY_DISTRIBUTION_ID_PROD }} AllowDistributionCreate=${{ inputs.allow-distribution-create }}
+     sam deploy --template-file activity-oidc/template.yaml --stack-name <repo>-oidc --capabilities CAPABILITY_NAMED_IAM --no-confirm-changeset --no-fail-on-empty-changeset --region <region> --parameter-overrides GitHubOrg=<owner> GitHubRepo=<repo> GitHubOrgId=<owner id> GitHubRepoId=<repo id> StageDistributionId=${{ vars.ACTIVITY_DISTRIBUTION_ID_STAGE }} ProdDistributionId=${{ vars.ACTIVITY_DISTRIBUTION_ID_PROD }} AllowDistributionCreate=${{ inputs.allow-distribution-create }}
      ```
+
+     `<owner>`, `<repo>`, `<owner id>` and `<repo id>` come from the run: `github.repository_owner`, `github.event.repository.name`, `github.repository_owner_id` and `github.repository_id`, so a fork's dispatch creates roles that trust the fork. Each value is passed quoted (`Key="value"`): SAM CLI 1.166.2's override parser drops an unquoted empty `Key=`. The workflows derive the stack name and every role name from the repository name too.
 
      Redirect its output to `$RUNNER_TEMP/deploy.log`. Print `role stack: ok` or `role stack: failed (see the stack events in the CloudFormation console)`.
   5. **Outputs.** On success only, append `describe-stacks --stack-name FederatedActivityPublisher-oidc --query "Stacks[0].Outputs"` to `$GITHUB_STEP_SUMMARY`. These are role names.
@@ -429,10 +432,13 @@ Task numbers group the work by subject. The real dependency order differs:
 
   **Boundary-policy denials**, in `stage` and in `production`, for each of `<B>` = `activity-app-stage-function-boundary` and `activity-app-prod-function-boundary`:
   - `iam create-policy-version --policy-arn <B> --policy-document <a deny-all document>`, without `--set-as-default`: denied.
-  - `iam set-default-policy-version --policy-arn <B> --version-id v1`: denied.
-  - `iam delete-policy-version` on `<B>` and `iam delete-policy` on `<B>`: denied.
+  - `iam set-default-policy-version --policy-arn <B> --version-id v999`: denied.
+  - `iam delete-policy-version --policy-arn <B> --version-id v999`: denied.
+  - `iam delete-policy` on `<B>-oidc-check`, a sibling ARN that does not exist: denied.
 
-  The deploy roles hold no managed-policy write action, so each call is expected to return `AccessDenied` whether or not `<B>` exists yet [inferred: IAM authorizes before it looks the policy up]. If a `create-policy-version` call succeeds, the run fails and prints the new version ID. That version is not the default, so it has no effect, and a maintainer decides how to remove it.
+  None of these can change the effective boundary if a denial regresses: v999 and the sibling do not exist, so a call that is authorized returns `NoSuchEntity`, which fails the check.
+
+  The deploy roles hold no managed-policy write action, so each call is expected to return `AccessDenied` whether or not `<B>` exists yet [inferred: IAM authorizes before it looks the policy up]. If a `create-policy-version` call succeeds, the run fails and prints the new version ID. That version is not the default, so it has no effect, and the job's cleanup step tries to delete it. If the role cannot, the cleanup fails and names the version for a maintainer to remove. Every other probe that can create something (`create-role`, `create-policy`) is cleaned up the same way.
 
   **Boundary-policy positive control**, in `infrastructure`, for each `<B>`:
   1. `iam get-policy` reads `DefaultVersionId`, and `iam get-policy-version` reads that version's document.
