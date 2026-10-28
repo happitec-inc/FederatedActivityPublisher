@@ -904,7 +904,7 @@ Resources:
               - Sid: ListRoles
                 Effect: Allow
                 Action: iam:ListRoles
-                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/*
+                Resource: "*"
               - Sid: ReadAppRoles
                 Effect: Allow
                 Action: iam:GetRole
