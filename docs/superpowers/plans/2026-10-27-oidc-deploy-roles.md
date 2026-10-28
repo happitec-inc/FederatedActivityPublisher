@@ -203,7 +203,7 @@ The job assumes `OIDC_BOOTSTRAP_ROLE_ARN` with the pinned `configure-aws-credent
 - **Resources with generated IDs are scoped by type, not by stage.** These are API Gateway `/restapis/*` and CloudFront cache policies, origin request policies and origin access controls.
   - The CloudFront distribution is scoped by ID, taken from `ACTIVITY_DISTRIBUTION_ID_STAGE` or `_PROD`. The template refuses an empty ID unless `AllowDistributionCreate` is `true`.
   - The Route 53 record write is scoped to each stage's one record name.
-- **Read-only grants on `*`:** `route53:ListHostedZones`, `route53:GetChange`, `cloudwatch:DescribeAlarms`, `ssm:DescribeParameters` and the event-source-mapping reads.
+- **Read-only grants on `*`:** `route53:ListHostedZones`, `route53:GetChange`, `cloudwatch:DescribeAlarms`, `ssm:DescribeParameters`, the event-source-mapping reads, and the trust-check role's `iam:ListRoles`.
 - **The first CDN-template change after cutover is the first exercise of the CloudFront distribution and Route 53 record grants.** It runs on stage before prod.
 - **The infra role can rewrite both boundaries.** That is where the boundary is meant to change. Its policy writes are limited to the two boundary ARNs. The role is bound to the `infrastructure` environment, which allows `main` only (Q10 covers required reviewers). The deploy roles hold no managed-policy write action, so a stage or prod deploy role cannot loosen the boundary it is held to.
 - **A function permission outside the boundary deploys green.** CloudFormation accepts the role policy, because `iam:PutRolePolicy` is conditioned on the boundary ARN, not on the document. The permission fails with `AccessDenied` when the handler makes the call.
@@ -365,7 +365,7 @@ Task numbers group the work by subject. The real dependency order differs:
      | `...-deploy-prod` | 7,213 |
      | `...-infra` | 5,704 (5,309 before `FunctionBoundaries`) |
      | `...-integration-read` | 636 |
-     | `...-trust-check` | 828 |
+     | `...-trust-check` | 797 |
 
      The committed template is the receipt; these figures predict it. The boundaries are measured in Task 11.
 
@@ -1043,9 +1043,9 @@ Placeholders:
 | `CreateEventSourceMappings` | Allow | `lambda:CreateEventSourceMapping` | `*` | `ArnLike` `lambda:FunctionArn`: `<Fn>` |
 | `ChangeEventSourceMappings` | Allow | `lambda:UpdateEventSourceMapping`, `lambda:DeleteEventSourceMapping` | `*` | |
 | `ReadEventSourceMappings` | Allow | `lambda:GetEventSourceMapping`, `lambda:ListEventSourceMappings` | `*` | |
-| `FunctionRolesBounded` | Allow | `iam:CreateRole`, `iam:PutRolePolicy`, `iam:DeleteRolePolicy`, `iam:PutRolePermissionsBoundary` | `arn:aws:iam::<A>:role/activity-app-<S>-*` | `StringEquals` `iam:PermissionsBoundary`: `<B>` |
+| `FunctionRolesBounded` | Allow | `iam:CreateRole`, `iam:PutRolePolicy`, `iam:DeleteRolePolicy`, `iam:PutRolePermissionsBoundary`, `iam:DeleteRole`, `iam:UpdateRole`, `iam:UpdateRoleDescription` | `arn:aws:iam::<A>:role/activity-app-<S>-*` | `StringEquals` `iam:PermissionsBoundary`: `<B>` |
 | `FunctionRoleManagedPolicies` | Allow | `iam:AttachRolePolicy`, `iam:DetachRolePolicy` | `arn:aws:iam::<A>:role/activity-app-<S>-*` | `StringEquals` `iam:PermissionsBoundary`: `<B>` and `ArnEquals` `iam:PolicyARN`: `arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole`, `arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole` |
-| `FunctionRolesOther` | Allow | `iam:` `GetRole`, `GetRolePolicy`, `ListRolePolicies`, `ListAttachedRolePolicies`, `DeleteRole`, `UpdateRole`, `UpdateRoleDescription`, `TagRole`, `UntagRole`, `ListRoleTags` | `arn:aws:iam::<A>:role/activity-app-<S>-*` | |
+| `FunctionRolesOther` | Allow | `iam:` `GetRole`, `GetRolePolicy`, `ListRolePolicies`, `ListAttachedRolePolicies`, `TagRole`, `UntagRole`, `ListRoleTags` | `arn:aws:iam::<A>:role/activity-app-<S>-*` | |
 | `NoBoundaryRemoval` | Deny | `iam:DeleteRolePermissionsBoundary` | `*` | |
 | `PassFunctionRoles` | Allow | `iam:PassRole` | `arn:aws:iam::<A>:role/activity-app-<S>-*` | `StringEquals` `iam:PassedToService`: `lambda.amazonaws.com` |
 | `ApiGateway` | Allow | `apigateway:` `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `UpdateRestApiPolicy` | `arn:aws:apigateway:<region>::/restapis`, `.../restapis/*`, `.../tags/*` | |
@@ -1059,6 +1059,8 @@ Placeholders:
 | `MediaBucketPolicy` | Allow | `s3:GetBucketPolicy`, `s3:PutBucketPolicy`, `s3:DeleteBucketPolicy`, `s3:ListBucket` | `arn:aws:s3:::activity-media-<S>` | |
 | `FrontendAssets` | Allow | `s3:PutObject` | `arn:aws:s3:::activity-media-<S>/media/frontend/*` | |
 | `RoleStackParameters` | Allow | `cloudformation:DescribeStacks` | `stack/${GitHubRepo}-oidc/*` | |
+
+Per the IAM service reference, `https://servicereference.us-east-1.amazonaws.com/v1/iam/iam.json`, read 2026-10-27, `iam:DeleteRole`, `iam:UpdateRole` and `iam:UpdateRoleDescription` take the `iam:PermissionsBoundary` condition key, so they sit in `FunctionRolesBounded`. The actions left in `FunctionRolesOther` take no such key.
 
 ### A.2 Infra role (`...-infra`)
 
@@ -1094,9 +1096,11 @@ The role is read-only. It is used only by `oidc-trust-check.yml`'s `inventory` j
 
 | Sid | Actions | Resource |
 |---|---|---|
-| `ListRoles` | `iam:ListRoles` | `arn:aws:iam::<A>:role/*` |
+| `ListRoles` | `iam:ListRoles` | `*` |
 | `ReadAppRoles` | `iam:GetRole` | `arn:aws:iam::<A>:role/activity-app-stage-*`, `arn:aws:iam::<A>:role/activity-app-prod-*` |
 | `AppStacks` | `cloudformation:` `DescribeStacks`, `DescribeStackResource`, `ListStackResources`, `GetTemplate` | `stack/activity-app-stage/*`, `stack/activity-app-stage-*/*`, `stack/activity-app-prod/*`, `stack/activity-app-prod-*/*` |
+
+`iam:ListRoles` has no resource type in the IAM service reference, `https://servicereference.us-east-1.amazonaws.com/v1/iam/iam.json`, read 2026-10-27, so it is granted on `*`. `iam:GetRole` stays scoped to the two prefixes.
 
 ### A.5 Function boundaries (`activity-app-<S>-function-boundary`, resource `FunctionBoundary` in `activity-environment-<S>`)
 
