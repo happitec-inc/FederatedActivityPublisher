@@ -4,23 +4,21 @@
 
 **Goal:** Every GitHub Actions job here that talks to AWS assumes a repo-scoped IAM role through GitHub OIDC. After that, the static key secrets `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are deleted.
 
-**Architecture:** One plain CloudFormation template, `activity-oidc/template.yaml`, defines everything in this repo's role stack:
+**Architecture:**
 
-- **Five IAM roles**, each trusting exactly one OIDC subject of this repository: stage deploy, prod deploy, infrastructure, integration read, and a read-only trust-check role.
-- **Two permissions-boundary managed policies**, one per stage. Every Lambda execution role the deploy roles create or change must carry its stage's boundary.
-
-A PR check keeps the functions template inside both boundaries. A manually dispatched workflow, bound to its own environment, deploys the role stack. It authenticates with the credential in `OIDC_BOOTSTRAP_ROLE_ARN` (Q12). Self-hosters use credentials of their own.
+- **The role stack.** One plain CloudFormation template, `activity-oidc/template.yaml`, defines **five IAM roles with inline policies** and nothing else. Each role trusts exactly one OIDC subject of this repository: stage deploy, prod deploy, infrastructure, integration read, and a read-only trust-check role. A manually dispatched workflow, bound to its own environment, deploys it. It authenticates with the credential in `OIDC_BOOTSTRAP_ROLE_ARN` (Q12). Self-hosters use credentials of their own.
+- **The function boundaries.** Each `activity-environment-<stage>` stack gains one permissions-boundary managed policy, `activity-app-<stage>-function-boundary`. `environment.yml` deploys it on the infra role (Task 11). Every Lambda execution role the deploy roles create or change must carry its stage's boundary. The deploy roles hold no managed-policy write action, so neither can loosen its own boundary.
+- **Detection.** A function permission outside the boundary deploys green and fails with `AccessDenied` when the handler runs. Stage's post-deploy integration tests run the handlers after every stage deploy that changes function permissions, before any release reaches prod (D5).
 
 These changes land first, on the current credentials:
 
-- the function-role boundary;
 - per-stage SAM artifact prefixes with forced uploads;
 - SHA-pinned third-party actions;
 - a distribution-ID guard.
 
-Then the workflows move to `role-to-assume` in this order: integration tests, stage, prod and infrastructure. The push-triggered stage test job stops holding AWS credentials altogether. Docs follow, and the static secrets are deleted last.
+Then `environment.yml` moves to the infra role and deploys the two boundaries, and the function roles take the boundary. After that the remaining workflows move to `role-to-assume` in this order: integration tests, stage, prod and bootstrap. The push-triggered stage test job stops holding AWS credentials altogether. Docs follow, and the static secrets are deleted last.
 
-**Tech Stack:** GitHub Actions, `aws-actions/configure-aws-credentials` (pinned by SHA), AWS SAM CLI through `./.github/actions/setup-sam-portable`, CloudFormation, IAM, and Python 3 with the distro `python3-yaml` package for the offline boundary check.
+**Tech Stack:** GitHub Actions, `aws-actions/configure-aws-credentials` (pinned by SHA), AWS SAM CLI through `./.github/actions/setup-sam-portable`, CloudFormation and IAM.
 
 **Spec:** None separate. Moving to OIDC was settled 2026-10-27. The requirements are restated under Global Constraints, and "Decisions" argues each choice.
 
@@ -33,10 +31,12 @@ Then the workflows move to `role-to-assume` in this order: integration tests, st
   No wildcards. The org, repo and IDs are template parameters. Their defaults are this repository's values: `happitec-inc`, `FederatedActivityPublisher`, owner ID `174214171` and repo ID `1193951865`, read from `GET /repos/happitec-inc/FederatedActivityPublisher` on 2026-10-27.
 - **No AWS managed policy** is attached to any of the five roles, and no role is shared with another project.
 - **Every IAM role-write action of the deploy roles is conditioned on `iam:PermissionsBoundary`** equal to that stage's boundary policy. `iam:UpdateAssumeRolePolicy` is not granted. `iam:DeleteRolePermissionsBoundary` is explicitly denied.
+- **Only the infra role writes the boundary policies.** It holds `iam:CreatePolicy`, `iam:CreatePolicyVersion`, `iam:DeletePolicyVersion`, `iam:DeletePolicy`, `iam:GetPolicy`, `iam:GetPolicyVersion`, `iam:ListPolicyVersions` and `iam:TagPolicy`, on exactly the two boundary ARNs. The deploy roles hold none of those actions.
+- **The role stack contains only `AWS::IAM::Role` resources with inline policies.** No managed policy is defined in it.
 - **Names.**
   - Roles: `FederatedActivityPublisher-github-actions-deploy-stage`, `FederatedActivityPublisher-github-actions-deploy-prod`, `FederatedActivityPublisher-github-actions-infra`, `FederatedActivityPublisher-github-actions-integration-read` and `FederatedActivityPublisher-github-actions-trust-check`.
-  - Boundaries: `activity-app-stage-function-boundary` and `activity-app-prod-function-boundary`.
-  - Stack: `FederatedActivityPublisher-oidc`.
+  - Boundaries: `activity-app-stage-function-boundary` in stack `activity-environment-stage`, and `activity-app-prod-function-boundary` in stack `activity-environment-prod`.
+  - Role stack: `FederatedActivityPublisher-oidc`.
 - **The template has no `Transform:`** and stays under 51,200 bytes, the CloudFormation limit for an inline template body. That way it can be deployed from the console, the CLI or the dispatch workflow without an artifact bucket.
 - **Size limits.** Each role's inline policies total at most 10,240 characters, and each managed policy at most 6,144 characters, whitespace excluded. Both limits are from the IAM quotas page.
 - **Identifiers stay out of the repository and out of public logs.**
@@ -57,7 +57,8 @@ Then the workflows move to `role-to-assume` in this order: integration tests, st
 
 - **Jobs bound to an environment present `environment:<name>`, not `ref:`.** GitHub docs, "OpenID Connect reference": "The subject claim includes the environment name when the job references an environment." Task 5's trust check pins each role to its one subject.
 - **Every function role carries the boundary before a deploy role first touches it.** The deploy roles can write to a role only if it already carries the right boundary. Tasks 7 and 8 check that it is in place first. If one of them runs too early, the deploy fails on the first role change. That failure is safe, but it is a failure.
-- **A permission outside the boundary deploys green and fails at runtime.** `iam:PutRolePolicy` is conditioned on the boundary, not on what the policy says. The PR check from Task 1 Step 3 catches this in the template, once against each stage's boundary. The docs rule in Task 9 covers ordering: widen the boundary and redeploy the role stack before merging the function change.
+- **A permission outside the boundary deploys green and fails at runtime.** `iam:PutRolePolicy` is conditioned on the boundary, not on what the policy says. Stage's post-deploy integration tests detect it: the handler's AWS call returns `AccessDenied`, the request fails, and the test fails, before any release reaches prod. They detect it only in the handlers and code paths the tests exercise; D5 lists the handlers they don't call.
+- **The deploy roles cannot loosen their own boundary.** They hold no managed-policy write action. Only the infra role can change the boundary policies, and only those two (A.2 `FunctionBoundaries`). Task 1 Step 4's trust check measures both sides.
 - **Rollback must read the previous artifacts.** The deploy roles can read only `activity-app-<stage>/*` in the SAM bucket. Task 4 ships the prefix on the current credentials, so the template a failed OIDC deploy rolls back to already points at prefixed keys.
 - **A job holding `id-token: write` can mint a token in any of its steps.**
   - The actions in those jobs are pinned to commit SHAs (Task 4).
@@ -117,7 +118,7 @@ This repository is public. GitHub docs, "Managing GitHub Actions settings for a 
 | Option | What changes | Smallest mechanism | Correct locus | Cost |
 |---|---|---|---|---|
 | (a) Add the roles to `activity-bootstrap` and deploy them with `bootstrap.yml` | One template gains roles | Reuses a stack and workflow | **No.** The DNS-and-certificate stack takes on a second job, CI identity. `bootstrap.yml`'s `domain-name` and `dns-mode` inputs put the hosted zone at risk on every role edit. The roles would need a broad credential to create them and could later rewrite their own policies. | A broad credential in CI once; a role that can change itself afterwards |
-| (b) Publish a generic, opt-in reusable role workflow in `happitec-inc/public-actions`, keeping its existing defaults | A new shared component in another repository | Adds a component | Right for a tool many public repos share | A cross-repo change and review; still has to emit five roles and two boundaries |
+| (b) Publish a generic, opt-in reusable role workflow in a shared public actions repository | A new shared component in another repository | Adds a component | Right for a tool many public repos share | A cross-repo change and review; still has to emit five roles |
 | **(c) This repository owns `activity-oidc/template.yaml` and deploys it with `oidc-roles.yml`** | One template and one small workflow here | **Yes.** No new component elsewhere | **Yes.** The roles and boundaries live with their only consumer, and the template is plain CloudFormation that self-hosters can deploy with their own credentials | Hand-written IAM to review |
 
 **Recommendation: (c).** `oidc-roles.yml` authenticates with the credential in `OIDC_BOOTSTRAP_ROLE_ARN` (Q12). Task 2 Step 4 is its first run.
@@ -139,7 +140,7 @@ Options (a), (b) and (c) differ in where the roles are defined and which workflo
   - `production`: `main` and tags `v*`.
 
   The tag rule limits which refs can deploy, not who can create them, so Task 2 also restricts creating `v*` tags with a ruleset (Q9).
-- **`infra` is split from the deploy roles.** The data and DNS stacks change rarely and by hand. With their grants off the deploy roles, the roles used on every merge and release cannot reconfigure the table, bucket, queues, hosted zone or certificate. The split also keeps each deploy role's inline policy well under the size limit; Task 1 Step 2 measures all five roles and both boundaries from the committed template.
+- **`infra` is split from the deploy roles.** The data and DNS stacks change rarely and by hand. With their grants off the deploy roles, the roles used on every merge and release cannot reconfigure the table, bucket, queues, hosted zone or certificate. The split also keeps each deploy role's inline policy well under the size limit; Task 1 Step 2 measures all five roles from the committed template.
 - **The push-triggered stage test job holds no AWS credential.** It used AWS only to read `ApiEndpoint` and `ClientApiUrl`. In Task 7, `build` and `fast-deploy`, which already hold the stage role, publish those two URLs as job outputs, and `integration-tests` reads them from `needs`. The URLs contain no secret-derived value, so the runner keeps the outputs.
 - **The prod client token is readable only from jobs bound to the `integration` environment.** Today that means `run-integration-tests.yml` alone.
 - **`trust-check` is a separate, read-only role.** It holds `iam:ListRoles`, so the inventory can scan every `activity-app-<S>-*` role in the account, not only the ones in the functions stack. Keeping it off the deploy roles means no merge-time role can enumerate the account's roles.
@@ -153,7 +154,13 @@ Options (a), (b) and (c) differ in where the roles are defined and which workflo
 
    The CDN stack declares CloudFront `CachePolicy`, `OriginRequestPolicy`, `OriginAccessControl`, `Function` and `Distribution`, plus `S3::BucketPolicy` and `Route53::RecordSet`.
 
-   The environment stack declares `S3::Bucket`, `DynamoDB::Table`, `SQS::Queue`, `SNS::Topic` and `CloudWatch::Alarm`. The bootstrap stack declares `Route53::HostedZone` and `CertificateManager::Certificate`.
+   The environment stack declares `S3::Bucket`, `DynamoDB::Table`, `SQS::Queue`, `SNS::Topic` and `CloudWatch::Alarm`, and after Task 11 one `IAM::ManagedPolicy`, the stage's function boundary. The bootstrap stack declares `Route53::HostedZone` and `CertificateManager::Certificate`.
+
+   For `AWS::IAM::ManagedPolicy`, the infra role's grant is the eight-action list settled 2026-10-27 (A.2 `FunctionBoundaries`). The registry schema `aws-iam-managedpolicy.json` differs from it in two places, read 2026-10-27:
+   - its `read` and `delete` handlers also list `iam:ListEntitiesForPolicy`, which the list does not grant;
+   - its `tagging` block says `"taggable": false`, so `iam:TagPolicy` is not exercised.
+
+   The `Attach*` and `Detach*` actions its handlers list apply only when the policy names `Roles`, `Groups` or `Users`, and the boundary names none. Q14 carries the `ListEntitiesForPolicy` difference.
 3. **The rule.**
    - Grant the handler actions of the resource's own service, scoped to this repository's resource names.
    - Grant cross-service actions only for features the templates use: `iam:PassRole` to Lambda, and `s3:GetObject` and `s3:GetObjectVersion` on the code artifacts.
@@ -170,14 +177,14 @@ Options (a), (b) and (c) differ in where the roles are defined and which workflo
    - The inline `s3:PutObject` and `kms:Decrypt` statements in `activity-app/functions/template.yaml`.
    - The managed policies SAM attaches: `AWSLambdaBasicExecutionRole` (`logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents`) and `AWSLambdaSQSQueueExecutionRole` (adds `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:GetQueueAttributes`), as documented in the AWS Managed Policy Reference.
 
-   Each boundary narrows that union to its own stage's resources. The PR check (Task 1 Step 3) keeps the template inside both.
+   Each boundary narrows that union to its own stage's resources. A function permission outside it is detected by stage's post-deploy integration tests, within the limits D5 states.
 7. **Name check.** Every action and condition key in Appendix A is in the AWS Policy Generator catalog, `https://awspolicygen.s3.amazonaws.com/js/policies.js`, fetched 2026-10-27. Task 1 Step 2 reruns the check against the committed template, with a misspelled-name negative control.
 
    The registry lists some API operation names that are not IAM actions, and they are excluded: for example `s3:DeleteBucketCors`, whose IAM action is `s3:PutBucketCORS`, and `cloudfront:CreateDistributionWithTags`.
 
 ### D4: The first creation of the role stack
 
-The role stack is created by a dispatch of `oidc-roles.yml` from `main`, in a job bound to the `oidc-bootstrap` environment, with an explicit go. The static keys are never used for it.
+The role stack is created by a dispatch of `oidc-roles.yml` from `main`, in a job bound to the `oidc-bootstrap` environment, with an explicit go. The static keys are never used for it. The stack contains only IAM roles with inline policies (Q12); the boundaries it refers to by ARN come from the infra role's deploy of the environment stacks (Task 11).
 
 The job assumes `OIDC_BOOTSTRAP_ROLE_ARN` with the pinned `configure-aws-credentials`; the ARN is a secret, so it is masked in the log. It writes the `sam deploy` output to a file under `$RUNNER_TEMP` and prints only `ok` or `failed`. Failure detail is read in the CloudFormation console by a maintainer with account access.
 
@@ -196,6 +203,29 @@ The job assumes `OIDC_BOOTSTRAP_ROLE_ARN` with the pinned `configure-aws-credent
   - The Route 53 record write is scoped to each stage's one record name.
 - **Read-only grants on `*`:** `route53:ListHostedZones`, `route53:GetChange`, `cloudwatch:DescribeAlarms`, `ssm:DescribeParameters` and the event-source-mapping reads.
 - **The first CDN-template change after cutover is the first exercise of the CloudFront distribution and Route 53 record grants.** It runs on stage before prod.
+- **The infra role can rewrite both boundaries.** That is where the boundary is meant to change. Its policy writes are limited to the two boundary ARNs. The role is bound to the `infrastructure` environment, which allows `main` only (Q10 covers required reviewers). The deploy roles hold no managed-policy write action, so a stage or prod deploy role cannot loosen the boundary it is held to.
+- **A function permission outside the boundary deploys green.** CloudFormation accepts the role policy, because `iam:PutRolePolicy` is conditioned on the boundary ARN, not on the document. The permission fails with `AccessDenied` when the handler makes the call.
+
+  **Detection is stage's post-deploy integration tests.** They run the handlers against stage, and an `AccessDenied` there fails the request and the test before any release reaches prod. A function permission changes in one of two ways, and both are followed by those tests:
+  - **The functions template.** Any change under `activity-app/` sends `deploy-stage.yml` down the full path (line 57). So does a dispatch (lines 36–39). The full path is job `build` (lines 245–247), and job `integration-tests` runs after it (`needs: [detect, fast-deploy, build]`, lines 370–375, at `origin/main`).
+  - **The boundary itself.** `environment.yml` deploys it. On `main` today, nothing runs the tests after that workflow. That was a gap, and Task 11 closes it: `environment.yml` gains an `integration-tests` job that calls `run-integration-tests.yml` for `stage` after `deploy` succeeds.
+
+  No other check is added.
+
+  **What the tests don't cover.** The tests exercise only the handlers and code paths they call. Every function carries the same boundary, so one tested call proves its action and resource for every function. A gap remains wherever only an untested handler or path makes a call. Per `integration-tests/Tests/IntegrationTests/` at `origin/main`, the stage tests make no request to these handlers:
+  - `InstanceFunction` (`/api/v1/instance`, `/api/v2/instance`);
+  - `ObjectFunction` (`/users/{username}/statuses/{id}`);
+  - `ProfileFunction` (`/profile/{proxy+}`). `actorContentNegotiationHTML` stops at the 302 to `/@randomforms` and does not follow it;
+  - `InboxFunction` (`POST /users/{username}/inbox`). `ActorIntegrationTests` only checks the inbox URL in the actor document;
+  - `DeliverFunction`, the SQS consumer. A posted status can enqueue a delivery, but no test waits for or asserts on it. It is the only function with an `SQS` event, so it is the only role holding `AWSLambdaSQSQueueExecutionRole`'s `sqs:ReceiveMessage`, `sqs:DeleteMessage` and `sqs:GetQueueAttributes`. A boundary gap there fails no test.
+
+  Some handlers the tests do call are covered only in part:
+  - `AuthFunction`: only `/api/internal/auth/challenge` and `/api/internal/passkeys/register-challenge`.
+  - `ComposeFunction`: only the no-session redirect.
+
+  **What that means.** A boundary gap that only those handlers or paths reach passes stage's tests. It then reaches prod with the next release. It shows up only as `AccessDenied` in that function's logs and error count when real traffic reaches it, on stage if stage gets such traffic, otherwise in prod. Task 3 Step 2's one-hour watch of the stage functions' error counts sees only the traffic that arrives in that hour.
+- **A prod boundary change has no stage gate inside its own run.** `environment.yml` with `prod` deploys the prod boundary directly. The two boundaries come from one resource definition, substituted by `Stage` (Task 11), so a stage run tests the same document shape first. Run `environment.yml` for `stage` first, and run `prod` only after its `integration-tests` job is green.
+- **A release cut after a red stage run carries the failure to prod.** This plan does not change the release flow.
 
 ---
 
@@ -203,20 +233,19 @@ The job assumes `OIDC_BOOTSTRAP_ROLE_ARN` with the pinned `configure-aws-credent
 
 | File | Change | Responsibility |
 |---|---|---|
-| `activity-oidc/template.yaml` | Create | Five roles, two boundary policies, outputs (role names only) |
-| `scripts/check-function-boundary.py` | Create | Offline check: every function permission in `activity-app/functions/template.yaml` falls inside the chosen stage's boundary in `activity-oidc/template.yaml` |
-| `scripts/test-check-function-boundary.sh` | Create | Negative controls for that check, in the style of `scripts/test-detect-changed-targets.sh` |
-| `.github/workflows/test.yml` | Modify | New job `function-boundary` on every PR |
+| `activity-oidc/template.yaml` | Create | Five roles with inline policies, outputs (role names only) |
+| `activity-environment/template.yaml` | Modify: new resource after `DLQAlarm` (101–120), before `Outputs` (122) | `FunctionBoundary`, the stage's `activity-app-<stage>-function-boundary` |
+| `activity-environment/samconfig.toml` | Modify `:7` | `CAPABILITY_NAMED_IAM`, for a self-hoster's local deploy |
 | `.github/workflows/oidc-roles.yml` | Create | Dispatch-only, `environment: oidc-bootstrap`: deploy `FederatedActivityPublisher-oidc` with quiet output |
 | `.github/workflows/oidc-trust-check.yml` | Create | Dispatch-only: per-role positive and negative assumes, scope checks, boundary checks; an `inventory` job for role trust, boundaries and distribution IDs. It deliberately spans every environment in one run, because a cross-environment refusal check cannot work otherwise. |
 | `activity-app/functions/template.yaml` | Modify `Globals.Function` (75–107) | `PermissionsBoundary` |
 | `.github/actions/setup-sam-portable/action.yml` | Modify `:59` | Pin `aws-actions/setup-sam` by SHA |
 | `.github/workflows/deploy-stage.yml` | Modify | `--s3-prefix`, `--force-upload`, SHA pins, distribution guard; later the stage role, job outputs, and an `integration-tests` job without AWS |
 | `.github/workflows/deploy-prod.yml` | Modify | Same, for prod |
-| `.github/workflows/run-integration-tests.yml` | Modify `14–37` | `environment: integration`; integration role |
-| `.github/workflows/environment.yml` | Modify `4–5`, `19–33` | `environment: infrastructure`; infra role |
+| `.github/workflows/run-integration-tests.yml` | Modify `3–12`, later `14–37` | A `workflow_call` trigger (Task 11); later `environment: integration` and the integration role (Task 6) |
+| `.github/workflows/environment.yml` | Modify `4–5`, `19–33`, `43`; new job | `environment: infrastructure`; infra role; `CAPABILITY_NAMED_IAM`; job `integration-tests` calling `run-integration-tests.yml` for `stage` (Task 11) |
 | `.github/workflows/bootstrap.yml` | Modify `3–4`, `22–36` | `environment: infrastructure`; infra role; domain-change guard |
-| `README.md`, `DeployYourOwn.md`, `BuildingAndDeploying.md`, `AWSPermissions.md` | Modify | The OIDC setup for this repository and for forks; the widen-the-boundary-first rule |
+| `README.md`, `DeployYourOwn.md`, `BuildingAndDeploying.md`, `AWSPermissions.md` | Modify | The OIDC setup for this repository and for forks; where the boundary lives and what detects a permission outside it |
 
 ---
 
@@ -224,30 +253,29 @@ The job assumes `OIDC_BOOTSTRAP_ROLE_ARN` with the pinned `configure-aws-credent
 
 Task numbers group the work by subject. The real dependency order differs:
 
-1. **Task 1.** Merge the template, the checker and the two dispatch workflows.
+1. **Task 1.** Merge the role template and the two dispatch workflows.
 2. **Task 2 Steps 1–3.** Environments, secrets and the tag ruleset.
 3. **Task 4.** Pins, prefixes and the distribution guard. `oidc-roles.yml` uses `setup-sam-portable`, whose fallback this task pins.
 4. **Task 2 Steps 4–6.** The first role-stack deploy, which needs the Q12 credential, then the trust checks.
-5. **Task 3.** The function-role boundary. It needs the boundary policies from Task 2 Step 4.
-6. **Task 5.** The full trust check, once Task 3 has deployed to stage.
-7. **Task 6.** Integration tests on OIDC.
-8. **Task 7.** `deploy-stage` on OIDC. It needs Tasks 3 and 4 deployed to stage.
-9. **Task 8.** Prod and infrastructure on OIDC. It needs a release carrying Tasks 3 and 4.
-10. **Task 9.** Docs.
-11. **Task 10.** Delete the static secrets.
+5. **Task 11.** `environment.yml` on the infra role, which deploys both boundary policies. **It must precede Task 3**, because the function roles cannot take a boundary that does not exist yet.
+6. **Task 3.** The function-role boundary. It needs both boundary policies from Task 11.
+7. **Task 5.** The full trust check, once Task 3 has deployed to stage.
+8. **Task 6.** Integration tests on OIDC.
+9. **Task 7.** `deploy-stage` on OIDC. It needs Tasks 3 and 4 deployed to stage.
+10. **Task 8.** Prod and bootstrap on OIDC. It needs a release carrying Tasks 3 and 4.
+11. **Task 9.** Docs.
+12. **Task 10.** Delete the static secrets.
 
-### Task 1: Role template, boundary check and the two dispatch workflows
+### Task 1: Role template and the two dispatch workflows
 
 **Files:**
-- Create: `activity-oidc/template.yaml`, `scripts/check-function-boundary.py`, `scripts/test-check-function-boundary.sh`, `.github/workflows/oidc-roles.yml` and `.github/workflows/oidc-trust-check.yml`
-- Modify: `.github/workflows/test.yml`
+- Create: `activity-oidc/template.yaml`, `.github/workflows/oidc-roles.yml` and `.github/workflows/oidc-trust-check.yml`
 
 **Interfaces:**
 - Produces:
   - stack `FederatedActivityPublisher-oidc`, with outputs `StageDeployRoleName`, `ProdDeployRoleName`, `InfraRoleName`, `IntegrationReadRoleName` and `TrustCheckRoleName`;
-  - managed policies `activity-app-<stage>-function-boundary`;
-  - the role ARN form `arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/<role name>`;
-  - `python3 scripts/check-function-boundary.py --stage {stage|prod} [--functions PATH] [--roles PATH]`. It exits 0 and prints `WITHIN <stage> boundary` when the functions template is within that stage's boundary. Otherwise it exits 1 and prints `UNCOVERED …` or `ERROR …` lines (Step 3).
+  - the role ARN form `arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/<role name>`.
+- Refers to, by ARN only: the boundary policies `activity-app-<stage>-function-boundary`, which Task 11 creates. The role stack does not define them.
 
 - [ ] **Step 1: Write `activity-oidc/template.yaml`**
 
@@ -262,7 +290,7 @@ Task numbers group the work by subject. The real dependency order differs:
 
   `Conditions`: `DistributionCreate`, which is `AllowDistributionCreate` = `true`.
 
-  `Rules`: an empty distribution variable fails the deploy instead of widening the grant.
+  `Rules`: an empty distribution variable fails the deploy instead of granting every distribution.
 
   ```yaml
   Rules:
@@ -281,8 +309,7 @@ Task numbers group the work by subject. The real dependency order differs:
   - "If a parameter value is invalid, CloudFormation does not create or update the stack."
 
   `Resources`:
-  - **`StageFunctionBoundary` and `ProdFunctionBoundary`**: `AWS::IAM::ManagedPolicy`, with `ManagedPolicyName: activity-app-<stage>-function-boundary` and documents from Appendix A.5.
-  - **Five `AWS::IAM::Role` resources**:
+  - **Five `AWS::IAM::Role` resources**, and no other resource type:
     - `RoleName: !Sub ${GitHubRepo}-github-actions-<suffix>` and `MaxSessionDuration: 3600`;
     - one inline policy with the statements in Appendix A;
     - `Tags: [{Key: Project, Value: !Ref GitHubRepo}]`.
@@ -312,78 +339,28 @@ Task numbers group the work by subject. The real dependency order differs:
   2. **Action names.** Extract every `service:Action` token from the template and check each against `serviceMap[*].Actions` and `conditionKeys` in `https://awspolicygen.s3.amazonaws.com/js/policies.js`.
      - Run it once with a misspelled action added. Expected: that name is reported.
      - Remove it and run again. Expected: zero missing.
-  3. **Policy size.** For each of the five roles and both boundaries, minify the policy with every `!Sub` and import replaced by a real-length placeholder:
+  3. **Policy size.** For each of the five roles, minify the inline policy with every `!Sub` and import replaced by a real-length placeholder:
      - a 12-digit account ID;
      - a 21-character zone ID;
      - a 14-character distribution ID;
      - a UUID certificate ID;
      - a 30-character domain.
 
-     Expected: each role under 10,240 characters, each boundary under 6,144. Record the measured numbers in the PR body.
+     Expected: each role under 10,240 characters. Record the measured numbers in the PR body.
 
-- [ ] **Step 3: Write the boundary check and its negative controls**
+     Computed from Appendix A on 2026-10-27, with these placeholders, region `us-east-1`, `Sid`s included, and the distribution scoped by ID:
 
-  **`scripts/check-function-boundary.py`** uses only Python 3 and `yaml`, from the distro package `python3-yaml`. It loads both templates with a `yaml.SafeLoader` subclass that turns every `!Tag` node into `{"Tag": value}`, so CloudFormation tags parse without being evaluated.
-
-  1. **Boundary.** `--stage stage` reads `StageFunctionBoundary`, and `--stage prod` reads `ProdFunctionBoundary`, from `activity-oidc/template.yaml`. Its `Allow` statements give the allowed action and resource patterns. Any boundary pattern containing `?` or `[` fails with `ERROR unsupported pattern character <pattern>`: `fnmatch` gives those characters meanings IAM does not.
-  2. **Function permissions.** For every `AWS::Serverless::Function` in `activity-app/functions/template.yaml`, collect:
-     - **Each SAM policy template in `Policies:`**, expanded from a table in the script holding the four templates in D3.6, with actions and resource forms copied from SAM docs.
-       - An unknown template name fails with `ERROR unknown SAM policy template <name>`.
-       - A bare string entry, meaning a managed-policy name or ARN, fails with `ERROR unsupported Policies entry <value>`.
-     - **Each inline `Statement` with `Effect: Allow`**: its actions and resources. `Deny` statements only narrow, so they are skipped.
-     - **The managed policies SAM attaches**: `AWSLambdaBasicExecutionRole` for every function, and `AWSLambdaSQSQueueExecutionRole` for a function with an `SQS` event.
-       - These are checked for actions only: their resource is `*`, and the boundary caps it by design.
-       - Any `Events` type other than `Api` or `SQS` fails with `ERROR unsupported event type <type>`, because other types attach managed policies the script does not model.
-  3. **Resolve resources** to strings with `${Stage}` set to the `--stage` value, a fixed placeholder account ID and region `us-east-1`, by these exact forms:
-
-     | Form in the template | Resolves to |
+     | Role | Characters |
      |---|---|
-     | `TableName` = import of `${EnvironmentStackName}-TableName` | `table/activity-${Stage}` and `.../index/*` |
-     | `QueueName` = `!Select [4, !Split ["/", import of ...-QueueUrl]]` | `activity-delivery-${Stage}` |
-     | `ParameterName: !Sub "activity/${Stage}/..."` | `parameter/activity/${Stage}/...` |
-     | `!Sub "...alias/aws/ssm"` | that ARN |
-     | `!Sub ["${BucketArn}/*", {BucketArn: import of ...-MediaBucketArn}]` | `arn:aws:s3:::activity-media-${Stage}/*` |
+     | `...-deploy-stage` | 7,234 |
+     | `...-deploy-prod` | 7,213 |
+     | `...-infra` | 5,692 (5,309 before `FunctionBoundaries`) |
+     | `...-integration-read` | 636 |
+     | `...-trust-check` | 828 |
 
-     Any other form fails with `ERROR cannot resolve resource <form>`, so the check fails closed.
-  4. **Match.**
-     - An action is covered when its lowercased form `fnmatch.fnmatchcase`-matches a lowercased boundary action pattern. IAM action names are case-insensitive. `sqs:SendMessage*` is covered by the identical boundary pattern.
-     - A resource is covered when it `fnmatch.fnmatchcase`-matches a boundary resource pattern rendered the same way. ARNs are case-sensitive.
-     - Conditions are not compared (Task 9 Step 4 documents what that misses).
-  5. **Report.** Every report line starts with a fixed tag:
-     - `UNCOVERED <stage> <function> <action> <resource>` for each uncovered permission, then exit 1;
-     - `ERROR <message>` for each fail-closed case above, then exit 1;
-     - `WITHIN <stage> boundary` and exit 0 when nothing is uncovered.
+     The committed template is the receipt; these figures predict it. The boundaries are measured in Task 11.
 
-     Every error path is caught and printed as an `ERROR` line, so a correct run never prints `Traceback`.
-
-  **`scripts/test-check-function-boundary.sh`** copies both templates to a temp directory, applies one mutation per case, runs the check with `--functions` and `--roles` pointing at the copies, and asserts both the exit code and a tagged line in the output. Any case whose output contains `Traceback` fails, whatever its exit code. A YAML parse error therefore cannot pass a case.
-
-  | Case | Mutation | Run | Expected exit | Output must contain |
-  |---|---|---|---|---|
-  | (a) | None | `--stage stage` and `--stage prod` | 0, 0 | `WITHIN stage boundary`, `WITHIN prod boundary` |
-  | (b) | Functions: the first inline `Action: s3:PutObject` becomes `Action: [s3:PutObject, s3:DeleteObject]` | `--stage stage` | 1 | a line starting `UNCOVERED stage` and containing `s3:DeleteObject` |
-  | (c) | Functions: the first `DynamoDBCrudPolicy:` becomes `S3CrudPolicy:` | `--stage stage` | 1 | `ERROR unknown SAM policy template S3CrudPolicy` |
-  | (d) | Functions: the first `alias/aws/ssm` becomes `alias/other` | `--stage stage` | 1 | a line starting `UNCOVERED stage` and containing `alias/other` |
-  | (e) | As (b), and `s3:DeleteObject` added to the `Media` statement of `StageFunctionBoundary` only | `--stage stage`, then `--stage prod` | 0, then 1 | `WITHIN stage boundary`, then a line starting `UNCOVERED prod` and containing `s3:DeleteObject` |
-  | (f) | The whole `Media` statement removed from `ProdFunctionBoundary` only, so no statement is left with zero actions | `--stage prod`, then `--stage stage` | 1, then 0 | a line starting `UNCOVERED prod` and containing `s3:PutObject`, then `WITHIN stage boundary` |
-  | (g) | Functions: a bare string `- AmazonS3FullAccess` appended to the first `Policies:` list | `--stage stage` | 1 | `ERROR unsupported Policies entry` |
-  | (h) | Functions: the first `Type: Api` event becomes `Type: S3` | `--stage stage` | 1 | `ERROR unsupported event type S3` |
-
-  - Case (e) is a stage-only widening: it must pass for stage and fail for prod.
-  - Case (f) narrows a boundary below what the functions use, so the boundary side of the comparison is exercised too.
-
-  The script prints each case's result and exits non-zero if any case differs on exit code or tagged line, or prints `Traceback`.
-
-  **`.github/workflows/test.yml`** gains a job `function-boundary` with the same `runs-on` expression. Its steps:
-  1. `actions/checkout@v6`;
-  2. `sudo apt-get update && sudo apt-get install -y python3 python3-yaml`;
-  3. `bash scripts/test-check-function-boundary.sh`;
-  4. `python3 scripts/check-function-boundary.py --stage stage`;
-  5. `python3 scripts/check-function-boundary.py --stage prod`.
-
-  Expected on this PR: green. The receipt that today's functions template is within both boundaries is that job's own output on the PR, `WITHIN stage boundary` and `WITHIN prod boundary`. Record the run link in the PR body.
-
-- [ ] **Step 4: Write `.github/workflows/oidc-roles.yml`**
+- [ ] **Step 3: Write `.github/workflows/oidc-roles.yml`**
 
   - Trigger: `workflow_dispatch`, with a boolean input `allow-distribution-create` defaulting to `false`.
   - `permissions: {contents: read, id-token: write}`.
@@ -405,7 +382,7 @@ Task numbers group the work by subject. The real dependency order differs:
 
   No step uploads `$RUNNER_TEMP`.
 
-- [ ] **Step 5: Write `.github/workflows/oidc-trust-check.yml`**
+- [ ] **Step 4: Write `.github/workflows/oidc-trust-check.yml`**
 
   Trigger: `workflow_dispatch`, with a choice input `expect-boundary`: `none` (default), `stage` or `all`. Workflow `permissions: {contents: read, id-token: write}`. One job per subject.
 
@@ -423,9 +400,9 @@ Task numbers group the work by subject. The real dependency order differs:
   | Job | `environment:` | Must be denied | Must assume | Scope checks (must be denied) |
   |---|---|---|---|---|
   | `no-environment` | none | all five roles | none | none |
-  | `stage` | `stage` | prod, infra, integration-read, trust-check | deploy-stage | `describe-stacks activity-app-prod`; `ssm get-parameter /activity/prod/keys/client-token`; `iam list-roles`; boundary checks |
-  | `production` | `production` | stage, infra, integration-read, trust-check | deploy-prod | `describe-stacks activity-app-stage`; `iam list-roles` |
-  | `infrastructure` | `infrastructure` | stage, prod, integration-read, trust-check | infra | `describe-stacks activity-app-prod` |
+  | `stage` | `stage` | prod, infra, integration-read, trust-check | deploy-stage | `describe-stacks activity-app-prod`; `ssm get-parameter /activity/prod/keys/client-token`; `iam list-roles`; boundary checks; boundary-policy denials |
+  | `production` | `production` | stage, infra, integration-read, trust-check | deploy-prod | `describe-stacks activity-app-stage`; `iam list-roles`; boundary-policy denials |
+  | `infrastructure` | `infrastructure` | stage, prod, integration-read, trust-check | infra | `describe-stacks activity-app-prod`; `iam create-policy --policy-name activity-app-oidc-check-policy`; then the boundary-policy positive control |
   | `integration` | `integration` | stage, prod, infra, trust-check | integration-read | `describe-stacks activity-environment-prod` |
   | `inventory` | `trust-check` | stage, prod, infra, integration-read | trust-check | `iam create-role` for `activity-app-stage-oidc-check-inventory`; `describe-stacks activity-environment-prod` |
 
@@ -439,6 +416,21 @@ Task numbers group the work by subject. The real dependency order differs:
 
     A step with `if: always()` deletes the role if it still exists.
 
+    The stage boundary policy exists only after Task 11. With `expect-boundary: none`, a `NoSuchEntity` on this positive control is reported, not failed. Any other result must still be the expected one.
+
+  **Boundary-policy denials**, in `stage` and in `production`, for each of `<B>` = `activity-app-stage-function-boundary` and `activity-app-prod-function-boundary`:
+  - `iam create-policy-version --policy-arn <B> --policy-document <a deny-all document>`, without `--set-as-default`: denied.
+  - `iam delete-policy-version` on `<B>` and `iam delete-policy` on `<B>`: denied.
+
+  The deploy roles hold no managed-policy write action, so each call is expected to return `AccessDenied` whether or not `<B>` exists yet [inferred: IAM authorizes before it looks the policy up]. If a `create-policy-version` call succeeds, the run fails and prints the new version ID. That version is not the default, so it has no effect, and a maintainer decides how to remove it.
+
+  **Boundary-policy positive control**, in `infrastructure`, for each `<B>`:
+  1. `iam get-policy` reads `DefaultVersionId`, and `iam get-policy-version` reads that version's document.
+  2. `iam create-policy-version` with the same document and no `--set-as-default` succeeds. The new version is not the default, so the effective boundary does not change.
+  3. `iam delete-policy-version` on the new version succeeds. A step with `if: always()` deletes it if it still exists.
+
+  With `expect-boundary: none`, a `NoSuchEntity` from step 1 is reported, not failed: before Task 11 the policies do not exist. With `stage` or `all`, both policies must pass all three steps. Task 11 deploys both boundaries before Task 3, so both exist by the time either value is used. A `LimitExceeded` on step 2, from a policy already at the version limit, fails the check under its own name.
+
   **Inventory**, in `inventory`, for each `<S>` in `stage` and `prod`:
   - **Role list.** List every role whose name begins `activity-app-<S>-`, with `iam list-roles --query "Roles[?starts_with(RoleName, 'activity-app-<S>-')].RoleName" --output text`.
     - The filter runs inside the CLI process, so only matching names leave it.
@@ -447,21 +439,21 @@ Task numbers group the work by subject. The real dependency order differs:
   - **Trust.** For each listed role, fail if `AssumeRolePolicyDocument` has any statement whose principal is anything other than exactly `{"Service": "lambda.amazonaws.com"}` (Q5).
   - **Boundary.** For each listed role, `iam get-role` reports `PermissionsBoundary.PermissionsBoundaryArn`. Print only whether it ends `activity-app-<S>-function-boundary`, as `yes` or `no`.
     - With `expect-boundary: stage`, any `no` for a stage role fails the run. With `all`, any `no` for either stage fails it.
-    - With `none`, the default, it is reported only. That is for Task 2 Step 5, before Task 3 has deployed.
+    - With `none`, the default, it is reported only. That is for Task 2 Step 5 and Task 11, before Task 3 has deployed.
     - `stage` is for the window after Task 3 reaches stage and before a release carries it to prod.
   - **Stack roles.** Find the FunctionsStack with `describe-stack-resource --logical-resource-id FunctionsStack` on `activity-app-<S>`, then `list-stack-resources`. Every `AWS::IAM::Role` it lists must appear in the role list.
   - **Managed policies.** Print the distinct `arn:aws:iam::aws:policy/...` strings in `cloudformation get-template --template-stage Processed` of the FunctionsStack.
   - **Distribution.** The `CloudFrontDistributionId` output of `activity-app-<S>` must equal `vars.ACTIVITY_DISTRIBUTION_ID_<S>`. If it does not, fail and print both values; distribution IDs are not secrets.
 
-- [ ] **Step 6: Open the PR**
+- [ ] **Step 5: Open the PR**
 
-  Expected: `test` and `function-boundary` green. After merge, the push changes `.github/`, so `deploy-stage` runs its full path on the static keys. Expected: green.
+  Expected: `test` green. After merge, the push changes `.github/`, so `deploy-stage` runs its full path on the static keys. Expected: green.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
   ```bash
-  git add activity-oidc/template.yaml scripts/check-function-boundary.py scripts/test-check-function-boundary.sh .github/workflows/test.yml .github/workflows/oidc-roles.yml .github/workflows/oidc-trust-check.yml
-  git commit -m "ci: add OIDC role stack, boundary check and trust check"
+  git add activity-oidc/template.yaml .github/workflows/oidc-roles.yml .github/workflows/oidc-trust-check.yml
+  git commit -m "ci: add OIDC role stack and trust check"
   ```
 
 ### Task 2: One-time setup (maintainer, explicit go per step)
@@ -505,14 +497,15 @@ There is no code in this task. Record each result on the merged Task 1 PR.
 
   Expected: `role stack: ok`, with the step summary listing five role names. Nothing depends on the role stack before this run.
 
-  On `failed`, a maintainer reads the stack events in the console, then stops and decides. Do not widen anything from the log.
+  On `failed`, a maintainer reads the stack events in the console, then stops and decides. Do not change any grant on the strength of the log alone.
 
 - [ ] **Step 5: Positive-path trust check from `main`**
 
-  Run `oidc-trust-check.yml` from `main`. At this point the function roles do not yet carry the boundary, so the inventory's boundary column shows `no`, which is expected here.
+  Run `oidc-trust-check.yml` from `main`. At this point the boundary policies do not exist yet (Task 11 creates them) and the function roles do not carry them, so the inventory's boundary column shows `no`, which is expected here.
 
   Expected:
-  - the assume, scope, boundary-create, trust and distribution checks pass;
+  - the assume, scope, boundary-create denials, boundary-policy denials, trust and distribution checks pass;
+  - the two positive controls that need a boundary policy, in `stage` and `infrastructure`, report `NoSuchEntity` [inferred: the error IAM returns for a policy that does not exist];
   - every function role name begins `activity-app-stage-` (U2);
   - the managed policy ARNs are exactly `arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole` and `.../AWSLambdaSQSQueueExecutionRole` (U3).
 
@@ -532,7 +525,9 @@ There is no code in this task. Record each result on the merged Task 1 PR.
 - Modify: `activity-app/functions/template.yaml`, `Globals.Function` (lines 75–107)
 
 **Interfaces:**
-- Consumes: the managed policies `activity-app-<stage>-function-boundary` (Task 2 Step 4).
+- Consumes: the managed policies `activity-app-<stage>-function-boundary`, both deployed by Task 11.
+
+**Precondition:** Task 11 is done, so both boundary policies exist. Stage's function roles take the boundary on this PR's stage deploy and prod's on the next release, so the prod boundary must already exist too.
 
 - [ ] **Step 1: Add the boundary**
 
@@ -542,12 +537,10 @@ There is no code in this task. Record each result on the merged Task 1 PR.
   PermissionsBoundary: !Sub arn:aws:iam::${AWS::AccountId}:policy/activity-app-${Stage}-function-boundary
   ```
 
-  Then run `python3 scripts/check-function-boundary.py --stage stage` and `--stage prod`. Expected: `WITHIN stage boundary` and `WITHIN prod boundary`.
-
 - [ ] **Step 2: Open the PR; after merge, observe `deploy-stage`**
 
   The run is on the static keys. Expected:
-  - green, including the integration tests, which exercise the SSM, KMS, DynamoDB and S3 paths under the boundary;
+  - green, including the integration tests, which exercise the SSM, KMS, DynamoDB, SQS-send and S3 paths under the boundary. They do not reach the handlers D5 lists;
   - the trust check's inventory shows `yes` for every stage function role.
 
   Watch the stage functions' error counts in the Lambda console for one hour after the deploy. Expected: no new `AccessDenied` (U9).
@@ -558,7 +551,7 @@ There is no code in this task. Record each result on the merged Task 1 PR.
 
 - [ ] **Step 4: Reversibility**
 
-  Until Task 10, reverting this PR removes the boundary, because the static keys can do so. After Task 10, the deploy roles are denied `iam:DeleteRolePermissionsBoundary` by design. Removing or replacing the boundary then needs a role-stack change through `oidc-roles.yml`: either widen the boundary, or temporarily change the deploy roles' grant. Record this in `AWSPermissions.md` (Task 9).
+  Until Task 10, reverting this PR removes the boundary, because the static keys can do so. After Task 10, the deploy roles are denied `iam:DeleteRolePermissionsBoundary` by design. Removing or replacing the boundary then needs one of two changes. Either the infra role changes the boundary document, through `environment.yml` (Task 11), or the role stack temporarily changes the deploy roles' grant, through `oidc-roles.yml`. Record this in `AWSPermissions.md` (Task 9).
 
 - [ ] **Step 5: Commit**
 
@@ -628,10 +621,16 @@ There is no code in this task. Record each result on the merged Task 1 PR.
   - creating one outside the prefix is denied;
   - removing a boundary is denied.
 
+  The boundary-policy checks are the negative and positive controls for who may change a boundary:
+  - in `stage` and `production`, `iam:CreatePolicyVersion`, `iam:DeletePolicyVersion` and `iam:DeletePolicy` on both boundary ARNs are denied;
+  - in `infrastructure`, a non-default version is created and deleted on both, and `iam create-policy` for any other name is denied.
+
 ### Task 6: `run-integration-tests.yml` on the integration role
 
 **Files:**
 - Modify: `.github/workflows/run-integration-tests.yml:18-37`
+
+Line numbers in this task are at `origin/main`. Task 11 runs first and adds a `workflow_call` trigger under `on:`, which moves them down by the lines it adds.
 
 - [ ] **Step 1: Bind the job and switch the role**
 
@@ -717,11 +716,12 @@ There is no code in this task. Record each result on the merged Task 1 PR.
   git commit -m "ci: deploy stage with an OIDC role"
   ```
 
-### Task 8: `deploy-prod.yml`, `environment.yml` and `bootstrap.yml`
+### Task 8: `deploy-prod.yml` and `bootstrap.yml`
+
+`environment.yml` moved to the infra role in Task 11.
 
 **Files:**
 - Modify: `.github/workflows/deploy-prod.yml:9-10` and `:83-88`
-- Modify: `.github/workflows/environment.yml:4-5`, `:19-20` and `:28-33`
 - Modify: `.github/workflows/bootstrap.yml:3-4`, `:22-23` and `:31-36`
 
 **Precondition:** a release containing Tasks 3 and 4 has deployed to prod. A trust-check run with `expect-boundary: all` is green, which means every prod function role carries the prod boundary.
@@ -730,7 +730,7 @@ There is no code in this task. Record each result on the merged Task 1 PR.
 
   Workflow `permissions: {contents: read, id-token: write}`. The credentials step uses `...-deploy-prod`, followed by "Show assumed role".
 
-- [ ] **Step 2: `environment.yml` and `bootstrap.yml`**
+- [ ] **Step 2: `bootstrap.yml`**
 
   - Workflow `permissions: {contents: read, id-token: write}`.
   - The job gains `environment: infrastructure`.
@@ -744,19 +744,18 @@ There is no code in this task. Record each result on the merged Task 1 PR.
 
 - [ ] **Step 4: Open the PR; after merge, validate with explicit go per run**
 
-  1. `environment.yml` with `stage`, then with `prod`. Expected: green, with "No changes to deploy", naming `...-infra`.
-  2. The next published `v*` release runs `deploy-prod`. Expected: green, naming `...-deploy-prod`, with the distribution guard passing.
+  1. The next published `v*` release runs `deploy-prod`. Expected: green, naming `...-deploy-prod`, with the distribution guard passing.
 
   Release timing is not part of this plan.
 
 - [ ] **Step 5: Commit**
 
   ```bash
-  git add .github/workflows/deploy-prod.yml .github/workflows/environment.yml .github/workflows/bootstrap.yml
-  git commit -m "ci: prod and infrastructure stacks use OIDC roles"
+  git add .github/workflows/deploy-prod.yml .github/workflows/bootstrap.yml
+  git commit -m "ci: prod and bootstrap stacks use OIDC roles"
   ```
 
-### Task 9: Docs, including the self-hosted path and the boundary rule
+### Task 9: Docs, including the self-hosted path and the function boundary
 
 **Files:**
 - Modify: `README.md:146-153`
@@ -778,7 +777,7 @@ There is no code in this task. Record each result on the merged Task 1 PR.
   1. Create the account's GitHub OIDC identity provider, `token.actions.githubusercontent.com` with audience `sts.amazonaws.com`.
   2. With administrator credentials of your own, deploy once, from your machine or the CloudFormation console:
      - `activity-bootstrap`;
-     - `activity-environment-stage` and `activity-environment-prod`;
+     - `activity-environment-stage` and `activity-environment-prod`, with `CAPABILITY_NAMED_IAM`, which also creates each stage's function boundary;
      - `activity-oidc/template.yaml`, with `GitHubOrg`, `GitHubRepo`, `GitHubOrgId` and `GitHubRepoId` set to your fork's values and `AllowDistributionCreate=true`.
 
      Give the exact `sam deploy` commands the workflows use. Retained data stores are created once this way; the CI roles never create them.
@@ -793,17 +792,18 @@ There is no code in this task. Record each result on the merged Task 1 PR.
   - Each "Required secrets" block names the role the workflow assumes, its environment, and `AWS_ACCOUNT_ID`.
   - The `deploy-stage` section says `integration-tests` takes the stage URLs from the deploy job's outputs and holds no AWS credential.
   - Line 154 notes that the prod token read requires the `integration` environment.
-  - Add a section on `oidc-roles.yml`, `oidc-trust-check.yml` and the `function-boundary` PR check.
+  - Add a section on `oidc-roles.yml` and `oidc-trust-check.yml`.
+  - The `environment.yml` section says it runs on the infra role, deploys the stage's function boundary, and for `stage` runs the integration tests afterwards.
 
 - [ ] **Step 4: `AWSPermissions.md`**
 
   Add a "CI roles and the function boundary" section. It states:
-  - `activity-oidc/template.yaml` is the authoritative list.
-  - **Widen the boundary first.** To give a function a new permission, change `StageFunctionBoundary` and `ProdFunctionBoundary` in `activity-oidc/template.yaml`, merge, and run `oidc-roles.yml`. Only then merge the change to `activity-app/functions/template.yaml`.
-    - A function permission outside the boundary deploys green and fails with `AccessDenied` at runtime, on stage first and in prod after the next release.
-    - The `function-boundary` PR check compares against both boundaries as committed, not as deployed, so the order of merges and the `oidc-roles.yml` run is what protects production.
-    - The check does not compare conditions. For example, the boundary allows `kms:Decrypt` only through SSM (`kms:ViaService`). A function that calls KMS directly would pass the check and fail at runtime.
-  - Removing the boundary after the static keys are gone needs a role-stack change (Task 3 Step 4).
+  - `activity-oidc/template.yaml` is the authoritative list for the CI roles. The function boundary is `FunctionBoundary` in `activity-environment/template.yaml`, one per stage, deployed by `environment.yml` on the infra role.
+  - **A function permission outside the boundary deploys green and fails with `AccessDenied` when the handler runs.** Stage's post-deploy integration tests are what detect it, before a release reaches prod. They run after every `deploy-stage` run that changes the functions template, and after every `environment.yml` run for `stage`.
+  - **What the tests don't reach.** Copy D5's list of handlers the stage tests don't call, and the handlers covered only in part. A gap there passes stage and shows up only as `AccessDenied` in that function's logs when traffic reaches it.
+  - The boundary allows `kms:Decrypt` only through SSM (`kms:ViaService`). A function that calls KMS directly fails at runtime, and the tests catch it only on a path they exercise.
+  - **To change a boundary**, edit `FunctionBoundary`, merge, run `environment.yml` for `stage`, and run it for `prod` only after the stage run's `integration-tests` job is green.
+  - Removing the boundary after the static keys are gone needs an infra-role or role-stack change (Task 3 Step 4).
 
   The existing per-service lists remain the guide for an administrator's one-time deploy.
 
@@ -848,6 +848,112 @@ There is no code in this task. Record each result on the merged Task 1 PR.
 
 **Not in this plan:** the access key the deleted secrets held. Rotating or deactivating it is an IAM write and a separate decision (Q7).
 
+### Task 11: Function boundaries in the environment stacks, deployed by the infra role
+
+This task runs after Task 2 Steps 4–6 and before Task 3 (see Execution order).
+
+**Why the environment stack.** The boundaries need a stack the infra role deploys. `activity-environment-<stage>` is the smallest change:
+- it already exists once per stage;
+- the infra role already deploys it through an existing workflow;
+- it defines the table, queue and bucket the boundary is scoped to, so the boundary can name them with `!GetAtt` instead of rebuilding the names;
+- one resource definition, substituted by `Stage`, yields both boundaries, so they differ only by stage.
+
+A new stack would add a template, a workflow and a stack name to the infra role's grant, and it would buy nothing.
+
+**Files:**
+- Modify: `activity-environment/template.yaml`: a new resource `FunctionBoundary` after `DLQAlarm` (lines 101–120) and before `Outputs` (line 122)
+- Modify: `activity-environment/samconfig.toml:7`
+- Modify: `.github/workflows/environment.yml:4-5`, `:19-20`, `:28-33` and `:43`, plus a new job
+- Modify: `.github/workflows/run-integration-tests.yml:3-12`
+
+**Interfaces:**
+- Produces: the managed policy `activity-app-<stage>-function-boundary` in stack `activity-environment-<stage>`, with the ARN `arn:aws:iam::<A>:policy/activity-app-<stage>-function-boundary` that A.1's `<B>` names.
+- Consumes: the infra role and its `FunctionBoundaries` statement (A.2), deployed in Task 2 Step 4.
+
+- [ ] **Step 1: Add `FunctionBoundary`**
+
+  ```yaml
+  FunctionBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "activity-app-${Stage}-function-boundary"
+      Description: !Sub "Permissions boundary for the activity-app-${Stage} function roles"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement: # Appendix A.5
+  ```
+
+  The statements are those in A.5. The table is `!GetAtt ActorsTable.Arn` and `!Sub "${ActorsTable.Arn}/index/*"`, the queue is `!GetAtt DeliveryQueue.Arn`, and the media objects are `!Sub "${MediaBucket.Arn}/*"`. The resource sets no `Roles`, `Groups` or `Users`, so the policy is attached to nothing; it is used only as a boundary. It sets no tags, because the registry schema marks the type not taggable (D3.2).
+
+- [ ] **Step 2: `CAPABILITY_NAMED_IAM`**
+
+  A managed policy with a custom name requires `CAPABILITY_NAMED_IAM` (CloudFormation API reference, `CreateStack`, `Capabilities`: "If you have IAM resources with custom names, you must specify CAPABILITY_NAMED_IAM"). Change `--capabilities CAPABILITY_IAM` to `CAPABILITY_NAMED_IAM` in `environment.yml:43`, and `capabilities` in `activity-environment/samconfig.toml:7` to match.
+
+- [ ] **Step 3: `environment.yml` on the infra role**
+
+  - Workflow `permissions: {contents: read, id-token: write}` (lines 4–5).
+  - Job `deploy` gains `environment: infrastructure`.
+  - The credentials step (lines 28–33) becomes the pinned `configure-aws-credentials` from Task 4, with `role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/FederatedActivityPublisher-github-actions-infra` and the existing `aws-region`, followed by "Show assumed role".
+  - A new job runs the stage integration tests after every stage deploy, because a boundary change is a change to every stage function's permissions:
+
+    ```yaml
+    integration-tests:
+      needs: deploy
+      if: inputs.stage == 'stage'
+      uses: ./.github/workflows/run-integration-tests.yml
+      with:
+        environment: stage
+      secrets: inherit
+    ```
+
+    Receipts are GitHub docs, "Reusing workflows": a reusable workflow in the same repository is referenced as `./.github/workflows/<file>`, and `secrets: inherit` passes the caller's secrets. Until Task 6, the called job reads stage outputs with the static keys it inherits. After Task 6 it binds to `integration` and assumes the integration role. The caller's `id-token: write` lets it do that.
+
+- [ ] **Step 4: Make `run-integration-tests.yml` callable**
+
+  Under `on:` (lines 3–12), add:
+
+  ```yaml
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+  ```
+
+  The `workflow_dispatch` input stays a `choice`. `workflow_call` inputs take only `boolean`, `number` or `string` (GitHub docs, "Workflow syntax for GitHub Actions", `on.workflow_call.inputs.<input_id>.type`). The job reads `inputs.environment` the same way under both triggers.
+
+- [ ] **Step 5: Check the boundary size**
+
+  Minify each stage's document with the Task 1 Step 2 placeholders. Expected: each under 6,144 characters. Computed from A.5 on 2026-10-27: 1,569 for stage and 1,562 for prod. Record the measured numbers in the PR body.
+
+- [ ] **Step 6: Open the PR; after merge, validate with explicit go per run**
+
+  The merge changes `.github/`, so `deploy-stage` runs its full path on the static keys. Expected: green.
+
+  1. `environment.yml` with `stage`.
+     - Expected: green. "Show assumed role" names `...-infra`.
+     - The change set adds `FunctionBoundary`, creating `activity-app-stage-function-boundary`.
+     - `integration-tests` runs and is green. The function roles do not carry the boundary yet, so this run checks the plumbing only.
+  2. Then `environment.yml` with `prod`.
+     - Expected: green, creating `activity-app-prod-function-boundary`.
+     - `integration-tests` is skipped.
+
+  On a failure, a maintainer reads the stack events. An `AccessDenied` there names the missing IAM action (U13, Q14). Stop and decide; do not change a grant on the strength of the log alone.
+
+- [ ] **Step 7: Trust check**
+
+  Run `oidc-trust-check.yml` from `main` with `expect-boundary: none`. Expected:
+  - the boundary-policy denials pass in `stage` and `production`;
+  - the boundary-policy positive control passes on both policies in `infrastructure`, with no `NoSuchEntity`;
+  - the `stage` job's boundary-create positive control now succeeds.
+
+- [ ] **Step 8: Commit**
+
+  ```bash
+  git add activity-environment/template.yaml activity-environment/samconfig.toml .github/workflows/environment.yml .github/workflows/run-integration-tests.yml
+  git commit -m "infra: function boundaries in the environment stacks"
+  ```
+
 ---
 
 ## Open questions
@@ -861,10 +967,10 @@ There is no code in this task. Record each result on the merged Task 1 PR.
 - **Q7: The access key behind the deleted secrets.** Rotate, deactivate or leave it? This is a separate IAM-write decision.
 - **Q8: Role names.** Are the five names acceptable?
 - **Q9: `v*` tag ruleset bypass list.** Who may create, move and delete release tags? Recommendation: the repository admin role only. Whoever cuts the release that carries Tasks 3 and 4 to prod, which Task 8 requires, must be on that bypass list.
-- **Q10: Required reviewers.** Add required reviewers to `production`, `infrastructure` and `oidc-bootstrap`? Recommendation: yes for `oidc-bootstrap` and `infrastructure`; for `production`, it is a release-flow decision.
+- **Q10: Required reviewers.** Add required reviewers to `production`, `infrastructure` and `oidc-bootstrap`? Recommendation: yes for `oidc-bootstrap` and `infrastructure`; for `production`, it is a release-flow decision. `infrastructure` now also gates every change to the function boundaries (Task 11).
 - **Q11: Split build and deploy jobs.** Splitting would mean the jobs that hold `id-token: write` run no build steps at all; artifacts would pass between jobs. With SHA pins and a token-free build container, the remaining exposure is GitHub-owned actions. Recommendation: not now.
-- **Q12: The one-time role-stack credential.** The one-time role-stack deploy needs a credential that can create the two stage boundary managed policies. How that credential is provided is decided outside this plan.
-- **Q13: `python3-yaml` in PR CI.** The boundary check installs the distro package `python3-yaml` (PyYAML) with `apt-get`, the same package manager `test.yml` already uses. It is not on a security path: the job parses this repository's own templates and holds no secrets. It still needs an explicit maintainer decision before Task 1. Accept it, or write the check against a YAML parser already in the build?
+- **Q12: The one-time role-stack credential. Settled 2026-10-27.** The role stack contains only IAM roles with inline policies. The two boundary managed policies come from the infra role's deploys of `activity-environment-stage` and `activity-environment-prod` (Task 11), not from the role stack. Recomputed inline sizes are in Task 1 Step 2 and boundary sizes in Task 11 Step 5. How the role-stack credential is provided is decided outside this plan.
+- **Q14: `iam:ListEntitiesForPolicy` for the infra role.** The settled grant for the boundary policies has eight actions. The registry's `read` and `delete` handlers for `AWS::IAM::ManagedPolicy` also list `iam:ListEntitiesForPolicy` (D3.2). If CloudFormation calls it during the create in Task 11 Step 6, that run fails safe with `AccessDenied` on stage. Add `iam:ListEntitiesForPolicy` on the same two ARNs before Task 1 merges, or keep the eight and let Task 11 Step 6 measure it? Recommendation: add it, since the registry is the derivation rule in D3.
 
 ## Unverified premises, and what measures each
 
@@ -878,10 +984,10 @@ There is no code in this task. Record each result on the merged Task 1 PR.
 | U6 | The SAM managed bucket's encryption needs no KMS permission for `PutObject`. | Task 7 Step 4 |
 | U7 | The CloudFormation handlers call nothing outside Appendix A for these templates. That includes the event-source-mapping delete and rollback path, which calls update and delete for a mapping that may already be gone. | Each validation run; for CloudFront, the first CDN change; for the mapping delete path, the first stack rollback or mapping removal |
 | U8 | Each action in Appendix A supports the resource ARN it is granted on. The catalog confirms names, not resource types. | `AccessDenied` in a validation run names the action and ARN |
-| U9 | The boundary, including `kms:Decrypt` conditioned on `kms:ViaService`, keeps every function working. | Task 3 Step 2: integration tests and one hour of Lambda error counts |
+| U9 | The boundary, including `kms:Decrypt` conditioned on `kms:ViaService`, keeps every function working. | Task 3 Step 2: integration tests and one hour of Lambda error counts. The tests reach only the handlers and paths D5 names as covered. |
 | U10 | `--force-upload` on `sam package` with `--s3-prefix` re-uploads every artifact each time. | Task 4 Step 4 log |
 | U11 | CloudFormation needs no `lambda:TagResource` on an event source mapping when the template sets no tags. | Task 7 Step 4 |
-| U12 | The runner images used by `test.yml` can install `python3` and `python3-yaml` with `apt-get`. | Task 1 Step 6 |
+| U13 | The infra role's grant on the two boundary ARNs (A.2 `FunctionBoundaries`) is enough for CloudFormation to create and update `AWS::IAM::ManagedPolicy` (Q14). | Task 11 Step 6, on stage first |
 
 ---
 
@@ -940,8 +1046,11 @@ Placeholders:
 | `AlarmRead` | `cloudwatch:DescribeAlarms` | `*` |
 | `BootstrapZone` | `route53:` `GetHostedZone`, `GetChange`, `ListTagsForResource`, `ChangeTagsForResource`, `UpdateHostedZoneComment`, `UpdateHostedZoneFeatures`, `CreateQueryLoggingConfig`, `DeleteQueryLoggingConfig`, `ListQueryLoggingConfigs` | `arn:aws:route53:::hostedzone/<Zone>`, and `change/*` for `GetChange` |
 | `BootstrapCertificate` | `acm:` `DescribeCertificate`, `ListTagsForCertificate`, `AddTagsToCertificate`, `RemoveTagsFromCertificate`, `UpdateCertificateOptions` | the import of `${BootstrapStackName}-CertificateArn` |
+| `FunctionBoundaries` | `iam:` `CreatePolicy`, `CreatePolicyVersion`, `DeletePolicyVersion`, `DeletePolicy`, `GetPolicy`, `GetPolicyVersion`, `ListPolicyVersions`, `TagPolicy` | `arn:aws:iam::<A>:policy/activity-app-stage-function-boundary`, `arn:aws:iam::<A>:policy/activity-app-prod-function-boundary` |
 
 The SNS topic and the alarm are not retained, so they keep create and delete. The table, bucket and queues get neither.
+
+`FunctionBoundaries` is the only managed-policy write grant on any of the five roles. A.1 grants the deploy roles none of `iam:CreatePolicy`, `iam:CreatePolicyVersion`, `iam:DeletePolicyVersion`, `iam:DeletePolicy` or `iam:SetDefaultPolicyVersion`, so neither deploy role can change its stage's boundary. Their role-write actions stay conditioned on `iam:PermissionsBoundary` (`FunctionRolesBounded`, `FunctionRoleManagedPolicies`).
 
 ### A.3 Integration role (`...-integration-read`)
 
@@ -961,7 +1070,7 @@ The role is read-only. It is used only by `oidc-trust-check.yml`'s `inventory` j
 | `ReadAppRoles` | `iam:GetRole` | `arn:aws:iam::<A>:role/activity-app-stage-*`, `arn:aws:iam::<A>:role/activity-app-prod-*` |
 | `AppStacks` | `cloudformation:` `DescribeStacks`, `DescribeStackResource`, `ListStackResources`, `GetTemplate` | `stack/activity-app-stage/*`, `stack/activity-app-stage-*/*`, `stack/activity-app-prod/*`, `stack/activity-app-prod-*/*` |
 
-### A.5 Function boundaries (`activity-app-<S>-function-boundary`)
+### A.5 Function boundaries (`activity-app-<S>-function-boundary`, resource `FunctionBoundary` in `activity-environment-<S>`)
 
 | Sid | Actions | Resource | Condition |
 |---|---|---|---|
