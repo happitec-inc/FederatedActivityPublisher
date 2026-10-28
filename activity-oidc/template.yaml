@@ -180,6 +180,9 @@ Resources:
                   - iam:PutRolePolicy
                   - iam:DeleteRolePolicy
                   - iam:PutRolePermissionsBoundary
+                  - iam:DeleteRole
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
                 Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-stage-*
                 Condition:
                   StringEquals:
@@ -204,9 +207,6 @@ Resources:
                   - iam:GetRolePolicy
                   - iam:ListRolePolicies
                   - iam:ListAttachedRolePolicies
-                  - iam:DeleteRole
-                  - iam:UpdateRole
-                  - iam:UpdateRoleDescription
                   - iam:TagRole
                   - iam:UntagRole
                   - iam:ListRoleTags
@@ -460,6 +460,9 @@ Resources:
                   - iam:PutRolePolicy
                   - iam:DeleteRolePolicy
                   - iam:PutRolePermissionsBoundary
+                  - iam:DeleteRole
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
                 Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/activity-app-prod-*
                 Condition:
                   StringEquals:
@@ -484,9 +487,6 @@ Resources:
                   - iam:GetRolePolicy
                   - iam:ListRolePolicies
                   - iam:ListAttachedRolePolicies
-                  - iam:DeleteRole
-                  - iam:UpdateRole
-                  - iam:UpdateRoleDescription
                   - iam:TagRole
                   - iam:UntagRole
                   - iam:ListRoleTags
