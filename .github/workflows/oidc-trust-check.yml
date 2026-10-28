@@ -1,0 +1,501 @@
+name: OIDC Trust Check
+
+# Measures the OIDC role stack from both sides: each role is assumable only
+# from its own environment, each assumed role is denied what it must not do,
+# and the inventory lists the function roles' trust and boundaries.
+#
+# This workflow deliberately binds jobs to every environment in one run. A
+# check that each role refuses every other environment's subject cannot work
+# otherwise. It is the one exception to keeping one environment per workflow.
+#
+# It shares the function-boundary concurrency group with environment.yml, so
+# the boundary-policy positive control never runs during a boundary deploy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      expect-boundary:
+        description: "Which stages' function roles must carry their boundary"
+        required: false
+        type: choice
+        default: none
+        options:
+          - none
+          - stage
+          - all
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: function-boundary
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  EXPECT_BOUNDARY: ${{ inputs.expect-boundary || 'none' }}
+  # Shared shell helpers, loaded with eval in every check step. Every AWS call
+  # sends stdout to /dev/null or into a variable that is never printed whole;
+  # only the error code of a failed call is kept.
+  TRUST_CHECK_LIB: |
+    FAILS=0
+    fail() { echo "::error::$*"; FAILS=$((FAILS + 1)); }
+    ok() { echo "ok: $*"; }
+    note() { echo "::notice::$*"; }
+    err_code() { sed -n 's/.*An error occurred (\([^)]*\)).*/\1/p' "$RUNNER_TEMP/err" | head -n 1; }
+    run() { "$@" > /dev/null 2> "$RUNNER_TEMP/err"; }
+    finish() {
+      if [ "$FAILS" -gt 0 ]; then echo "$FAILS check(s) failed"; exit 1; fi
+      echo "all checks passed"
+    }
+    expect_denied() {
+      local label="$1" code
+      shift
+      if run "$@"; then fail "$label: allowed, expected AccessDenied"; return 0; fi
+      code="$(err_code)"
+      case "$code" in
+        AccessDenied|AccessDeniedException) ok "$label: denied" ;;
+        *) fail "$label: expected AccessDenied, got ${code:-an error without a code}" ;;
+      esac
+    }
+    expect_allowed() {
+      local label="$1"
+      shift
+      if run "$@"; then ok "$label: allowed"; else fail "$label: expected success, got $(err_code)"; fi
+    }
+    role_arn() { echo "arn:aws:iam::${AWS_ACCOUNT_ID}:role/FederatedActivityPublisher-github-actions-$1"; }
+    boundary_arn() { echo "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/activity-app-$1-function-boundary"; }
+    lines() { tr '\t' '\n' | sed '/^$/d; /^None$/d'; }
+    DENY_ALL='{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"*","Resource":"*"}]}'
+    LAMBDA_TRUST="$RUNNER_TEMP/lambda-trust.json"
+    printf '%s' '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}' > "$LAMBDA_TRUST"
+
+    # Hand-rolled so AccessDenied can be told apart from any other failure.
+    deny_assumes() {
+      local token r
+      token="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+        "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+        | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')"
+      if [ -z "$token" ]; then fail "could not obtain an OIDC token"; return 0; fi
+      echo "::add-mask::$token"
+      printf '%s' "$token" > "$RUNNER_TEMP/oidc-token"
+      for r in "$@"; do
+        expect_denied "assume $r" aws sts assume-role-with-web-identity \
+          --role-arn "$(role_arn "$r")" \
+          --role-session-name oidc-trust-check \
+          --web-identity-token "file://$RUNNER_TEMP/oidc-token"
+      done
+      rm -f "$RUNNER_TEMP/oidc-token"
+    }
+
+    # Deploy roles hold no managed-policy write action, so every call is denied
+    # whether or not the boundary exists yet.
+    deny_boundary_writes() {
+      local s b out code
+      for s in stage prod; do
+        b="$(boundary_arn "$s")"
+        if out="$(aws iam create-policy-version --policy-arn "$b" --policy-document "$DENY_ALL" \
+            --query PolicyVersion.VersionId --output text 2> "$RUNNER_TEMP/err")"; then
+          fail "create-policy-version on the $s boundary: allowed, created non-default version $out; a maintainer decides how to remove it"
+        else
+          code="$(err_code)"
+          case "$code" in
+            AccessDenied) ok "create-policy-version on the $s boundary: denied" ;;
+            *) fail "create-policy-version on the $s boundary: expected AccessDenied, got ${code:-an error without a code}" ;;
+          esac
+        fi
+        expect_denied "set-default-policy-version on the $s boundary" \
+          aws iam set-default-policy-version --policy-arn "$b" --version-id v1
+        expect_denied "delete-policy-version on the $s boundary" \
+          aws iam delete-policy-version --policy-arn "$b" --version-id v1
+        expect_denied "delete-policy on the $s boundary" \
+          aws iam delete-policy --policy-arn "$b"
+      done
+    }
+
+jobs:
+  no-environment:
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    steps:
+      - name: Every role refuses a job without an environment
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          deny_assumes deploy-stage deploy-prod infra integration-read trust-check
+          finish
+
+  stage:
+    environment: stage
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    steps:
+      - name: Other roles refuse environment stage
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          deny_assumes deploy-prod infra integration-read trust-check
+          finish
+
+      - name: Assume the stage deploy role
+        id: assume
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/FederatedActivityPublisher-github-actions-deploy-stage
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Scope checks
+        if: ${{ !cancelled() && steps.assume.outcome == 'success' }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          expect_denied "describe-stacks activity-app-prod" \
+            aws cloudformation describe-stacks --stack-name activity-app-prod
+          expect_denied "ssm get-parameter /activity/prod/keys/client-token" \
+            aws ssm get-parameter --name /activity/prod/keys/client-token
+          expect_denied "iam list-roles" \
+            aws iam list-roles --max-items 1
+          finish
+
+      - name: Boundary checks
+        if: ${{ !cancelled() && steps.assume.outcome == 'success' }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          CHECK=activity-app-stage-oidc-check
+          expect_denied "create-role without a boundary" \
+            aws iam create-role --role-name "$CHECK-unbounded" \
+              --assume-role-policy-document "file://$LAMBDA_TRUST"
+          expect_denied "create-role with the prod boundary" \
+            aws iam create-role --role-name "$CHECK-prod-boundary" \
+              --assume-role-policy-document "file://$LAMBDA_TRUST" \
+              --permissions-boundary "$(boundary_arn prod)"
+          expect_denied "create-role outside the prefix" \
+            aws iam create-role --role-name FederatedActivityPublisher-github-actions-oidc-check \
+              --assume-role-policy-document "file://$LAMBDA_TRUST" \
+              --permissions-boundary "$(boundary_arn stage)"
+
+          # Positive control: the stage boundary is the one grant that works.
+          if run aws iam create-role --role-name "$CHECK-bounded" \
+              --assume-role-policy-document "file://$LAMBDA_TRUST" \
+              --permissions-boundary "$(boundary_arn stage)"; then
+            ok "create-role with the stage boundary: allowed"
+            expect_denied "delete-role-permissions-boundary" \
+              aws iam delete-role-permissions-boundary --role-name "$CHECK-bounded"
+            expect_allowed "delete-role" \
+              aws iam delete-role --role-name "$CHECK-bounded"
+          else
+            code="$(err_code)"
+            if [ "$code" = NoSuchEntity ] && [ "$EXPECT_BOUNDARY" = none ]; then
+              note "create-role with the stage boundary: NoSuchEntity, the stage boundary policy does not exist yet (reported, not failed)"
+            else
+              fail "create-role with the stage boundary: expected success, got ${code:-an error without a code}"
+            fi
+          fi
+          finish
+
+      - name: Boundary-policy denials
+        if: ${{ !cancelled() && steps.assume.outcome == 'success' }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          deny_boundary_writes
+          finish
+
+      - name: Remove check roles
+        if: ${{ always() && steps.assume.outcome == 'success' }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          for r in activity-app-stage-oidc-check-unbounded \
+                   activity-app-stage-oidc-check-prod-boundary \
+                   activity-app-stage-oidc-check-bounded \
+                   FederatedActivityPublisher-github-actions-oidc-check; do
+            if run aws iam get-role --role-name "$r"; then
+              if run aws iam delete-role --role-name "$r"; then
+                echo "removed $r"
+              else
+                fail "could not remove $r: $(err_code)"
+              fi
+            else
+              code="$(err_code)"
+              case "$code" in
+                NoSuchEntity) ;;
+                *) note "$r: get-role returned ${code:-an error without a code}; not removed" ;;
+              esac
+            fi
+          done
+          finish
+
+  production:
+    environment: production
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    steps:
+      - name: Other roles refuse environment production
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          deny_assumes deploy-stage infra integration-read trust-check
+          finish
+
+      - name: Assume the prod deploy role
+        id: assume
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/FederatedActivityPublisher-github-actions-deploy-prod
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Scope checks
+        if: ${{ !cancelled() && steps.assume.outcome == 'success' }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          expect_denied "describe-stacks activity-app-stage" \
+            aws cloudformation describe-stacks --stack-name activity-app-stage
+          expect_denied "iam list-roles" \
+            aws iam list-roles --max-items 1
+          finish
+
+      - name: Boundary-policy denials
+        if: ${{ !cancelled() && steps.assume.outcome == 'success' }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          deny_boundary_writes
+          finish
+
+  infrastructure:
+    environment: infrastructure
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    steps:
+      - name: Other roles refuse environment infrastructure
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          deny_assumes deploy-stage deploy-prod integration-read trust-check
+          finish
+
+      - name: Assume the infra role
+        id: assume
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/FederatedActivityPublisher-github-actions-infra
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Scope checks
+        if: ${{ !cancelled() && steps.assume.outcome == 'success' }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          expect_denied "describe-stacks activity-app-prod" \
+            aws cloudformation describe-stacks --stack-name activity-app-prod
+          expect_denied "create-policy activity-app-oidc-check-policy" \
+            aws iam create-policy --policy-name activity-app-oidc-check-policy \
+              --policy-document "$DENY_ALL"
+          finish
+
+      - name: Boundary-policy positive control
+        if: ${{ !cancelled() && steps.assume.outcome == 'success' }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          for s in stage prod; do
+            b="$(boundary_arn "$s")"
+            if ! v="$(aws iam get-policy --policy-arn "$b" \
+                --query Policy.DefaultVersionId --output text 2> "$RUNNER_TEMP/err")"; then
+              code="$(err_code)"
+              if [ "$code" = NoSuchEntity ] && [ "$EXPECT_BOUNDARY" = none ]; then
+                note "get-policy on the $s boundary: NoSuchEntity, the policy does not exist yet (reported, not failed)"
+              else
+                fail "get-policy on the $s boundary: expected success, got ${code:-an error without a code}"
+              fi
+              continue
+            fi
+            ok "get-policy on the $s boundary: default version $v"
+            if ! aws iam get-policy-version --policy-arn "$b" --version-id "$v" \
+                --query PolicyVersion.Document --output json \
+                > "$RUNNER_TEMP/boundary-$s.json" 2> "$RUNNER_TEMP/err"; then
+              fail "get-policy-version $v on the $s boundary: expected success, got $(err_code)"
+              continue
+            fi
+            # Same document, not set as default: the effective boundary does not change.
+            if ! new="$(aws iam create-policy-version --policy-arn "$b" \
+                --policy-document "file://$RUNNER_TEMP/boundary-$s.json" \
+                --query PolicyVersion.VersionId --output text 2> "$RUNNER_TEMP/err")"; then
+              code="$(err_code)"
+              if [ "$code" = LimitExceeded ]; then
+                fail "create-policy-version on the $s boundary: LimitExceeded, the policy is already at the version limit"
+              else
+                fail "create-policy-version on the $s boundary: expected success, got ${code:-an error without a code}"
+              fi
+              continue
+            fi
+            echo "$new" > "$RUNNER_TEMP/new-version-$s"
+            ok "create-policy-version on the $s boundary: created non-default version $new"
+            expect_allowed "delete-policy-version $new on the $s boundary" \
+              aws iam delete-policy-version --policy-arn "$b" --version-id "$new"
+          done
+          finish
+
+      - name: Remove check policy versions
+        if: ${{ always() && steps.assume.outcome == 'success' }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          for s in stage prod; do
+            f="$RUNNER_TEMP/new-version-$s"
+            [ -f "$f" ] || continue
+            v="$(cat "$f")"
+            if run aws iam delete-policy-version --policy-arn "$(boundary_arn "$s")" --version-id "$v"; then
+              echo "removed $v from the $s boundary"
+            elif [ "$(err_code)" = NoSuchEntity ]; then
+              echo "$v on the $s boundary was already removed"
+            else
+              fail "delete-policy-version $v on the $s boundary: $(err_code)"
+            fi
+          done
+          finish
+
+  integration:
+    environment: integration
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    steps:
+      - name: Other roles refuse environment integration
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          deny_assumes deploy-stage deploy-prod infra trust-check
+          finish
+
+      - name: Assume the integration read role
+        id: assume
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/FederatedActivityPublisher-github-actions-integration-read
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Scope checks
+        if: ${{ !cancelled() && steps.assume.outcome == 'success' }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          expect_denied "describe-stacks activity-environment-prod" \
+            aws cloudformation describe-stacks --stack-name activity-environment-prod
+          finish
+
+  inventory:
+    environment: trust-check
+    runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
+    steps:
+      - name: Other roles refuse environment trust-check
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          deny_assumes deploy-stage deploy-prod infra integration-read
+          finish
+
+      - name: Assume the trust-check role
+        id: assume
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/FederatedActivityPublisher-github-actions-trust-check
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Scope checks
+        if: ${{ !cancelled() && steps.assume.outcome == 'success' }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          expect_denied "create-role activity-app-stage-oidc-check-inventory" \
+            aws iam create-role --role-name activity-app-stage-oidc-check-inventory \
+              --assume-role-policy-document "file://$LAMBDA_TRUST"
+          expect_denied "describe-stacks activity-environment-prod" \
+            aws cloudformation describe-stacks --stack-name activity-environment-prod
+          finish
+
+      - name: Inventory
+        if: ${{ !cancelled() && steps.assume.outcome == 'success' }}
+        env:
+          STAGE_DISTRIBUTION_ID: ${{ vars.ACTIVITY_DISTRIBUTION_ID_STAGE }}
+          PROD_DISTRIBUTION_ID: ${{ vars.ACTIVITY_DISTRIBUTION_ID_PROD }}
+        run: |
+          eval "$TRUST_CHECK_LIB"
+          # Count of trust statements whose principal is not exactly the Lambda
+          # service, and the boundary ARN (None when the role has none).
+          ROLE_QUERY='[length(to_array(Role.AssumeRolePolicyDocument.Statement)[?Principal != `{"Service": "lambda.amazonaws.com"}`]), Role.PermissionsBoundary.PermissionsBoundaryArn]'
+          for s in stage prod; do
+            echo "== activity-app-$s =="
+            case "$s" in
+              stage) want_var=ACTIVITY_DISTRIBUTION_ID_STAGE; want_dist="$STAGE_DISTRIBUTION_ID" ;;
+              prod) want_var=ACTIVITY_DISTRIBUTION_ID_PROD; want_dist="$PROD_DISTRIBUTION_ID" ;;
+            esac
+            enforce=no
+            if [ "$EXPECT_BOUNDARY" = all ] || { [ "$EXPECT_BOUNDARY" = stage ] && [ "$s" = stage ]; }; then
+              enforce=yes
+            fi
+
+            # Role list. The filter runs inside the CLI, so only matching names
+            # leave it; the unfiltered response is never printed or saved.
+            if ! listed="$(aws iam list-roles \
+                --query "Roles[?starts_with(RoleName, 'activity-app-$s-')].RoleName" \
+                --output text 2> "$RUNNER_TEMP/err")"; then
+              fail "list-roles: $(err_code)"
+              continue
+            fi
+            listed="$(printf '%s\n' "$listed" | lines)"
+            echo "roles named activity-app-$s-*: $(printf '%s\n' "$listed" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+            for r in $listed; do
+              if ! res="$(aws iam get-role --role-name "$r" --query "$ROLE_QUERY" \
+                  --output text 2> "$RUNNER_TEMP/err")"; then
+                fail "$r: get-role $(err_code)"
+                continue
+              fi
+              others="$(printf '%s' "$res" | cut -f1)"
+              barn="$(printf '%s' "$res" | cut -f2)"
+              trust=lambda
+              if [ "$others" != 0 ]; then
+                trust=OTHER
+                fail "$r: trusts a principal other than lambda.amazonaws.com"
+              fi
+              case "$barn" in
+                *":policy/activity-app-$s-function-boundary") boundary=yes ;;
+                *) boundary=no ;;
+              esac
+              echo "$r trust=$trust boundary=$boundary"
+              if [ "$boundary" = no ] && [ "$enforce" = yes ]; then
+                fail "$r: does not carry activity-app-$s-function-boundary"
+              fi
+            done
+
+            # Every role in the FunctionsStack must be in the role list.
+            if ! nested="$(aws cloudformation describe-stack-resource --stack-name "activity-app-$s" \
+                --logical-resource-id FunctionsStack \
+                --query StackResourceDetail.PhysicalResourceId --output text 2> "$RUNNER_TEMP/err")"; then
+              fail "describe-stack-resource FunctionsStack of activity-app-$s: $(err_code)"
+            else
+              if ! stack_roles="$(aws cloudformation list-stack-resources --stack-name "$nested" \
+                  --query "StackResourceSummaries[?ResourceType=='AWS::IAM::Role'].PhysicalResourceId" \
+                  --output text 2> "$RUNNER_TEMP/err")"; then
+                fail "list-stack-resources of the activity-app-$s FunctionsStack: $(err_code)"
+              else
+                for sr in $(printf '%s\n' "$stack_roles" | lines); do
+                  if printf '%s\n' "$listed" | grep -qxF -- "$sr"; then
+                    ok "$sr is in the role list"
+                  else
+                    fail "$sr is in the activity-app-$s FunctionsStack but not in the role list"
+                  fi
+                done
+              fi
+
+              # Distinct AWS managed policy ARNs in the processed template.
+              if ! body="$(aws cloudformation get-template --stack-name "$nested" \
+                  --template-stage Processed --query TemplateBody --output json 2> "$RUNNER_TEMP/err")"; then
+                fail "get-template of the activity-app-$s FunctionsStack: $(err_code)"
+              else
+                echo "managed policies:"
+                printf '%s' "$body" \
+                  | { grep -oE 'arn:(aws|\$\{AWS::Partition\}):iam::aws:policy/[A-Za-z0-9/_+=,.@-]+' || true; } \
+                  | sort -u | sed 's/^/  /'
+              fi
+            fi
+
+            # Distribution IDs are not secrets.
+            if ! dist="$(aws cloudformation describe-stacks --stack-name "activity-app-$s" \
+                --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
+                --output text 2> "$RUNNER_TEMP/err")"; then
+              fail "describe-stacks activity-app-$s: $(err_code)"
+            elif [ -n "$dist" ] && [ "$dist" = "$want_dist" ]; then
+              ok "CloudFrontDistributionId of activity-app-$s matches $want_var"
+            else
+              fail "CloudFrontDistributionId of activity-app-$s is '$dist', $want_var is '$want_dist'"
+            fi
+          done
+          finish
