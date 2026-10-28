@@ -1,9 +1,9 @@
 name: Deploy OIDC Role Stack
 
-# Deploys activity-oidc/template.yaml as FederatedActivityPublisher-oidc.
-# Dispatch only, from main, in the oidc-bootstrap environment. The deploy
-# output goes to a file under RUNNER_TEMP and is never printed or uploaded;
-# failure detail is read from the stack events in the CloudFormation console.
+# Deploys activity-oidc/template.yaml as <repository name>-oidc. Dispatch
+# only, from main, in the oidc-bootstrap environment. The deploy output is
+# never printed or uploaded; failure detail is read from the stack events in
+# the CloudFormation console.
 
 on:
   workflow_dispatch:
@@ -22,6 +22,13 @@ concurrency:
   group: oidc-roles
   cancel-in-progress: false
 
+env:
+  REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  GH_OWNER: ${{ github.repository_owner }}
+  GH_OWNER_ID: ${{ github.repository_owner_id }}
+  GH_REPO: ${{ github.event.repository.name }}
+  GH_REPO_ID: ${{ github.repository_id }}
+
 jobs:
   deploy:
     if: github.ref == 'refs/heads/main'
@@ -29,7 +36,9 @@ jobs:
     runs-on: ${{ vars.RUNNER_LABELS_LINUX && fromJSON(vars.RUNNER_LABELS_LINUX) || 'ubuntu-latest' }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Install SAM CLI
         uses: ./.github/actions/setup-sam-portable
@@ -42,41 +51,10 @@ jobs:
 
       - name: Deploy role stack
         env:
-          REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
           STAGE_DISTRIBUTION_ID: ${{ vars.ACTIVITY_DISTRIBUTION_ID_STAGE }}
           PROD_DISTRIBUTION_ID: ${{ vars.ACTIVITY_DISTRIBUTION_ID_PROD }}
           ALLOW_DISTRIBUTION_CREATE: ${{ inputs.allow-distribution-create }}
-        run: |
-          # Values are quoted so an empty variable still reaches CloudFormation
-          # as an empty parameter, which the template's Rules then refuse.
-          if sam deploy \
-              --template-file activity-oidc/template.yaml \
-              --stack-name FederatedActivityPublisher-oidc \
-              --capabilities CAPABILITY_NAMED_IAM \
-              --no-confirm-changeset \
-              --no-fail-on-empty-changeset \
-              --region "$REGION" \
-              --parameter-overrides \
-                "StageDistributionId=\"${STAGE_DISTRIBUTION_ID}\"" \
-                "ProdDistributionId=\"${PROD_DISTRIBUTION_ID}\"" \
-                "AllowDistributionCreate=\"${ALLOW_DISTRIBUTION_CREATE}\"" \
-              > "$RUNNER_TEMP/deploy.log" 2>&1; then
-            echo "role stack: ok"
-          else
-            echo "role stack: failed (see the stack events in the CloudFormation console)"
-            exit 1
-          fi
+        run: scripts/oidc/deploy-role-stack.sh
 
       - name: Role names
-        env:
-          REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-        run: |
-          {
-            echo "## Role stack outputs"
-            echo '```json'
-            aws cloudformation describe-stacks \
-              --stack-name FederatedActivityPublisher-oidc \
-              --query "Stacks[0].Outputs" \
-              --region "$REGION"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+        run: scripts/oidc/role-stack-outputs.sh
